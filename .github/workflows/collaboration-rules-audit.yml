@@ -30,19 +30,20 @@ jobs:
           EVENT_TIMESTAMP: ${{ github.event.head_commit.timestamp || '' }}
         run: |
           CURRENT_DATE="${EVENT_TIMESTAMP:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
+          if [ -d "$RULES_FILE" ]; then
+            echo "Expected $RULES_FILE to be a regular file, but found a directory instead." >&2
+            exit 1
+          fi
+          if [ -L "$RULES_FILE" ]; then
+            echo "Expected $RULES_FILE to be a regular file, but found a symlink instead." >&2
+            exit 1
+          fi
+          if [ -e "$RULES_FILE" ] && [ ! -f "$RULES_FILE" ]; then
+            echo "Expected $RULES_FILE to be a regular file, but found a non-regular file instead." >&2
+            exit 1
+          fi
           if [ ! -f "$RULES_FILE" ]; then
-            if [ -e "$RULES_FILE" ]; then
-              if [ -d "$RULES_FILE" ]; then
-                FILE_TYPE="directory"
-              elif [ -L "$RULES_FILE" ]; then
-                FILE_TYPE="symlink"
-              else
-                FILE_TYPE="non-regular file"
-              fi
-              echo "Expected $RULES_FILE to be a regular file, but found a $FILE_TYPE instead." >&2
-            else
-              echo "Expected $RULES_FILE to exist after checkout. This indicates a workflow configuration issue." >&2
-            fi
+            echo "Expected $RULES_FILE to exist after checkout. This indicates a workflow configuration issue." >&2
             exit 1
           fi
           if [ ! -r "$RULES_FILE" ]; then
