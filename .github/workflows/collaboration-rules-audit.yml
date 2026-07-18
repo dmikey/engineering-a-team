@@ -30,12 +30,12 @@ jobs:
           EVENT_TIMESTAMP: ${{ github.event.head_commit.timestamp || '' }}
         run: |
           CURRENT_DATE="${EVENT_TIMESTAMP:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
-          if [ ! -e "$RULES_FILE" ]; then
-            echo "Expected $RULES_FILE to exist after checkout. This indicates a workflow configuration issue." >&2
-            exit 1
-          fi
           if [ ! -f "$RULES_FILE" ]; then
-            echo "Expected $RULES_FILE to be a regular file, but it is not." >&2
+            if [ -e "$RULES_FILE" ]; then
+              echo "Expected $RULES_FILE to be a regular file, but it is not." >&2
+            else
+              echo "Expected $RULES_FILE to exist after checkout. This indicates a workflow configuration issue." >&2
+            fi
             exit 1
           fi
           if [ ! -r "$RULES_FILE" ]; then
