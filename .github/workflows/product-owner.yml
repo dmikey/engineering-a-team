@@ -1,0 +1,505 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Product Owner Agent — Alex
+#
+# Triggers:  schedule (every Wednesday 09:00 UTC)
+#            discussion created
+#            push to default branch
+#            workflow_dispatch
+#            workflow_call (from council-discussion or agent-router)
+#
+# Skills:    feature-suggestion · playwright-testing · issue-creation
+#            discussion-facilitation · product-analysis
+#
+# Reads persona from .github/agents.md (Product Owner section).
+# Model defaults to gpt-4o-mini; override with repository variable PO_MODEL.
+# ──────────────────────────────────────────────────────────────────────────────
+name: Product Owner Agent
+
+on:
+  schedule:
+    # Every Wednesday at 09:00 UTC — override with PO_SCHEDULE variable
+    - cron: '0 9 * * 3'
+  discussion:
+    types: [created]
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Task to perform'
+        type: choice
+        options:
+          - product-health-report
+          - suggest-features
+          - run-playwright
+        default: product-health-report
+      base_url:
+        description: 'Base URL for Playwright tests (if applicable)'
+        required: false
+  workflow_call:
+    inputs:
+      task:
+        type: string
+        description: 'Task: product-health-report | suggest-features | run-playwright'
+        default: product-health-report
+      extra_context:
+        type: string
+        description: 'Additional context for the PO'
+        required: false
+      base_url:
+        type: string
+        description: 'Base URL for Playwright tests'
+        required: false
+    secrets:
+      MODELS_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+  discussions: write
+  pull-requests: write
+
+env:
+  PO_MODEL: ${{ vars.PO_MODEL || 'gpt-4o-mini' }}
+  AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
+  AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
+  PO_RUN_PLAYWRIGHT: ${{ vars.PO_RUN_PLAYWRIGHT || 'true' }}
+
+jobs:
+  product-ownership:
+    name: Alex · Product Owner
+    runs-on: ubuntu-latest
+    # Run only on the intended triggers, not on every push to the default branch
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'discussion'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Gather product context ───────────────────────────────────────────
+      - name: Gather product context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TASK="${{ inputs.task || 'product-health-report' }}"
+          echo "task=$TASK" >> "$GITHUB_OUTPUT"
+          CURRENT_DATE=$(date -u +"%Y-%m-%d")
+          echo "current_date=$CURRENT_DATE" >> "$GITHUB_OUTPUT"
+
+          # README content
+          README=$(cat README.md 2>/dev/null | head -100 || echo "No README found")
+
+          # Recent commits (last 30 days)
+          RECENT_COMMITS=$(git log \
+            --since="30 days ago" \
+            --oneline \
+            --no-merges \
+            | head -40 || echo "No commits")
+
+          # Open feature requests and issues
+          FEATURES=$(gh issue list \
+            --state open \
+            --label "feature" \
+            --limit 30 \
+            --json number,title,body,createdAt,labels \
+            2>/dev/null || echo "[]")
+
+          OPEN_ISSUES=$(gh issue list \
+            --state open \
+            --limit 50 \
+            --json number,title,labels,createdAt \
+            2>/dev/null || echo "[]")
+
+          # File structure summary
+          REPO_STRUCTURE=$(find . \
+            -not -path './.git/*' \
+            -not -path './node_modules/*' \
+            -not -path './.next/*' \
+            -type f \
+            | head -60 | sort || echo "N/A")
+
+          # Check for Playwright config
+          PW_CONFIG=""
+          for cfg in playwright.config.ts playwright.config.js playwright.config.mjs; do
+            if [ -f "$cfg" ]; then
+              PW_CONFIG="$cfg"
+              break
+            fi
+          done
+          echo "playwright_config=$PW_CONFIG" >> "$GITHUB_OUTPUT"
+
+          # Discussion context if triggered by discussion event
+          DISCUSSION_CONTEXT=""
+          if [ "${{ github.event_name }}" = "discussion" ]; then
+            DISCUSSION_CONTEXT="New discussion: ${{ github.event.discussion.title }}
+          Body: ${{ github.event.discussion.body }}"
+          fi
+
+          {
+            echo "product_context<<PO_CTX_EOF"
+            echo "## Product Overview"
+            echo "Repository: ${{ github.repository }}"
+            echo "Date: $CURRENT_DATE"
+            echo ""
+            echo "## README (first 100 lines)"
+            echo "$README"
+            echo ""
+            echo "## Recent Commits (last 30 days)"
+            echo "$RECENT_COMMITS"
+            echo ""
+            echo "## Open Feature Requests"
+            echo "$FEATURES" | python3 -c "
+          import json, sys
+          items = json.load(sys.stdin)
+          if items:
+              for i in items:
+                  print(f\"- #{i['number']}: {i['title']}\")
+          else:
+              print('None open')
+          " 2>/dev/null || echo "$FEATURES"
+            echo ""
+            echo "## All Open Issues (sample)"
+            echo "$OPEN_ISSUES" | python3 -c "
+          import json, sys
+          items = json.load(sys.stdin)
+          for i in items[:30]:
+              labels = [l['name'] for l in i.get('labels', [])]
+              print(f\"- #{i['number']}: {i['title']} [{', '.join(labels)}]\")
+          " 2>/dev/null || echo "$OPEN_ISSUES"
+            echo ""
+            echo "## Repository File Structure (sample)"
+            echo "$REPO_STRUCTURE"
+            echo ""
+            echo "## Playwright Config"
+            echo "${PW_CONFIG:-Not found — no Playwright tests configured}"
+            echo ""
+            echo "## Discussion Context"
+            echo "${DISCUSSION_CONTEXT:-N/A}"
+            echo ""
+            echo "## Additional Context"
+            echo "${{ inputs.extra_context }}"
+            echo "PO_CTX_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── Alex — Product Health Report ─────────────────────────────────────
+      - name: Alex — product health analysis
+        id: po-health
+        if: |
+          steps.ctx.outputs.task == 'product-health-report' ||
+          github.event_name == 'schedule'
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.PO_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Alex, a Product Owner who champions the end-user. You are
+            creative, empathetic, and always tie features back to customer
+            outcomes and business value.
+
+            Your job right now is PRODUCT HEALTH ANALYSIS:
+            - Synthesise what has shipped recently
+            - Identify gaps between what exists and what users might need
+            - Surface the 3 most impactful features to build next
+
+            Format your response EXACTLY as:
+
+            ## Product Health Report — <date>
+
+            ### What Has Shipped Recently
+            Bullet list of notable changes from the recent commits.
+
+            ### Current Product Gaps
+            What's missing that users likely need? Be specific and user-centric.
+
+            ### Top 3 Feature Opportunities
+            For each feature:
+            **Feature N: <Feature Name>**
+            - **User Story**: As a <user>, I want to <action> so that <benefit>
+            - **Acceptance Criteria**: bulleted list of 3–5 testable criteria
+            - **Business Value**: HIGH / MEDIUM / LOW + rationale
+            - **Effort Estimate**: SMALL / MEDIUM / LARGE
+
+            ### Product Risks
+            Any risks to product quality, user experience, or adoption.
+
+            ### Recommendation
+            One paragraph on the most important thing to focus on next.
+          user-prompt: |
+            Please analyse the product health:
+
+            ${{ steps.ctx.outputs.product_context }}
+
+      # ── Alex — Feature Suggestions ───────────────────────────────────────
+      - name: Alex — feature suggestion analysis
+        id: po-features
+        if: |
+          steps.ctx.outputs.task == 'suggest-features' ||
+          steps.ctx.outputs.task == 'product-health-report' ||
+          github.event_name == 'schedule' ||
+          github.event_name == 'discussion'
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.PO_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Alex, a Product Owner. Your job is to suggest NEW features
+            that do NOT already exist as open issues. Avoid duplicating existing
+            feature requests.
+
+            Output a JSON array of feature suggestions. Each entry must have:
+            {
+              "title": "Feature title (concise, action-oriented)",
+              "user_story": "As a X, I want Y so that Z",
+              "acceptance_criteria": ["criterion 1", "criterion 2", "criterion 3"],
+              "business_value": "HIGH|MEDIUM|LOW",
+              "effort": "SMALL|MEDIUM|LARGE"
+            }
+
+            Output ONLY the JSON array, no other text.
+            Suggest between 1 and 3 features maximum.
+          user-prompt: |
+            Based on this product context, suggest features that are NOT already
+            in the open issues list:
+
+            ${{ steps.ctx.outputs.product_context }}
+
+      # ── Open feature request issues ──────────────────────────────────────
+      - name: Open feature request issues
+        if: |
+          steps.po-features.outputs.response != '' &&
+          (steps.ctx.outputs.task == 'suggest-features' ||
+           steps.ctx.outputs.task == 'product-health-report' ||
+           github.event_name == 'schedule')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FEATURES_JSON: ${{ steps.po-features.outputs.response }}
+        run: |
+          # Ensure feature labels exist
+          gh label create "feature" --color "a2eeef" --force 2>/dev/null || true
+          gh label create "product-owner" --color "7057ff" --force 2>/dev/null || true
+
+          python3 - <<'PYEOF'
+          import json, os, subprocess, sys, re
+
+          raw = os.environ.get('FEATURES_JSON', '')
+          # Extract JSON array even if there's surrounding text
+          match = re.search(r'\[.*\]', raw, re.DOTALL)
+          if not match:
+              print("No JSON array found in feature suggestions")
+              sys.exit(0)
+
+          try:
+              features = json.loads(match.group())
+          except json.JSONDecodeError as e:
+              print(f"Failed to parse features JSON: {e}")
+              sys.exit(0)
+
+          for feat in features[:3]:  # safety cap
+              title = feat.get('title', 'Untitled Feature')
+              user_story = feat.get('user_story', '')
+              criteria = feat.get('acceptance_criteria', [])
+              value = feat.get('business_value', 'MEDIUM')
+              effort = feat.get('effort', 'MEDIUM')
+
+              criteria_md = '\n'.join(f'- [ ] {c}' for c in criteria)
+
+              body = f"""## Feature Request
+
+          **Suggested by**: Alex (Product Owner Agent)
+
+          ### User Story
+          {user_story}
+
+          ### Acceptance Criteria
+          {criteria_md}
+
+          ### Business Value
+          {value}
+
+          ### Effort Estimate
+          {effort}
+
+          ---
+          *🤖 This feature was suggested by the Product Owner Agent based on product analysis.*
+          """
+
+              result = subprocess.run(
+                  ['gh', 'issue', 'create',
+                   '--title', f'✨ {title}',
+                   '--body', body,
+                   '--label', 'feature,product-owner'],
+                  capture_output=True, text=True
+              )
+              if result.returncode == 0:
+                  print(f"Created feature issue: {result.stdout.strip()}")
+              else:
+                  # Retry without labels if they don't exist
+                  result2 = subprocess.run(
+                      ['gh', 'issue', 'create',
+                       '--title', f'✨ {title}',
+                       '--body', body],
+                      capture_output=True, text=True
+                  )
+                  print(f"Created feature issue (no labels): {result2.stdout.strip()}")
+          PYEOF
+
+      # ── Run Playwright tests ─────────────────────────────────────────────
+      - name: Detect Playwright setup
+        id: pw-check
+        run: |
+          if [ -f "playwright.config.ts" ] || [ -f "playwright.config.js" ] || [ -f "playwright.config.mjs" ]; then
+            echo "has_playwright=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_playwright=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node.js for Playwright
+        if: |
+          steps.pw-check.outputs.has_playwright == 'true' &&
+          env.PO_RUN_PLAYWRIGHT == 'true' &&
+          (steps.ctx.outputs.task == 'run-playwright' ||
+           github.event_name == 'schedule')
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies and Playwright browsers
+        if: |
+          steps.pw-check.outputs.has_playwright == 'true' &&
+          env.PO_RUN_PLAYWRIGHT == 'true' &&
+          (steps.ctx.outputs.task == 'run-playwright' ||
+           github.event_name == 'schedule')
+        run: |
+          npm ci 2>/dev/null || npm install
+          npx playwright install --with-deps chromium 2>/dev/null || true
+
+      - name: Run Playwright tests
+        id: playwright
+        if: |
+          steps.pw-check.outputs.has_playwright == 'true' &&
+          env.PO_RUN_PLAYWRIGHT == 'true' &&
+          (steps.ctx.outputs.task == 'run-playwright' ||
+           github.event_name == 'schedule')
+        continue-on-error: true
+        env:
+          BASE_URL: ${{ inputs.base_url || vars.PLAYWRIGHT_BASE_URL || '' }}
+        run: |
+          if [ -n "$BASE_URL" ]; then
+            npx playwright test --reporter=json 2>&1 | tee /tmp/pw-results.json || true
+          else
+            npx playwright test --reporter=json 2>&1 | tee /tmp/pw-results.json || true
+          fi
+
+          # Parse results
+          python3 - <<'PYEOF' 2>/dev/null || true
+          import json, os
+          try:
+              with open('/tmp/pw-results.json') as f:
+                  results = json.load(f)
+              stats = results.get('stats', {})
+              passed = stats.get('expected', 0)
+              failed = stats.get('unexpected', 0)
+              skipped = stats.get('skipped', 0)
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+                  out.write(f"pw_passed={passed}\n")
+                  out.write(f"pw_failed={failed}\n")
+                  out.write(f"pw_skipped={skipped}\n")
+                  out.write(f"pw_status={'passed' if failed == 0 else 'failed'}\n")
+          except Exception as e:
+              print(f"Could not parse Playwright results: {e}")
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+                  out.write("pw_status=unknown\n")
+          PYEOF
+
+      # ── Post product health report ───────────────────────────────────────
+      - name: Post weekly product health report
+        if: |
+          github.event_name == 'schedule' ||
+          steps.ctx.outputs.task == 'product-health-report'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEALTH_REPORT: ${{ steps.po-health.outputs.response }}
+          CURRENT_DATE: ${{ steps.ctx.outputs.current_date }}
+          PW_STATUS: ${{ steps.playwright.outputs.pw_status || 'not-run' }}
+          PW_PASSED: ${{ steps.playwright.outputs.pw_passed || '0' }}
+          PW_FAILED: ${{ steps.playwright.outputs.pw_failed || '0' }}
+        run: |
+          PW_SECTION=""
+          if [ "$PW_STATUS" != "not-run" ]; then
+            EMOJI="✅"
+            [ "$PW_STATUS" = "failed" ] && EMOJI="❌"
+            PW_SECTION="## 🎭 Playwright Test Results
+
+          $EMOJI **Status**: $PW_STATUS
+          - Passed: $PW_PASSED
+          - Failed: $PW_FAILED
+
+          ---"
+          fi
+
+          REPORT="# 🧪 Product Health Report — $CURRENT_DATE
+
+          > Generated by Alex (Product Owner Agent)
+
+          $HEALTH_REPORT
+
+          $PW_SECTION
+
+          ---
+          *🤖 Automated report by Alex (Product Owner Agent) · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+          # Post as Discussion or fallback to Issue
+          OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
+          REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+
+          REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
+          POSTED=false
+
+          if [ -n "$REPO_ID" ]; then
+            CATEGORY_ID=$(gh api graphql \
+              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+              -f o="$OWNER" -f r="$REPO" \
+              --jq '.data.repository.discussionCategories.nodes[0].id' \
+              2>/dev/null || echo "")
+
+            if [ -n "$CATEGORY_ID" ]; then
+              DISCUSSION_URL=$(gh api graphql \
+                -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
+                -f ri="$REPO_ID" -f ci="$CATEGORY_ID" \
+                -f t="🧪 Product Health Report — $CURRENT_DATE" \
+                -f b="$REPORT" \
+                --jq '.data.createDiscussion.discussion.url' \
+                2>/dev/null || echo "")
+              if [ -n "$DISCUSSION_URL" ]; then
+                echo "✅ Product health report posted as Discussion: $DISCUSSION_URL"
+                POSTED=true
+              fi
+            fi
+          fi
+
+          if [ "$POSTED" = "false" ]; then
+            gh issue create \
+              --title "🧪 Product Health Report — $CURRENT_DATE" \
+              --body "$REPORT" \
+              --label "product-owner" \
+              2>/dev/null || \
+            gh issue create \
+              --title "🧪 Product Health Report — $CURRENT_DATE" \
+              --body "$REPORT"
+            echo "✅ Product health report posted as Issue"
+          fi

@@ -1,0 +1,137 @@
+# Agent Configuration
+#
+# This file documents all configuration knobs for the Engineering Team
+# agent system.  The actual values are read from GitHub repository
+# variables (Settings → Secrets and variables → Variables).
+#
+# Workflow defaults are shown below; override any value by creating the
+# corresponding repository variable with the same name.
+
+# ─── Model Settings ──────────────────────────────────────────────────────────
+
+# Default model used by all agents unless overridden per-agent.
+# Supported: gpt-4o, gpt-4o-mini, Meta-Llama-3.1-70B-Instruct, etc.
+# Repository variable: AGENT_MODEL
+default_model: gpt-4o-mini
+
+# Model used by the Council Moderator (higher capability recommended).
+# Repository variable: COUNCIL_MODEL
+council_model: gpt-4o
+
+# Maximum tokens for each model response.
+# Repository variable: AGENT_MAX_TOKENS
+max_tokens: 2048
+
+# Sampling temperature (0.0 = deterministic, 1.0 = creative).
+# Repository variable: AGENT_TEMPERATURE
+temperature: "0.7"
+
+# ─── Authentication ───────────────────────────────────────────────────────────
+
+# The built-in GITHUB_TOKEN is used by default.
+# To access GitHub Models you may need a PAT with the `models:read` scope.
+# Store it as a repository secret named MODELS_TOKEN.
+# If MODELS_TOKEN is not set, workflows fall back to GITHUB_TOKEN.
+
+# ─── QA Engineer ─────────────────────────────────────────────────────────────
+
+qa_engineer:
+  # Enable or disable the QA Engineer agent.
+  # Repository variable: QA_ENABLED (true/false)
+  enabled: true
+
+  # Model override for QA Engineer.
+  # Repository variable: QA_MODEL
+  model: gpt-4o-mini
+
+  # Minimum severity that triggers an Issue being opened.
+  # Repository variable: QA_SEVERITY_THRESHOLD (LOW/MEDIUM/HIGH/CRITICAL)
+  severity_threshold: HIGH
+
+  # Labels that must exist in the repository for QA to apply them.
+  # Create them under Settings → Labels before first run.
+  labels:
+    - bug
+    - qa-review
+    - security
+
+# ─── Project Manager ─────────────────────────────────────────────────────────
+
+project_manager:
+  # Enable or disable the Project Manager agent.
+  # Repository variable: PM_ENABLED (true/false)
+  enabled: true
+
+  # Model override for Project Manager.
+  # Repository variable: PM_MODEL
+  model: gpt-4o-mini
+
+  # Cron schedule for weekly backlog grooming (UTC).
+  # Repository variable: PM_SCHEDULE
+  schedule: "0 9 * * 1"   # Every Monday at 09:00 UTC
+
+  # Number of days before a milestone due date to begin drift detection.
+  # Repository variable: PM_MILESTONE_LOOKAHEAD_DAYS
+  milestone_lookahead_days: 30
+
+  # Priority labels that the PM agent will apply.
+  labels:
+    - "priority: critical"
+    - "priority: high"
+    - "priority: medium"
+    - "priority: low"
+    - blocked
+
+# ─── Product Owner ───────────────────────────────────────────────────────────
+
+product_owner:
+  # Enable or disable the Product Owner agent.
+  # Repository variable: PO_ENABLED (true/false)
+  enabled: true
+
+  # Model override for Product Owner.
+  # Repository variable: PO_MODEL
+  model: gpt-4o-mini
+
+  # Cron schedule for weekly product health report (UTC).
+  # Repository variable: PO_SCHEDULE
+  schedule: "0 9 * * 3"   # Every Wednesday at 09:00 UTC
+
+  # Automatically run Playwright tests when playwright.config.* is detected.
+  # Repository variable: PO_RUN_PLAYWRIGHT (true/false)
+  run_playwright: true
+
+  # Labels applied to feature requests opened by the PO.
+  labels:
+    - feature
+    - product-owner
+
+# ─── Council ─────────────────────────────────────────────────────────────────
+
+council:
+  # Enable or disable the council discussion workflow.
+  # Repository variable: COUNCIL_ENABLED (true/false)
+  enabled: true
+
+  # Model used by the Council Moderator.
+  # Repository variable: COUNCIL_MODEL
+  model: gpt-4o
+
+  # GitHub Discussion category to post council decisions into.
+  # If the category does not exist or Discussions are disabled,
+  # a labeled Issue is created as fallback.
+  # Repository variable: COUNCIL_DISCUSSION_CATEGORY
+  discussion_category: "Team Decisions"
+
+  # Label used to request a council review on an issue or PR.
+  trigger_label: council-review
+
+# ─── Agent Router ────────────────────────────────────────────────────────────
+
+router:
+  # Map of slash-commands to workflow file names.
+  commands:
+    "/qa":       qa-engineer.yml
+    "/pm":       project-manager.yml
+    "/po":       product-owner.yml
+    "/council":  council-discussion.yml

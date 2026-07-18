@@ -1,0 +1,403 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Council Discussion — Casey (Council Moderator)
+#
+# Convenes a multi-agent council where QA Engineer, Project Manager, and
+# Product Owner each analyse a topic independently. The Council Moderator
+# then synthesises all perspectives into a consensus decision and action list.
+# Results are posted to GitHub Discussions (or Issues as fallback).
+#
+# Triggers:  issues or PRs labeled "council-review"
+#            workflow_dispatch
+#            workflow_call (from agent-router or other workflows)
+#
+# Model:     gpt-4o (overridable via COUNCIL_MODEL variable)
+# ──────────────────────────────────────────────────────────────────────────────
+name: Council Discussion
+
+on:
+  issues:
+    types: [labeled]
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: 'Topic for council discussion'
+        required: true
+      context:
+        description: 'Additional context or background'
+        required: false
+      issue_number:
+        description: 'Related issue or PR number (optional)'
+        required: false
+  workflow_call:
+    inputs:
+      topic:
+        type: string
+        description: 'Topic for council discussion'
+        required: true
+      context:
+        type: string
+        description: 'Additional context or background'
+        required: false
+      issue_number:
+        type: string
+        description: 'Related issue or PR number'
+        required: false
+    outputs:
+      decision_url:
+        description: 'URL of the posted council decision'
+        value: ${{ jobs.council.outputs.decision_url }}
+      decision:
+        description: 'The council decision text'
+        value: ${{ jobs.council.outputs.decision }}
+    secrets:
+      MODELS_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  discussions: write
+
+env:
+  COUNCIL_MODEL: ${{ vars.COUNCIL_MODEL || 'gpt-4o' }}
+  AGENT_MODEL: ${{ vars.AGENT_MODEL || 'gpt-4o-mini' }}
+  AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
+  AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
+
+jobs:
+  council:
+    name: Council Discussion
+    runs-on: ubuntu-latest
+    # Only run when labeled "council-review" or explicitly dispatched
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call' ||
+      (github.event_name == 'issues' &&
+       contains(github.event.issue.labels.*.name, 'council-review')) ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'council-review'))
+
+    outputs:
+      decision_url: ${{ steps.post-decision.outputs.url }}
+      decision: ${{ steps.moderator.outputs.response }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Determine topic and context ──────────────────────────────────────
+      - name: Resolve topic and context
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Determine topic
+          if [ -n "${{ inputs.topic }}" ]; then
+            TOPIC="${{ inputs.topic }}"
+            CONTEXT="${{ inputs.context }}"
+            REF_NUMBER="${{ inputs.issue_number }}"
+          elif [ "${{ github.event_name }}" = "issues" ]; then
+            TOPIC="Issue #${{ github.event.issue.number }}: ${{ github.event.issue.title }}"
+            CONTEXT="${{ github.event.issue.body }}"
+            REF_NUMBER="${{ github.event.issue.number }}"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            TOPIC="PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+            CONTEXT="${{ github.event.pull_request.body }}"
+            REF_NUMBER="${{ github.event.pull_request.number }}"
+          else
+            TOPIC="Council Review — ${{ github.run_id }}"
+            CONTEXT=""
+            REF_NUMBER=""
+          fi
+
+          # Gather repository context
+          README=$(cat README.md 2>/dev/null | head -50 || echo "")
+          OPEN_ISSUES_COUNT=$(gh issue list --state open --limit 1 --json number --jq '. | length' 2>/dev/null || echo "0")
+          RECENT_COMMITS=$(git log --oneline --no-merges -10 2>/dev/null || echo "")
+          CURRENT_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          {
+            echo "topic=$TOPIC"
+            echo "ref_number=$REF_NUMBER"
+            echo "current_date=$CURRENT_DATE"
+            echo "base_context<<COUNCIL_CTX_EOF"
+            echo "## Topic"
+            echo "$TOPIC"
+            echo ""
+            echo "## Context"
+            echo "$CONTEXT"
+            echo ""
+            echo "## Repository Background"
+            echo "Repository: ${{ github.repository }}"
+            echo "Date: $CURRENT_DATE"
+            echo ""
+            echo "### README (excerpt)"
+            echo "$README"
+            echo ""
+            echo "### Recent Activity"
+            echo "Open issues: $OPEN_ISSUES_COUNT"
+            echo "Recent commits:"
+            echo "$RECENT_COMMITS"
+            echo "COUNCIL_CTX_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── Acknowledge the council request ─────────────────────────────────
+      - name: Post council acknowledgment
+        if: |
+          steps.resolve.outputs.ref_number != '' &&
+          (github.event_name == 'issues' || github.event_name == 'pull_request')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NUMBER: ${{ steps.resolve.outputs.ref_number }}
+        run: |
+          COMMENT="## 🏛️ Council Discussion Initiated
+
+          The engineering council has been convened to review this topic.
+
+          **Participants**:
+          - 🔍 Quinn (QA Engineer) — code quality, security, testing
+          - 📋 Morgan (Project Manager) — timeline, priorities, dependencies
+          - 🧪 Alex (Product Owner) — user value, product fit, acceptance criteria
+
+          **Moderator**: Casey (Council Moderator)
+
+          Results will be posted shortly. ⏳
+
+          *[Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+          if [ "${{ github.event_name }}" = "issues" ]; then
+            gh issue comment "$REF_NUMBER" --body "$COMMENT"
+          else
+            gh pr comment "$REF_NUMBER" --body "$COMMENT"
+          fi
+
+      # ══════════════════════════════════════════════════════════════════════
+      # Round 1 — Each agent analyses independently
+      # ══════════════════════════════════════════════════════════════════════
+
+      - name: Quinn — QA perspective
+        id: qa-perspective
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.AGENT_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Quinn, a senior QA Engineer. You are participating in an
+            engineering council discussion. Provide your honest professional
+            perspective focused on quality, security, and testability.
+
+            Be concise (max 300 words). Structure your response as:
+
+            ### Quinn's Perspective (QA Engineer)
+            **Quality Concerns**: [what risks do you see?]
+            **Security Considerations**: [any security implications?]
+            **Testability**: [how would you validate this?]
+            **QA Verdict**: [SUPPORT / CONDITIONALLY SUPPORT / OPPOSE] — one sentence rationale
+          user-prompt: |
+            Council topic: ${{ steps.resolve.outputs.topic }}
+
+            ${{ steps.resolve.outputs.base_context }}
+
+      - name: Morgan — PM perspective
+        id: pm-perspective
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.AGENT_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Morgan, an experienced Project Manager. You are participating
+            in an engineering council discussion. Provide your honest professional
+            perspective focused on timelines, resources, and project impact.
+
+            Be concise (max 300 words). Structure your response as:
+
+            ### Morgan's Perspective (Project Manager)
+            **Timeline Impact**: [how does this affect the roadmap?]
+            **Resource Requirements**: [what effort/team is needed?]
+            **Dependencies & Risks**: [what could go wrong?]
+            **PM Verdict**: [SUPPORT / CONDITIONALLY SUPPORT / OPPOSE] — one sentence rationale
+          user-prompt: |
+            Council topic: ${{ steps.resolve.outputs.topic }}
+
+            ${{ steps.resolve.outputs.base_context }}
+
+      - name: Alex — PO perspective
+        id: po-perspective
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.AGENT_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Alex, a Product Owner. You are participating in an engineering
+            council discussion. Provide your honest professional perspective
+            focused on user value, product strategy, and business impact.
+
+            Be concise (max 300 words). Structure your response as:
+
+            ### Alex's Perspective (Product Owner)
+            **User Value**: [how does this benefit users?]
+            **Product Strategy Fit**: [does this align with product direction?]
+            **Acceptance Criteria**: [how do we know when it's done?]
+            **PO Verdict**: [SUPPORT / CONDITIONALLY SUPPORT / OPPOSE] — one sentence rationale
+          user-prompt: |
+            Council topic: ${{ steps.resolve.outputs.topic }}
+
+            ${{ steps.resolve.outputs.base_context }}
+
+      # ══════════════════════════════════════════════════════════════════════
+      # Round 2 — Council Moderator synthesises
+      # ══════════════════════════════════════════════════════════════════════
+
+      - name: Casey — Council Moderator synthesis
+        id: moderator
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.COUNCIL_MODEL }}
+          max-tokens: 3000
+          temperature: '0.5'
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Casey, the Council Moderator for an autonomous engineering
+            team. Your role is to synthesise the perspectives of the QA Engineer,
+            Project Manager, and Product Owner into a clear, actionable council
+            decision.
+
+            Be fair, impartial, and evidence-driven. Acknowledge disagreements
+            explicitly. Your decision must be concrete and actionable.
+
+            Format your response EXACTLY as:
+
+            # 🏛️ Council Decision
+
+            ## Topic
+            State the topic being decided.
+
+            ## Council Perspectives Summary
+
+            | Agent | Verdict | Key Point |
+            |-------|---------|-----------|
+            | 🔍 Quinn (QA) | SUPPORT/CONDITIONAL/OPPOSE | one sentence |
+            | 📋 Morgan (PM) | SUPPORT/CONDITIONAL/OPPOSE | one sentence |
+            | 🧪 Alex (PO) | SUPPORT/CONDITIONAL/OPPOSE | one sentence |
+
+            ## Points of Agreement
+            What all agents agree on.
+
+            ## Points of Tension
+            Where agents disagree and why. If no tensions, write "All agents are aligned."
+
+            ## Council Decision
+            **Outcome**: [APPROVED ✅ | APPROVED WITH CONDITIONS ⚠️ | DEFERRED 🔄 | REJECTED ❌]
+
+            Rationale: Two to three sentences explaining the decision.
+
+            ## Action Items
+            Numbered list of concrete next steps with suggested owners:
+            1. **[Owner]** Action description
+            2. ...
+
+            ## Conditions (if applicable)
+            Any conditions that must be met for approval. Write "None" if unconditional.
+          user-prompt: |
+            Please synthesise the following council perspectives on the topic:
+
+            **Topic**: ${{ steps.resolve.outputs.topic }}
+
+            ---
+
+            ${{ steps.qa-perspective.outputs.response }}
+
+            ---
+
+            ${{ steps.pm-perspective.outputs.response }}
+
+            ---
+
+            ${{ steps.po-perspective.outputs.response }}
+
+      # ── Post council decision ────────────────────────────────────────────
+      - name: Compose full council record
+        id: compose
+        env:
+          QA_RESP: ${{ steps.qa-perspective.outputs.response }}
+          PM_RESP: ${{ steps.pm-perspective.outputs.response }}
+          PO_RESP: ${{ steps.po-perspective.outputs.response }}
+          MODERATOR_RESP: ${{ steps.moderator.outputs.response }}
+          TOPIC: ${{ steps.resolve.outputs.topic }}
+          DATE: ${{ steps.resolve.outputs.current_date }}
+        run: |
+          FULL_RECORD="$MODERATOR_RESP
+
+          ---
+
+          ## Council Transcript
+
+          <details>
+          <summary>View individual agent perspectives</summary>
+
+          $QA_RESP
+
+          ---
+
+          $PM_RESP
+
+          ---
+
+          $PO_RESP
+
+          </details>
+
+          ---
+          *🤖 Council facilitated by Casey (Council Moderator) · Date: $DATE · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+          {
+            echo "full_record<<COUNCIL_RECORD_EOF"
+            echo "$FULL_RECORD"
+            echo "COUNCIL_RECORD_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post council decision
+        id: post-decision
+        uses: ./.github/actions/post-council-results
+        with:
+          title: "🏛️ Council Decision: ${{ steps.resolve.outputs.topic }}"
+          body: ${{ steps.compose.outputs.full_record }}
+          category: ${{ vars.COUNCIL_DISCUSSION_CATEGORY || 'Team Decisions' }}
+          labels: 'council-decision'
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Link decision back to the originating issue/PR ───────────────────
+      - name: Link decision to originating issue/PR
+        if: steps.resolve.outputs.ref_number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NUMBER: ${{ steps.resolve.outputs.ref_number }}
+          DECISION_URL: ${{ steps.post-decision.outputs.url }}
+          DECISION_TYPE: ${{ steps.post-decision.outputs.type }}
+        run: |
+          COMMENT="## 🏛️ Council Decision Posted
+
+          The engineering council has reached a decision.
+
+          **View full decision**: $DECISION_URL
+          **Posted as**: $DECISION_TYPE
+
+          $(echo '${{ steps.moderator.outputs.response }}' | head -20)
+
+          ---
+          *🤖 Automated council decision · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+          if [ -n "$REF_NUMBER" ] && { [ "${{ github.event_name }}" = "issues" ] || [ "${{ github.event_name }}" = "workflow_call" ]; }; then
+            gh issue comment "$REF_NUMBER" --body "$COMMENT" 2>/dev/null || true
+          elif [ -n "$REF_NUMBER" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+            gh pr comment "$REF_NUMBER" --body "$COMMENT" 2>/dev/null || true
+          fi
