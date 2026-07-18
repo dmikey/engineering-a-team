@@ -106,6 +106,8 @@ Shared collaboration rules live in
 - The shared `call-github-model` action reads the file on every invocation, so
   updates apply dynamically to subsequent agent runs without restarting
   anything.
+- Keep the file as non-empty Markdown with headings and rule list items so the
+  shared action can validate and load it safely.
 - Changes are audited by the **Collaboration Rules Audit** workflow, which posts
   a timestamped record with the before/after content and diff.
 
