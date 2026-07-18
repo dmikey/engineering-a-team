@@ -207,6 +207,7 @@ jobs:
           response = os.environ.get("QA_RESPONSE", "")
           match = re.search(r"^\*\*Recommendation\*\*:\s*\[(.*?)\]\s*$", response, re.MULTILINE)
           if not match:
+              print("Warning: Could not find the QA recommendation line; skipping Copilot handoff.", file=sys.stderr)
               sys.exit(1)
 
           recommendation = match.group(1).upper()
