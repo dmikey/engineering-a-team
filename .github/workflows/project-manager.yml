@@ -158,8 +158,8 @@ jobs:
       - name: Morgan — backlog grooming analysis
         id: pm-groom
         if: |
-          contains(fromJSON('["groom-backlog", "full-sprint-report"]'),
-                   steps.data.outputs.task)
+          steps.data.outputs.task == 'groom-backlog' ||
+          steps.data.outputs.task == 'full-sprint-report'
         uses: ./.github/actions/call-github-model
         with:
           model: ${{ env.PM_MODEL }}
@@ -206,8 +206,8 @@ jobs:
       - name: Morgan — milestone health analysis
         id: pm-milestone
         if: |
-          contains(fromJSON('["check-milestones", "full-sprint-report"]'),
-                   steps.data.outputs.task) &&
+          (steps.data.outputs.task == 'check-milestones' ||
+           steps.data.outputs.task == 'full-sprint-report') &&
           steps.data.outputs.milestone_count != '0'
         uses: ./.github/actions/call-github-model
         with:

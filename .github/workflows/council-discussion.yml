@@ -396,8 +396,8 @@ jobs:
           ---
           *🤖 Automated council decision · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
 
-          if [ "${{ github.event_name }}" = "issues" ] || [ "${{ github.event_name }}" = "workflow_call" ]; then
+          if [ -n "$REF_NUMBER" ] && { [ "${{ github.event_name }}" = "issues" ] || [ "${{ github.event_name }}" = "workflow_call" ]; }; then
             gh issue comment "$REF_NUMBER" --body "$COMMENT" 2>/dev/null || true
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+          elif [ -n "$REF_NUMBER" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
             gh pr comment "$REF_NUMBER" --body "$COMMENT" 2>/dev/null || true
           fi

@@ -97,18 +97,19 @@ runs:
           echo "type=discussion" >> "$GITHUB_OUTPUT"
           echo "✅ Council decision posted as Discussion: $DISCUSSION_URL"
         else
-          # Fallback: create a labeled Issue
+          # Fallback: create a labeled Issue using the labels input
           LABEL_ARGS=""
           IFS=',' read -ra LABEL_ARR <<< "$LABELS"
           for lbl in "${LABEL_ARR[@]}"; do
             lbl=$(echo "$lbl" | xargs)
-            LABEL_ARGS="$LABEL_ARGS --label \"$lbl\""
+            [ -n "$lbl" ] && LABEL_ARGS="$LABEL_ARGS --label $lbl"
           done
 
+          # shellcheck disable=SC2086
           ISSUE_URL=$(gh issue create \
             --title "$TITLE" \
             --body "$BODY" \
-            --label "council-decision" \
+            $LABEL_ARGS \
             2>/dev/null || \
             gh issue create --title "$TITLE" --body "$BODY")
 

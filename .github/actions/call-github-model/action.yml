@@ -76,17 +76,25 @@ runs:
           echo "GH_RAW_EOF"
         } >> "$GITHUB_OUTPUT"
 
-        # Extract text response (fall back to error message)
+        # Extract text response (fall back to diagnostic error message)
         CONTENT=$(echo "$RAW" | python3 -c "
         import json, sys
-        data = json.load(sys.stdin)
+        try:
+            data = json.load(sys.stdin)
+        except json.JSONDecodeError as e:
+            print(f'⚠️ Model call failed: could not parse response JSON — {e}')
+            sys.exit(0)
         choices = data.get('choices', [])
         if choices:
             print(choices[0]['message']['content'])
         else:
-            err = data.get('error', {}).get('message', 'No response from model')
-            print(f'⚠️ Model call failed: {err}')
-        " 2>/dev/null || echo "⚠️ Failed to parse model response")
+            err   = data.get('error', {})
+            msg   = err.get('message', 'no choices returned')
+            code  = err.get('code', '')
+            status = err.get('status', '')
+            detail = f'code={code}, status={status}' if (code or status) else 'no error detail'
+            print(f'⚠️ Model call failed: {msg} ({detail})')
+        " 2>/dev/null || echo "⚠️ Failed to parse model response — check workflow logs for raw API output")
 
         {
           echo "response<<GH_RESP_EOF"

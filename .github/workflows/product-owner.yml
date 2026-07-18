@@ -72,9 +72,8 @@ jobs:
   product-ownership:
     name: Alex · Product Owner
     runs-on: ubuntu-latest
-    # Don't run on every push — only scheduled, dispatch, call, or discussion
+    # Run only on the intended triggers, not on every push to the default branch
     if: |
-      github.event_name != 'push' ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'workflow_call' ||
       github.event_name == 'schedule' ||
@@ -196,8 +195,7 @@ jobs:
       - name: Alex — product health analysis
         id: po-health
         if: |
-          contains(fromJSON('["product-health-report"]'),
-                   steps.ctx.outputs.task) ||
+          steps.ctx.outputs.task == 'product-health-report' ||
           github.event_name == 'schedule'
         uses: ./.github/actions/call-github-model
         with:
@@ -247,8 +245,8 @@ jobs:
       - name: Alex — feature suggestion analysis
         id: po-features
         if: |
-          contains(fromJSON('["suggest-features", "product-health-report"]'),
-                   steps.ctx.outputs.task) ||
+          steps.ctx.outputs.task == 'suggest-features' ||
+          steps.ctx.outputs.task == 'product-health-report' ||
           github.event_name == 'schedule' ||
           github.event_name == 'discussion'
         uses: ./.github/actions/call-github-model
@@ -283,8 +281,8 @@ jobs:
       - name: Open feature request issues
         if: |
           steps.po-features.outputs.response != '' &&
-          (contains(fromJSON('["suggest-features", "product-health-report"]'),
-                    steps.ctx.outputs.task) ||
+          (steps.ctx.outputs.task == 'suggest-features' ||
+           steps.ctx.outputs.task == 'product-health-report' ||
            github.event_name == 'schedule')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
