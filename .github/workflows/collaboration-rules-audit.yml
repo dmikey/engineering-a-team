@@ -31,7 +31,7 @@ jobs:
 
           if [ "${{ github.event_name }}" = "push" ] && \
              [ -n "$PREVIOUS_SHA" ] && \
-             [ "$PREVIOUS_SHA" != "0000000000000000000000000000000000000000" ]; then
+             git rev-parse --verify "${PREVIOUS_SHA}^{commit}" >/dev/null 2>&1; then
             PREVIOUS_RULES=$(git show "${PREVIOUS_SHA}:.github/collaboration-rules.md" 2>/dev/null || echo "File did not exist previously.")
             RULES_DIFF=$(git diff "$PREVIOUS_SHA" "${{ github.sha }}" -- .github/collaboration-rules.md 2>/dev/null || true)
           else

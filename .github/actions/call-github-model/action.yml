@@ -54,9 +54,13 @@ runs:
         rules_file = Path(os.environ["RULES_FILE"])
         
         if rules_file.is_file():
-            rules = rules_file.read_text(encoding="utf-8").strip()
-            if rules:
-                prompt = f"{prompt}\n\nFollow these repository collaboration rules for agent interaction and decision-making:\n\n{rules}"
+            try:
+                rules = rules_file.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError) as exc:
+                print(f"Warning: could not read collaboration rules file: {exc}", file=os.sys.stderr)
+            else:
+                if rules:
+                    prompt = f"{prompt}\n\nFollow these repository collaboration rules for agent interaction and decision-making:\n\n{rules}"
         
         print(prompt)
         PYEOF
