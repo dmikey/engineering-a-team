@@ -26,8 +26,10 @@ jobs:
 
       - name: Build audit record
         id: audit
+        env:
+          EVENT_TIMESTAMP: ${{ github.event.head_commit.timestamp || '' }}
         run: |
-          CURRENT_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          CURRENT_DATE="${EVENT_TIMESTAMP:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
           if [ ! -f "$RULES_FILE" ]; then
             echo "Expected $RULES_FILE to exist for audit logging." >&2
             exit 1
