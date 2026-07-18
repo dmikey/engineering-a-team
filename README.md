@@ -141,6 +141,11 @@ Override defaults using GitHub repository variables
 | `COPILOT_ASSIGNEE` | _(empty)_ | Optional native Copilot assignee identity |
 | `COUNCIL_DISCUSSION_CATEGORY` | `Team Decisions` | GitHub Discussion category |
 
+Shared agent interaction rules are defined in
+[`/.github/collaboration-rules.md`](./.github/collaboration-rules.md). The file
+is loaded dynamically on every model call, and changes are logged by the
+**Collaboration Rules Audit** workflow.
+
 Default automation cadence is tuned for active development:
 
 - Project Manager runs every weekday at 09:00 UTC
@@ -214,11 +219,13 @@ To add a new agent:
   agents.md                  # Agent personas and responsibilities
   skills.md                  # Shared skills catalog
   agent-config.yml           # Configuration reference
+  collaboration-rules.md     # Shared agent interaction and decision rules
   copilot-instructions.md    # GitHub Copilot context
   actions/
     call-github-model/       # Reusable composite action — GitHub Models API
     post-council-results/    # Composite action — post to Discussions/Issues
   workflows/
+    collaboration-rules-audit.yml # Audits collaboration rule changes
     qa-engineer.yml          # Quinn — QA reviews
     project-manager.yml      # Morgan — backlog & milestones
     product-owner.yml        # Alex — features & Playwright

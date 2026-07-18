@@ -1,0 +1,78 @@
+name: Collaboration Rules Audit
+
+on:
+  push:
+    paths:
+      - .github/collaboration-rules.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  discussions: write
+  issues: write
+
+jobs:
+  audit:
+    name: Log collaboration rule changes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build audit record
+        id: audit
+        run: |
+          CURRENT_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          CURRENT_RULES=$(cat .github/collaboration-rules.md 2>/dev/null || echo "No collaboration rules file found.")
+          PREVIOUS_SHA="${{ github.event.before }}"
+
+          if [ "${{ github.event_name }}" = "push" ] && \
+             [ -n "$PREVIOUS_SHA" ] && \
+             [ "$PREVIOUS_SHA" != "0000000000000000000000000000000000000000" ]; then
+            PREVIOUS_RULES=$(git show "${PREVIOUS_SHA}:.github/collaboration-rules.md" 2>/dev/null || echo "File did not exist previously.")
+            RULES_DIFF=$(git diff "$PREVIOUS_SHA" "${{ github.sha }}" -- .github/collaboration-rules.md 2>/dev/null || true)
+          else
+            PREVIOUS_RULES="Manual audit run or previous version unavailable."
+            RULES_DIFF="Manual audit run — no Git diff available."
+          fi
+
+          {
+            echo "title=📝 Collaboration rules updated — ${CURRENT_DATE}"
+            echo "body<<AUDIT_BODY_EOF"
+            echo "# 📝 Collaboration Rules Audit"
+            echo
+            echo "- **Repository**: ${{ github.repository }}"
+            echo "- **Actor**: ${{ github.actor }}"
+            echo "- **Event**: ${{ github.event_name }}"
+            echo "- **Commit**: ${{ github.sha }}"
+            echo "- **Workflow run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "- **Timestamp**: ${CURRENT_DATE}"
+            echo
+            echo "## Previous Rules"
+            echo '```markdown'
+            echo "$PREVIOUS_RULES"
+            echo '```'
+            echo
+            echo "## Current Rules"
+            echo '```markdown'
+            echo "$CURRENT_RULES"
+            echo '```'
+            echo
+            echo "## Change Diff"
+            echo '```diff'
+            echo "$RULES_DIFF"
+            echo '```'
+            echo "AUDIT_BODY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post audit record
+        uses: ./.github/actions/post-council-results
+        with:
+          title: ${{ steps.audit.outputs.title }}
+          body: ${{ steps.audit.outputs.body }}
+          category: ${{ vars.COUNCIL_DISCUSSION_CATEGORY || 'Team Decisions' }}
+          labels: ''
+          token: ${{ secrets.GITHUB_TOKEN }}
