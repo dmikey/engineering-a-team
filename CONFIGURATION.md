@@ -80,7 +80,7 @@ Settings → Secrets and variables → Variables → New repository variable
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SELF_IMPROVEMENT_MODEL` | `gpt-4o-mini` | Override model for the self-improvement evaluator |
-| `REFERENCE_APP_REPO` | _(empty)_ | Optional `owner/repo` used as the Get Milk benchmark source |
+| `REFERENCE_APP_REPO` | current repository | Optional override for the `owner/repo` used as the Get Milk benchmark source |
 | `REFERENCE_APP_BASE_URL` | _(empty)_ | Optional live URL for the Get Milk app |
 | `COPILOT_ASSIGNEE` | _(empty)_ | Optional assignee for native GitHub Copilot handoff when supported |
 
@@ -132,6 +132,9 @@ repository variables:
 
 - `REFERENCE_APP_REPO` for the reference application's repository
 - `REFERENCE_APP_BASE_URL` for a live deployment, if you have one
+
+If `REFERENCE_APP_REPO` is unset, the self-improvement loop defaults to the
+current repository.
 
 The workflow opens issues in this repository with `self-improvement` and
 `copilot-ready` labels. Those issues are intended to be assigned using native

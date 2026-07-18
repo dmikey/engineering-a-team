@@ -131,7 +131,7 @@ Override defaults using GitHub repository variables
 | `QA_SEVERITY_THRESHOLD` | `HIGH` | Minimum severity to open an issue |
 | `PM_MILESTONE_LOOKAHEAD_DAYS` | `30` | Days ahead for milestone drift detection |
 | `PO_RUN_PLAYWRIGHT` | `true` | Run Playwright tests when config is found |
-| `REFERENCE_APP_REPO` | _(empty)_ | Optional `owner/repo` for the Get Milk benchmark app |
+| `REFERENCE_APP_REPO` | current repository | Optional override for the `owner/repo` used for the Get Milk benchmark app |
 | `REFERENCE_APP_BASE_URL` | _(empty)_ | Optional live URL for the Get Milk benchmark app |
 | `SELF_IMPROVEMENT_MODEL` | `gpt-4o-mini` | Model for self-improvement evaluation |
 | `COPILOT_ASSIGNEE` | _(empty)_ | Optional native Copilot assignee identity |
@@ -183,6 +183,10 @@ This repository is meant to improve itself.
 
 Use **Actions → Self-Improvement Loop** for a direct manual run, or choose
 `self-improvement` from **Manual Agent Runner**.
+
+If you do not set `REFERENCE_APP_REPO`, the self-improvement loop uses this
+repository by default and combines that repository state with the Get Milk
+brief as its benchmark context.
 
 ---
 

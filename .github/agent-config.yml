@@ -121,7 +121,8 @@ self_improvement:
   # Defined in .github/workflows/self-improvement-loop.yml.
   schedule: "0 17 * * 1-5"   # Every weekday at 17:00 UTC
 
-  # Optional owner/repo for the benchmark application repository.
+  # Owner/repo for the benchmark application repository.
+  # Defaults to the current repository when unset.
   # Repository variable: REFERENCE_APP_REPO
   reference_app_repo: ""
 
