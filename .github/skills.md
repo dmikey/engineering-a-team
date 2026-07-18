@@ -78,6 +78,37 @@ effort, and apply appropriate labels.
 
 **Description**: Inspect milestone due dates and assigned issues. Detect
 drift (issues not closing fast enough), comment on the milestone issue or
+
+---
+
+## benchmark-evaluation
+
+**Description**: Compare the current workflow system against a reference
+application benchmark, identify gaps in observability, execution cadence,
+handoff quality, and backlog generation, and recommend workflow-level changes.
+
+**Inputs**: Reference project brief, optional reference repository signals,
+current repository issues, recent commits, workflow configuration
+**Outputs**: Ranked self-improvement recommendations with evidence and clear
+scope
+**GitHub APIs**: `GET /repos/{owner}/{repo}`, `GET /repos/{owner}/{repo}/issues`,
+`GET /repos/{owner}/{repo}/pulls`
+**Used by**: Self-Improvement Loop
+
+---
+
+## copilot-handoff
+
+**Description**: Prepare issues for native GitHub Copilot execution by writing
+implementation-ready issue bodies, labeling them for triage, and optionally
+assigning a configured Copilot assignee when the platform supports it.
+
+**Inputs**: Improvement recommendation, benchmark evidence, implementation brief,
+optional assignee
+**Outputs**: Copilot-ready issue in GitHub
+**GitHub APIs**: `POST /repos/{owner}/{repo}/issues`,
+`PATCH /repos/{owner}/{repo}/issues/{number}`
+**Used by**: Self-Improvement Loop
 post a warning discussion.
 
 **Inputs**: Milestone list, assigned issues, current date  

@@ -75,6 +75,15 @@ Settings → Secrets and variables → Variables → New repository variable
 | `PO_RUN_PLAYWRIGHT` | `true` | Set to `false` to disable Playwright test runs |
 | `PLAYWRIGHT_BASE_URL` | _(empty)_ | Base URL passed to Playwright tests |
 
+### Self-Improvement Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SELF_IMPROVEMENT_MODEL` | `gpt-4o-mini` | Override model for the self-improvement evaluator |
+| `REFERENCE_APP_REPO` | _(empty)_ | Optional `owner/repo` used as the Get Milk benchmark source |
+| `REFERENCE_APP_BASE_URL` | _(empty)_ | Optional live URL for the Get Milk app |
+| `COPILOT_ASSIGNEE` | _(empty)_ | Optional assignee for native GitHub Copilot handoff when supported |
+
 ### Council Variables
 
 | Variable | Default | Description |
@@ -92,6 +101,7 @@ Default schedules (UTC):
 |-------|---------|---------|
 | Project Manager | Every weekday 09:00 | Edit `cron` in `project-manager.yml` |
 | Product Owner | Every weekday 13:00 | Edit `cron` in `product-owner.yml` |
+| Self-Improvement Loop | Every weekday 17:00 | Edit `cron` in `self-improvement-loop.yml` |
 
 GitHub Actions does not support repository variables inside `on.schedule`, so
 the schedule is controlled directly in the workflow YAML.
@@ -106,8 +116,28 @@ All agent workflows support `workflow_dispatch`, so they can be started from
 the GitHub Actions UI.
 
 For a single entrypoint, use **Manual Agent Runner** from the Actions tab. It
-dispatches to the underlying QA, Project Manager, Product Owner, or Council
-workflow and forwards the relevant inputs.
+dispatches to the underlying QA, Project Manager, Product Owner, Council, or
+Self-Improvement workflow and forwards the relevant inputs.
+
+---
+
+## Self-Improvement Loop
+
+The self-improvement workflow evaluates this repository itself rather than a
+product codebase. Its purpose is to identify the next workflow, prompt,
+configuration, or observability changes that will improve the development loop.
+
+The benchmark target is the Get Milk reference app. Configure that benchmark in
+repository variables:
+
+- `REFERENCE_APP_REPO` for the reference application's repository
+- `REFERENCE_APP_BASE_URL` for a live deployment, if you have one
+
+The workflow opens issues in this repository with `self-improvement` and
+`copilot-ready` labels. Those issues are intended to be assigned using native
+GitHub Copilot in the GitHub UI. If your GitHub setup exposes a stable Copilot
+assignee identity, you can also set `COPILOT_ASSIGNEE` and the workflow will
+attempt the assignment automatically.
 
 ---
 

@@ -11,9 +11,10 @@ on:
           - pm
           - po
           - council
+          - self-improvement
         default: pm
       task:
-        description: 'Task for PM or PO workflows'
+        description: 'Task or focus for PM, PO, or self-improvement workflows'
         required: false
         default: ''
       pr_number:
@@ -33,7 +34,11 @@ on:
         required: false
         default: ''
       base_url:
-        description: 'Base URL for Product Owner Playwright runs'
+        description: 'Base URL for Product Owner Playwright or reference app runs'
+        required: false
+        default: ''
+      reference_repo:
+        description: 'owner/repo for the Get Milk reference app'
         required: false
         default: ''
 
@@ -76,4 +81,14 @@ jobs:
       topic: ${{ inputs.topic != '' && inputs.topic || 'Manual council discussion' }}
       context: ${{ inputs.extra_context }}
       issue_number: ${{ inputs.issue_number }}
+    secrets: inherit
+
+  run-self-improvement:
+    if: ${{ inputs.agent == 'self-improvement' }}
+    uses: ./.github/workflows/self-improvement-loop.yml
+    with:
+      focus: ${{ inputs.task != '' && inputs.task || 'full-loop' }}
+      reference_repo: ${{ inputs.reference_repo }}
+      reference_base_url: ${{ inputs.base_url }}
+      extra_context: ${{ inputs.extra_context }}
     secrets: inherit

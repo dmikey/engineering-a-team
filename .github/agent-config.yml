@@ -106,6 +106,33 @@ product_owner:
     - feature
     - product-owner
 
+# ─── Self-Improvement Loop ──────────────────────────────────────────────────
+
+self_improvement:
+  # Enable or disable the self-improvement evaluator.
+  # Repository variable: SELF_IMPROVEMENT_ENABLED (true/false)
+  enabled: true
+
+  # Model override for the self-improvement evaluator.
+  # Repository variable: SELF_IMPROVEMENT_MODEL
+  model: gpt-4o-mini
+
+  # Cron schedule for the evaluation loop (UTC).
+  # Defined in .github/workflows/self-improvement-loop.yml.
+  schedule: "0 17 * * 1-5"   # Every weekday at 17:00 UTC
+
+  # Optional owner/repo for the benchmark application repository.
+  # Repository variable: REFERENCE_APP_REPO
+  reference_app_repo: ""
+
+  # Optional live URL for browser-based benchmark checks.
+  # Repository variable: REFERENCE_APP_BASE_URL
+  reference_app_base_url: ""
+
+  # Optional assignee used for native GitHub Copilot handoff when supported.
+  # Repository variable: COPILOT_ASSIGNEE
+  copilot_assignee: ""
+
 # ─── Council ─────────────────────────────────────────────────────────────────
 
 council:

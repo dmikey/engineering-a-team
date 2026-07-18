@@ -74,6 +74,7 @@ to execute:
 - `pm`: `task` such as `groom-backlog`, `check-milestones`, or `full-sprint-report`
 - `po`: `task` such as `product-health-report`, `suggest-features`, or `run-playwright`
 - `council`: `topic`, optional `issue_number`, and `extra_context`
+- `self-improvement`: `task` as `full-loop`, `benchmark-only`, or `copilot-handoff`, plus optional `reference_repo`, `base_url`, and `extra_context`
 
 You can still run the individual workflows directly from the Actions tab if
 you want the workflow-specific form.
@@ -130,12 +131,17 @@ Override defaults using GitHub repository variables
 | `QA_SEVERITY_THRESHOLD` | `HIGH` | Minimum severity to open an issue |
 | `PM_MILESTONE_LOOKAHEAD_DAYS` | `30` | Days ahead for milestone drift detection |
 | `PO_RUN_PLAYWRIGHT` | `true` | Run Playwright tests when config is found |
+| `REFERENCE_APP_REPO` | _(empty)_ | Optional `owner/repo` for the Get Milk benchmark app |
+| `REFERENCE_APP_BASE_URL` | _(empty)_ | Optional live URL for the Get Milk benchmark app |
+| `SELF_IMPROVEMENT_MODEL` | `gpt-4o-mini` | Model for self-improvement evaluation |
+| `COPILOT_ASSIGNEE` | _(empty)_ | Optional native Copilot assignee identity |
 | `COUNCIL_DISCUSSION_CATEGORY` | `Team Decisions` | GitHub Discussion category |
 
 Default automation cadence is tuned for active development:
 
 - Project Manager runs every weekday at 09:00 UTC
 - Product Owner runs every weekday at 13:00 UTC
+- Self-Improvement Loop runs every weekday at 17:00 UTC
 - Product Owner also runs on pushes to the default branch
 
 See [CONFIGURATION.md](./CONFIGURATION.md) for schedule details and how to
@@ -159,6 +165,24 @@ Start with this brief:
 
 See [docs/reference-projects/get-milk.md](./docs/reference-projects/get-milk.md)
 for the full scope, backlog seeds, and acceptance criteria.
+
+---
+
+## Self-Improvement Model
+
+This repository is meant to improve itself.
+
+- The workflows in this repo evaluate how well the agent system is supporting
+  development against the Get Milk benchmark app.
+- Evaluation findings become issues in this repo labeled `self-improvement` and
+  `copilot-ready`.
+- Those issues are intended to be assigned using native GitHub Copilot, so the
+  platform's built-in execution model does the implementation work.
+- Existing QA, PM, and Council workflows can then triage, prioritize, and
+  review the resulting changes.
+
+Use **Actions → Self-Improvement Loop** for a direct manual run, or choose
+`self-improvement` from **Manual Agent Runner**.
 
 ---
 
@@ -190,6 +214,7 @@ To add a new agent:
     qa-engineer.yml          # Quinn — QA reviews
     project-manager.yml      # Morgan — backlog & milestones
     product-owner.yml        # Alex — features & Playwright
+    self-improvement-loop.yml# Casey — benchmark-driven repo improvement
     council-discussion.yml   # Casey — multi-agent council
     agent-router.yml         # Routes /commands from comments
 CONFIGURATION.md             # Full configuration guide
@@ -220,6 +245,13 @@ Weekdays 13:00 UTC or on push to default branch
             ├─► Feature issues opened
             ├─► Playwright tests run (if configured)
             └─► Product health report posted
+
+Weekdays 17:00 UTC
+  └─► self-improvement-loop.yml
+      ├─► Benchmarks workflow repo against Get Milk signals
+      ├─► Opens `self-improvement` + `copilot-ready` issues
+      ├─► Optionally attempts native Copilot assignment
+      └─► Feeds backlog back into PM, QA, and Council workflows
 
 /council topic
     └─► council-discussion.yml

@@ -1,0 +1,247 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Self-Improvement Loop
+#
+# Evaluates this workflow repository against the Get Milk reference project,
+# opens actionable improvement issues in this repository, and prepares those
+# issues for native GitHub Copilot assignment.
+#
+# Triggers:  schedule (every weekday 17:00 UTC)
+#            workflow_dispatch
+#            workflow_call
+#
+# Model defaults to gpt-4o-mini; override with repository variable
+# SELF_IMPROVEMENT_MODEL.
+# ──────────────────────────────────────────────────────────────────────────────
+name: Self-Improvement Loop
+
+on:
+  schedule:
+    # Every weekday at 17:00 UTC
+    - cron: '0 17 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      focus:
+        description: 'Evaluation focus area'
+        type: choice
+        options:
+          - full-loop
+          - benchmark-only
+          - copilot-handoff
+        default: full-loop
+      reference_repo:
+        description: 'owner/repo for the Get Milk reference app (optional)'
+        required: false
+      reference_base_url:
+        description: 'Live URL for the Get Milk app (optional)'
+        required: false
+      extra_context:
+        description: 'Additional evaluation context'
+        required: false
+  workflow_call:
+    inputs:
+      focus:
+        type: string
+        description: 'Evaluation focus: full-loop | benchmark-only | copilot-handoff'
+        default: full-loop
+      reference_repo:
+        type: string
+        description: 'owner/repo for the reference app'
+        required: false
+      reference_base_url:
+        type: string
+        description: 'Live URL for the reference app'
+        required: false
+      extra_context:
+        type: string
+        description: 'Additional evaluation context'
+        required: false
+    secrets:
+      MODELS_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+  discussions: write
+
+env:
+  SELF_IMPROVEMENT_MODEL: ${{ vars.SELF_IMPROVEMENT_MODEL || vars.AGENT_MODEL || 'gpt-4o-mini' }}
+  AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
+  AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
+  DEFAULT_REFERENCE_REPO: ${{ vars.REFERENCE_APP_REPO || '' }}
+  DEFAULT_REFERENCE_BASE_URL: ${{ vars.REFERENCE_APP_BASE_URL || '' }}
+  COPILOT_ASSIGNEE: ${{ vars.COPILOT_ASSIGNEE || '' }}
+
+jobs:
+  evaluate:
+    name: Evaluate And Feed Backlog
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gather self-improvement context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          FOCUS="${{ inputs.focus || 'full-loop' }}"
+          REF_REPO="${{ inputs.reference_repo || '' }}"
+          REF_URL="${{ inputs.reference_base_url || '' }}"
+
+          if [ -z "$REF_REPO" ]; then
+            REF_REPO="$DEFAULT_REFERENCE_REPO"
+          fi
+
+          if [ -z "$REF_URL" ]; then
+            REF_URL="$DEFAULT_REFERENCE_BASE_URL"
+          fi
+
+          echo "focus=$FOCUS" >> "$GITHUB_OUTPUT"
+          echo "reference_repo=$REF_REPO" >> "$GITHUB_OUTPUT"
+          echo "reference_base_url=$REF_URL" >> "$GITHUB_OUTPUT"
+
+          CURRENT_DATE=$(date -u +"%Y-%m-%d")
+          echo "current_date=$CURRENT_DATE" >> "$GITHUB_OUTPUT"
+
+          README=$(head -120 README.md 2>/dev/null || echo "No README found")
+          GET_MILK=$(cat docs/reference-projects/get-milk.md 2>/dev/null || echo "No Get Milk brief found")
+          RECENT_COMMITS=$(git log --since="30 days ago" --oneline --no-merges | head -40 || echo "No commits")
+          OPEN_SELF_ISSUES=$(gh issue list \
+            --state open \
+            --limit 50 \
+            --label "self-improvement" \
+            --json number,title,labels,assignees,createdAt,body \
+            2>/dev/null || echo "[]")
+
+          REF_REPO_INFO="Not configured"
+          REF_OPEN_ISSUES="[]"
+          REF_OPEN_PRS="[]"
+          REF_RECENT_COMMITS="No reference repo configured"
+
+          if [ -n "$REF_REPO" ]; then
+            REF_REPO_INFO=$(gh api "repos/$REF_REPO" \
+              --jq '{full_name:.full_name, description:.description, default_branch:.default_branch, open_issues_count:.open_issues_count, pushed_at:.pushed_at}' \
+              2>/dev/null || echo "Reference repo lookup failed")
+            REF_OPEN_ISSUES=$(gh issue list \
+              --repo "$REF_REPO" \
+              --state open \
+              --limit 20 \
+              --json number,title,labels,assignees,createdAt \
+              2>/dev/null || echo "[]")
+            REF_OPEN_PRS=$(gh pr list \
+              --repo "$REF_REPO" \
+              --state open \
+              --limit 20 \
+              --json number,title,author,createdAt \
+              2>/dev/null || echo "[]")
+            REF_RECENT_COMMITS=$(gh api "repos/$REF_REPO/commits?per_page=15" \
+              --jq '.[] | "- " + .sha[0:7] + " " + .commit.message' \
+              2>/dev/null || echo "Reference commit lookup failed")
+          fi
+
+          {
+            echo "evaluation_context<<SELF_IMPROVEMENT_CTX_EOF"
+            echo "## Evaluation Focus"
+            echo "$FOCUS"
+            echo ""
+            echo "## Workflow Repository"
+            echo "Repository: ${{ github.repository }}"
+            echo "Date: $CURRENT_DATE"
+            echo ""
+            echo "### README (excerpt)"
+            echo "$README"
+            echo ""
+            echo "### Recent Commits"
+            echo "$RECENT_COMMITS"
+            echo ""
+            echo "### Existing Self-Improvement Issues (raw JSON)"
+            echo "$OPEN_SELF_ISSUES"
+            echo ""
+            echo "## Get Milk Benchmark Brief"
+            echo "$GET_MILK"
+            echo ""
+            echo "## Reference Application Signals"
+            echo "Reference repo: ${REF_REPO:-Not configured}"
+            echo "Reference base URL: ${REF_URL:-Not configured}"
+            echo ""
+            echo "### Reference Repo Metadata"
+            echo "$REF_REPO_INFO"
+            echo ""
+            echo "### Reference Open Issues (raw JSON)"
+            echo "$REF_OPEN_ISSUES"
+            echo ""
+            echo "### Reference Open PRs (raw JSON)"
+            echo "$REF_OPEN_PRS"
+            echo ""
+            echo "### Reference Recent Commits"
+            echo "$REF_RECENT_COMMITS"
+            echo ""
+            echo "## Additional Context"
+            echo "${{ inputs.extra_context }}"
+            echo "SELF_IMPROVEMENT_CTX_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Generate self-improvement recommendations
+        id: analysis
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.SELF_IMPROVEMENT_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Casey operating in self-improvement mode for an autonomous
+            engineering workflow system.
+
+            Your job is to improve the workflow repository itself so it better:
+            - benchmarks against the Get Milk reference app
+            - evaluates whether the agent loop is actually improving delivery
+            - produces issues that are ready for native GitHub Copilot assignment
+
+            Return ONLY a JSON array with 1 to 3 recommendations.
+            Each item must have this exact shape:
+            {
+              "title": "Concise improvement title",
+              "summary": "One paragraph describing the gap in this workflow repository",
+              "benchmark_gap": "How the gap weakens the Get Milk evaluation loop",
+              "evidence": ["specific signal 1", "specific signal 2"],
+              "implementation_hint": "Concrete workflow/doc/config change to make in this repo",
+              "copilot_brief": "A short implementation brief to hand to GitHub Copilot",
+              "labels": ["self-improvement", "copilot-ready"],
+              "needs_qa": true,
+              "needs_council": false
+            }
+
+            Rules:
+            - Focus on this repository, not the reference app product backlog.
+            - Do not suggest duplicate work if an equivalent self-improvement
+              issue already appears open.
+            - Prefer workflow, configuration, prompt, and observability changes.
+            - If reference repo data is unavailable, use the Get Milk brief and
+              current repository state as the benchmark source.
+          user-prompt: |
+            Analyse this workflow repository and propose the next best
+            self-improvement issues.
+
+            ${{ steps.ctx.outputs.evaluation_context }}
+
+      - name: Open Copilot-ready self-improvement issues
+        if: steps.analysis.outputs.response != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RECOMMENDATIONS_JSON: ${{ steps.analysis.outputs.response }}
+          REFERENCE_REPO: ${{ steps.ctx.outputs.reference_repo }}
+          REFERENCE_BASE_URL: ${{ steps.ctx.outputs.reference_base_url }}
+          CURRENT_DATE: ${{ steps.ctx.outputs.current_date }}
+          COPILOT_ASSIGNEE: ${{ env.COPILOT_ASSIGNEE }}
+        run: |
+          gh label create "self-improvement" --color "0e8a16" --force 2>/dev/null || true
+          gh label create "copilot-ready" --color "1d76db" --force 2>/dev/null || true
+          gh label create "benchmarking" --color "5319e7" --force 2>/dev/null || true
+
+          python3 .github/scripts/self_improvement_issue_writer.py
