@@ -11,16 +11,20 @@ def run_command(command):
 
 def main():
     raw = os.environ.get("RECOMMENDATIONS_JSON", "")
+    if raw.startswith("⚠️ Model call failed:"):
+        print(raw)
+        return 1
+
     match = re.search(r"\[.*\]", raw, re.DOTALL)
     if not match:
         print("No JSON array found in recommendations")
-        return 0
+        return 1
 
     try:
         recommendations = json.loads(match.group())
     except json.JSONDecodeError as exc:
         print(f"Failed to parse recommendations JSON: {exc}")
-        return 0
+        return 1
 
     existing_raw = run_command(
         ["gh", "issue", "list", "--state", "open", "--limit", "100", "--json", "number,title"]

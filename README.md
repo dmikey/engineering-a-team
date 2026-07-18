@@ -32,6 +32,10 @@ cd engineering-a-team
 The agents call **GitHub Models** (`https://models.inference.ai.azure.com`).
 You need a token with the `models:read` scope.
 
+Workflows in this repository now also request `models: read` permission for the
+`GITHUB_TOKEN`. If your plan or org policy still does not allow GitHub Models
+through `GITHUB_TOKEN`, set `MODELS_TOKEN` explicitly.
+
 1. Go to **Settings → Secrets and variables → Secrets**
 2. Create secret `MODELS_TOKEN` with your GitHub PAT (or leave it unset to
    fall back to `GITHUB_TOKEN`)

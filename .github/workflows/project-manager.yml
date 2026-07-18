@@ -51,6 +51,7 @@ permissions:
   contents: read
   issues: write
   discussions: write
+  models: read
 
 env:
   PM_MODEL: ${{ vars.PM_MODEL || 'gpt-4o-mini' }}

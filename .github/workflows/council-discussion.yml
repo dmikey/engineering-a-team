@@ -58,6 +58,7 @@ on:
 permissions:
   contents: read
   issues: write
+  models: read
   pull-requests: write
   discussions: write
 

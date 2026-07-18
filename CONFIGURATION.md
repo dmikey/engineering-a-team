@@ -33,6 +33,10 @@ If `MODELS_TOKEN` is not set, workflows fall back to the built-in
 `GITHUB_TOKEN`. Note that `GITHUB_TOKEN` may have limited access to GitHub
 Models depending on your plan.
 
+The model-calling workflows in this repository request `models: read`
+permission explicitly. If GitHub Models access is still denied, provide a
+`MODELS_TOKEN` secret instead of relying on `GITHUB_TOKEN`.
+
 ---
 
 ## Repository Variables
