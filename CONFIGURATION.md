@@ -97,6 +97,20 @@ Settings → Secrets and variables → Variables → New repository variable
 
 ---
 
+## Collaboration Rules
+
+Shared collaboration rules live in
+[`/.github/collaboration-rules.md`](./.github/collaboration-rules.md).
+
+- Edit this file to define how agents should interact and make decisions.
+- The shared `call-github-model` action reads the file on every invocation, so
+  updates apply dynamically to subsequent agent runs without restarting
+  anything.
+- Changes are audited by the **Collaboration Rules Audit** workflow, which posts
+  a timestamped record with the before/after content and diff.
+
+---
+
 ## Schedules
 
 Default schedules (UTC):
@@ -157,6 +171,10 @@ The system prompts in the workflow files are seeded from these definitions.
 To change Quinn's tone from "methodical" to "collaborative", simply edit the
 QA Engineer persona in `.github/agents.md` and update the `system-prompt:`
 in `.github/workflows/qa-engineer.yml`.
+
+For cross-agent interaction rules that should apply everywhere, prefer updating
+[`/.github/collaboration-rules.md`](./.github/collaboration-rules.md) instead of
+editing each workflow prompt individually.
 
 ---
 

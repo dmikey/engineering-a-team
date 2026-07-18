@@ -44,7 +44,39 @@ runs:
         TEMPERATURE: ${{ inputs.temperature }}
         MAX_TOKENS: ${{ inputs.max-tokens }}
         API_TOKEN: ${{ inputs.token }}
+        RULES_FILE: ${{ github.workspace }}/.github/collaboration-rules.md
       run: |
+        PROMPT_FILE=$(mktemp)
+        python3 - <<'PYEOF' > "$PROMPT_FILE"
+        import os
+        from pathlib import Path
+        
+        system_prompt = os.environ.get("SYSTEM_PROMPT")
+        if system_prompt is None:
+            raise SystemExit("Missing required input: system-prompt. This should be provided by the workflow calling this action.")
+        
+        rules_file_value = os.environ.get("RULES_FILE")
+        if rules_file_value is None:
+            raise SystemExit("Missing required environment variable: RULES_FILE. This should be set automatically by this action - please report this as an action implementation bug.")
+        
+        prompt = system_prompt.rstrip()
+        rules_file = Path(rules_file_value)
+        
+        if rules_file.is_file():
+            try:
+                rules = rules_file.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError) as exc:
+                raise SystemExit(f"Failed to read collaboration rules file {rules_file}: {exc}")
+            else:
+                if rules:
+                    prompt = f"{prompt}\n\nFollow these repository collaboration rules for agent interaction and decision-making:\n\n{rules}"
+        
+        print(prompt)
+        PYEOF
+        EFFECTIVE_SYSTEM_PROMPT=$(cat "$PROMPT_FILE")
+        rm -f "$PROMPT_FILE"
+        export EFFECTIVE_SYSTEM_PROMPT
+
         # Build JSON payload using Python to safely handle special characters
         PAYLOAD=$(python3 - <<'PYEOF'
         import json, os
@@ -53,7 +85,7 @@ runs:
             "temperature": float(os.environ["TEMPERATURE"]),
             "max_tokens":  int(os.environ["MAX_TOKENS"]),
             "messages": [
-                {"role": "system", "content": os.environ["SYSTEM_PROMPT"]},
+                {"role": "system", "content": os.environ["EFFECTIVE_SYSTEM_PROMPT"]},
                 {"role": "user",   "content": os.environ["USER_PROMPT"]}
             ]
         }

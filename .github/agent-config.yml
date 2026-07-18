@@ -26,6 +26,13 @@ max_tokens: 2048
 # Repository variable: AGENT_TEMPERATURE
 temperature: "0.7"
 
+# ─── Collaboration Rules ───────────────────────────────────────────────────────
+
+# Shared collaboration rules loaded dynamically into every GitHub Models call.
+# Edit .github/collaboration-rules.md to customize agent interaction and
+# decision-making behaviour without changing workflow YAML or restarting agents.
+# Changes are logged by the Collaboration Rules Audit workflow.
+
 # ─── Authentication ───────────────────────────────────────────────────────────
 
 # The built-in GITHUB_TOKEN is used by default.

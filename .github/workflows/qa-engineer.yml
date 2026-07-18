@@ -197,7 +197,35 @@ jobs:
           QA_RESPONSE: ${{ steps.qa.outputs.response }}
           PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
         run: |
-          COMMENT="$QA_RESPONSE
+          COMMENT="$QA_RESPONSE"
+
+          if python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          response = os.environ.get("QA_RESPONSE", "")
+          match = re.search(r"^\s*\*\*Recommendation\*\*:\s*\[(.*?)\]\s*$", response, re.MULTILINE)
+          if not match:
+              print(
+                  'Warning: Could not find QA recommendation line matching pattern "**Recommendation**: [ACTION]"; skipping Copilot handoff.',
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          recommendation = match.group(1).upper()
+          if "REQUEST CHANGES" in recommendation or "BLOCK" in recommendation:
+              sys.exit(0)
+
+          sys.exit(1)
+          PY
+          then
+            COMMENT="$COMMENT
+
+            @copilot please address the QA findings above and push the required fixes to this PR."
+          fi
+
+          COMMENT="$COMMENT
 
           ---
           *🤖 Automated review by Quinn (QA Engineer Agent) · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
