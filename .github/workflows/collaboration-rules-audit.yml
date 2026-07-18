@@ -31,7 +31,7 @@ jobs:
         run: |
           CURRENT_DATE="${EVENT_TIMESTAMP:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
           if [ ! -f "$RULES_FILE" ]; then
-            echo "Expected $RULES_FILE to exist for audit logging." >&2
+            echo "Expected $RULES_FILE to exist after checkout. This indicates a workflow configuration issue." >&2
             exit 1
           fi
 

@@ -53,11 +53,11 @@ runs:
         
         system_prompt = os.environ.get("SYSTEM_PROMPT")
         if system_prompt is None:
-            raise SystemExit("Missing required environment variable: SYSTEM_PROMPT. This should be set by the call-github-model action input.")
+            raise SystemExit("Missing required input: system-prompt. This should be provided by the workflow calling this action.")
         
         rules_file_value = os.environ.get("RULES_FILE")
         if rules_file_value is None:
-            raise SystemExit("Missing required environment variable: RULES_FILE. This should be set automatically by the action - please report this as a workflow bug.")
+            raise SystemExit("Missing required environment variable: RULES_FILE. This should be set automatically by this action - please report this as an action implementation bug.")
         
         prompt = system_prompt.rstrip()
         rules_file = Path(rules_file_value)
