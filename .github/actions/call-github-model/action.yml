@@ -51,7 +51,10 @@ runs:
         import os
         import re
         from pathlib import Path
-        
+
+        HEADING_PATTERN = re.compile(r"^#{1,6}[ \t]+\S", re.MULTILINE)
+        LIST_ITEM_PATTERN = re.compile(r"^(?:[-*][ \t]+\S|\d+\.[ \t]+\S)", re.MULTILINE)
+
         def validate_rules(rules: str, rules_file: Path) -> None:
             if not rules:
                 raise SystemExit(
@@ -65,8 +68,8 @@ runs:
                     "Use plain UTF-8 markdown text."
                 )
 
-            has_heading = re.search(r"^#{1,6}[ \t]+\S", rules, re.MULTILINE) is not None
-            has_list_item = re.search(r"^(?:[-*][ \t]+\S|\d+\.[ \t]+\S)", rules, re.MULTILINE) is not None
+            has_heading = HEADING_PATTERN.search(rules) is not None
+            has_list_item = LIST_ITEM_PATTERN.search(rules) is not None
             if not has_heading or not has_list_item:
                 raise SystemExit(
                     f"Collaboration rules file {rules_file} must be valid markdown with at least one heading "

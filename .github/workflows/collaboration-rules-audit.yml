@@ -32,7 +32,14 @@ jobs:
           CURRENT_DATE="${EVENT_TIMESTAMP:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
           if [ ! -f "$RULES_FILE" ]; then
             if [ -e "$RULES_FILE" ]; then
-              echo "Expected $RULES_FILE to be a regular file, but it is not." >&2
+              if [ -d "$RULES_FILE" ]; then
+                FILE_TYPE="directory"
+              elif [ -L "$RULES_FILE" ]; then
+                FILE_TYPE="symlink"
+              else
+                FILE_TYPE="non-regular file"
+              fi
+              echo "Expected $RULES_FILE to be a regular file, but found a $FILE_TYPE instead." >&2
             else
               echo "Expected $RULES_FILE to exist after checkout. This indicates a workflow configuration issue." >&2
             fi
