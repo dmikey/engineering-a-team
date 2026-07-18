@@ -66,9 +66,9 @@ project_manager:
   # Repository variable: PM_MODEL
   model: gpt-4o-mini
 
-  # Cron schedule for weekly backlog grooming (UTC).
-  # Repository variable: PM_SCHEDULE
-  schedule: "0 9 * * 1"   # Every Monday at 09:00 UTC
+  # Cron schedule for backlog grooming (UTC).
+  # Defined in .github/workflows/project-manager.yml.
+  schedule: "0 9 * * 1-5"   # Every weekday at 09:00 UTC
 
   # Number of days before a milestone due date to begin drift detection.
   # Repository variable: PM_MILESTONE_LOOKAHEAD_DAYS
@@ -93,9 +93,9 @@ product_owner:
   # Repository variable: PO_MODEL
   model: gpt-4o-mini
 
-  # Cron schedule for weekly product health report (UTC).
-  # Repository variable: PO_SCHEDULE
-  schedule: "0 9 * * 3"   # Every Wednesday at 09:00 UTC
+  # Cron schedule for product health checks (UTC).
+  # Defined in .github/workflows/product-owner.yml.
+  schedule: "0 13 * * 1-5"   # Every weekday at 13:00 UTC
 
   # Automatically run Playwright tests when playwright.config.* is detected.
   # Repository variable: PO_RUN_PLAYWRIGHT (true/false)

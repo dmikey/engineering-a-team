@@ -90,10 +90,24 @@ Default schedules (UTC):
 
 | Agent | Default | Override |
 |-------|---------|---------|
-| Project Manager | Every Monday 09:00 | Edit `cron` in `project-manager.yml` |
-| Product Owner | Every Wednesday 09:00 | Edit `cron` in `product-owner.yml` |
+| Project Manager | Every weekday 09:00 | Edit `cron` in `project-manager.yml` |
+| Product Owner | Every weekday 13:00 | Edit `cron` in `product-owner.yml` |
+
+GitHub Actions does not support repository variables inside `on.schedule`, so
+the schedule is controlled directly in the workflow YAML.
 
 To change the schedule, edit the `cron:` value in the respective workflow file.
+
+---
+
+## Manual Runs
+
+All agent workflows support `workflow_dispatch`, so they can be started from
+the GitHub Actions UI.
+
+For a single entrypoint, use **Manual Agent Runner** from the Actions tab. It
+dispatches to the underlying QA, Project Manager, Product Owner, or Council
+workflow and forwards the relevant inputs.
 
 ---
 

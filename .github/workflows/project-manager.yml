@@ -1,7 +1,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # Project Manager Agent — Morgan
 #
-# Triggers:  schedule (every Monday 09:00 UTC)
+# Triggers:  schedule (every weekday 09:00 UTC)
 #            issues (opened, labeled)
 #            milestones (created, edited, closed)
 #            workflow_dispatch
@@ -17,8 +17,8 @@ name: Project Manager Agent
 
 on:
   schedule:
-    # Every Monday at 09:00 UTC — override with PM_SCHEDULE variable
-    - cron: '0 9 * * 1'
+    # Every weekday at 09:00 UTC
+    - cron: '0 9 * * 1-5'
   issues:
     types: [opened, labeled, milestoned]
   milestone:

@@ -1,0 +1,79 @@
+name: Manual Agent Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      agent:
+        description: 'Agent workflow to run'
+        type: choice
+        options:
+          - qa
+          - pm
+          - po
+          - council
+        default: pm
+      task:
+        description: 'Task for PM or PO workflows'
+        required: false
+        default: ''
+      pr_number:
+        description: 'PR number for QA review'
+        required: false
+        default: ''
+      topic:
+        description: 'Topic for council discussion'
+        required: false
+        default: ''
+      issue_number:
+        description: 'Related issue or PR number for council discussion'
+        required: false
+        default: ''
+      extra_context:
+        description: 'Additional context passed to the selected workflow'
+        required: false
+        default: ''
+      base_url:
+        description: 'Base URL for Product Owner Playwright runs'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  discussions: write
+
+jobs:
+  run-qa:
+    if: ${{ inputs.agent == 'qa' }}
+    uses: ./.github/workflows/qa-engineer.yml
+    with:
+      pr_number: ${{ inputs.pr_number }}
+      extra_context: ${{ inputs.extra_context }}
+    secrets: inherit
+
+  run-pm:
+    if: ${{ inputs.agent == 'pm' }}
+    uses: ./.github/workflows/project-manager.yml
+    with:
+      task: ${{ inputs.task != '' && inputs.task || 'full-sprint-report' }}
+      extra_context: ${{ inputs.extra_context }}
+    secrets: inherit
+
+  run-po:
+    if: ${{ inputs.agent == 'po' }}
+    uses: ./.github/workflows/product-owner.yml
+    with:
+      task: ${{ inputs.task != '' && inputs.task || 'product-health-report' }}
+      extra_context: ${{ inputs.extra_context }}
+      base_url: ${{ inputs.base_url }}
+    secrets: inherit
+
+  run-council:
+    if: ${{ inputs.agent == 'council' }}
+    uses: ./.github/workflows/council-discussion.yml
+    with:
+      topic: ${{ inputs.topic != '' && inputs.topic || 'Manual council discussion' }}
+      context: ${{ inputs.extra_context }}
+      issue_number: ${{ inputs.issue_number }}
+    secrets: inherit

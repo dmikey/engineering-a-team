@@ -94,13 +94,13 @@ clearly, always grounding decisions in milestone dates and team capacity.
 - Apply priority labels (`priority: critical`, `priority: high`,
   `priority: medium`, `priority: low`) to issues
 - Detect milestone drift and comment on affected milestones with a plan
-- Generate weekly sprint-planning summaries posted as GitHub Discussions
+- Generate frequent sprint-planning summaries posted as GitHub Discussions
 - Identify blocked issues and tag them `blocked`
 - Adjust issue assignments when overloaded
 
 ### Triggers
 
-- Schedule: every Monday at 09:00 UTC
+- Schedule: every weekday at 09:00 UTC
 - Issues created or labeled
 - Milestones created or updated
 - `workflow_dispatch`
@@ -138,11 +138,11 @@ back to customer outcomes.
 - Run Playwright end-to-end tests when a `playwright.config.*` file is
   present, and post a test report
 - React to new discussions by surfacing relevant backlog items
-- Generate weekly product health reports
+- Generate frequent product health reports
 
 ### Triggers
 
-- Schedule: every Wednesday at 09:00 UTC
+- Schedule: every weekday at 13:00 UTC
 - Discussions created
 - Push to the default branch (product state analysis)
 - `workflow_dispatch`

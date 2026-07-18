@@ -12,8 +12,8 @@ consensus.
 | Agent | Name | Role | Default Trigger |
 |-------|------|------|----------------|
 | 🔍 QA Engineer | Quinn | Reviews PRs, finds bugs, opens issues | Every PR |
-| 📋 Project Manager | Morgan | Grooms backlog, manages milestones | Every Monday |
-| 🧪 Product Owner | Alex | Suggests features, runs Playwright | Every Wednesday |
+| 📋 Project Manager | Morgan | Grooms backlog, manages milestones | Every weekday |
+| 🧪 Product Owner | Alex | Suggests features, runs Playwright | Every weekday + default-branch push |
 | 🏛️ Council Moderator | Casey | Facilitates multi-agent discussions | On demand |
 
 ---
@@ -64,6 +64,19 @@ PM agents will post reports as Discussions. If disabled, they fall back to
 Issues.
 
 ### 5. Push code and open a PR — Quinn reviews it automatically
+
+### 6. Run any agent manually from the Actions tab
+
+Open **Actions → Manual Agent Runner → Run workflow** and choose which agent
+to execute:
+
+- `qa`: optional `pr_number` and `extra_context`
+- `pm`: `task` such as `groom-backlog`, `check-milestones`, or `full-sprint-report`
+- `po`: `task` such as `product-health-report`, `suggest-features`, or `run-playwright`
+- `council`: `topic`, optional `issue_number`, and `extra_context`
+
+You can still run the individual workflows directly from the Actions tab if
+you want the workflow-specific form.
 
 ---
 
@@ -119,6 +132,34 @@ Override defaults using GitHub repository variables
 | `PO_RUN_PLAYWRIGHT` | `true` | Run Playwright tests when config is found |
 | `COUNCIL_DISCUSSION_CATEGORY` | `Team Decisions` | GitHub Discussion category |
 
+Default automation cadence is tuned for active development:
+
+- Project Manager runs every weekday at 09:00 UTC
+- Product Owner runs every weekday at 13:00 UTC
+- Product Owner also runs on pushes to the default branch
+
+See [CONFIGURATION.md](./CONFIGURATION.md) for schedule details and how to
+change them.
+
+---
+
+## Reference Project: Get Milk
+
+Use a small, concrete app as the proving ground for the autonomous team. The
+recommended reference project is **Get Milk**: a lightweight shopping-list app
+focused on the recurring job of remembering and buying staples.
+
+Start with this brief:
+
+- User can add an item with a quantity
+- User can mark an item complete when purchased
+- User can see items due today or overdue
+- User can quickly re-add common recurring items like milk, eggs, and bread
+- Team tracks follow-up work as GitHub issues with milestones and priorities
+
+See [docs/reference-projects/get-milk.md](./docs/reference-projects/get-milk.md)
+for the full scope, backlog seeds, and acceptance criteria.
+
 ---
 
 ## Extending the Team
@@ -165,14 +206,14 @@ PR Opened
                     └─► PR review comment posted
                     └─► Issue opened if HIGH/CRITICAL
 
-Monday 09:00 UTC
+Weekdays 09:00 UTC
     └─► project-manager.yml
             ├─► call-github-model (Morgan — grooming)
             ├─► call-github-model (Morgan — milestones)
             ├─► Labels applied to issues
             └─► Sprint report posted to Discussion/Issue
 
-Wednesday 09:00 UTC
+Weekdays 13:00 UTC or on push to default branch
     └─► product-owner.yml
             ├─► call-github-model (Alex — health report)
             ├─► call-github-model (Alex — feature suggestions)

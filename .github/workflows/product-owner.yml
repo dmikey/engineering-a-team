@@ -1,7 +1,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # Product Owner Agent — Alex
 #
-# Triggers:  schedule (every Wednesday 09:00 UTC)
+# Triggers:  schedule (every weekday 13:00 UTC)
 #            discussion created
 #            push to default branch
 #            workflow_dispatch
@@ -17,8 +17,8 @@ name: Product Owner Agent
 
 on:
   schedule:
-    # Every Wednesday at 09:00 UTC — override with PO_SCHEDULE variable
-    - cron: '0 9 * * 3'
+    # Every weekday at 13:00 UTC
+    - cron: '0 13 * * 1-5'
   discussion:
     types: [created]
   push:
@@ -72,12 +72,13 @@ jobs:
   product-ownership:
     name: Alex · Product Owner
     runs-on: ubuntu-latest
-    # Run only on the intended triggers, not on every push to the default branch
+    # Run on the explicitly supported triggers, including pushes to the default branch.
     if: |
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'workflow_call' ||
       github.event_name == 'schedule' ||
-      github.event_name == 'discussion'
+      github.event_name == 'discussion' ||
+      github.event_name == 'push'
 
     steps:
       - name: Checkout repository
