@@ -56,6 +56,9 @@ Settings → Secrets and variables → Variables → New repository variable
 | `COUNCIL_MODEL` | `gpt-4o` | Model for the Council Moderator (higher capability recommended) |
 | `AGENT_MAX_TOKENS` | `2048` | Maximum tokens per model response |
 | `AGENT_TEMPERATURE` | `0.7` | Sampling temperature (0.0 = deterministic, 1.0 = creative) |
+| `AGENT_DEFAULT_COMMUNICATION_METHOD` | `comment` | Default channel for agent-router notifications. Options: `comment`, `issue`, `discussion` |
+| `AGENT_COMMUNICATION_PREFERENCES` | `{}` | JSON object mapping GitHub usernames to channels. Example: `{"octocat":"discussion","alice":"issue"}` |
+| `AGENT_ROUTER_DISCUSSION_CATEGORY` | `General` | Discussion category name used by agent-router when posting notifications as discussions |
 
 ### QA Engineer Variables
 

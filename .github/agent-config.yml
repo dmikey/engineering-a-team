@@ -164,9 +164,25 @@ council:
 # ─── Agent Router ────────────────────────────────────────────────────────────
 
 router:
+  # Default communication method used when a user has not set a personal
+  # preference. Repository variable: AGENT_DEFAULT_COMMUNICATION_METHOD
+  # Options: comment | issue | discussion
+  default_communication_method: comment
+
+  # Optional JSON map of per-user communication preferences.
+  # Repository variable: AGENT_COMMUNICATION_PREFERENCES
+  # Example: {"octocat":"discussion","alice":"issue"}
+  communication_preferences: "{}"
+
+  # Discussion category name used when posting router notifications as
+  # discussions. Falls back to the first available category.
+  # Repository variable: AGENT_ROUTER_DISCUSSION_CATEGORY
+  discussion_category: "General"
+
   # Map of slash-commands to workflow file names.
   commands:
     "/qa":       qa-engineer.yml
     "/pm":       project-manager.yml
     "/po":       product-owner.yml
     "/council":  council-discussion.yml
+    "/profile":  agent-router.yml
