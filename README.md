@@ -1,7 +1,6 @@
 # Engineering a Team — Autonomous GitHub Workflow Agents
 
-An autonomous AI engineering team living entirely in GitHub Actions. Three
-intelligent agents — backed by **GitHub Models** — work together to ship
+An autonomous AI engineering team living entirely in GitHub Actions. Intelligent agents — backed by **GitHub Models** — work together to ship
 quality software: reviewing code, managing the backlog, and championing the
 product. A **council mechanism** lets them discuss complex decisions and reach
 consensus.
