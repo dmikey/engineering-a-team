@@ -197,7 +197,15 @@ jobs:
           QA_RESPONSE: ${{ steps.qa.outputs.response }}
           PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
         run: |
-          COMMENT="$QA_RESPONSE
+          COMMENT="$QA_RESPONSE"
+
+          if ! echo "$QA_RESPONSE" | grep -Fq '**Recommendation**: [✅ APPROVE]'; then
+            COMMENT="$COMMENT
+
+            @copilot please address the QA findings above and push the required fixes to this PR."
+          fi
+
+          COMMENT="$COMMENT
 
           ---
           *🤖 Automated review by Quinn (QA Engineer Agent) · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"

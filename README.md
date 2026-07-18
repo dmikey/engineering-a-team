@@ -244,6 +244,7 @@ PR Opened
     └─► qa-engineer.yml
             └─► call-github-model (Quinn persona)
                     └─► PR review comment posted
+                    └─► Non-approval reviews tag `@copilot` for PR follow-up
                     └─► Issue opened if HIGH/CRITICAL
 
 Weekdays 09:00 UTC
