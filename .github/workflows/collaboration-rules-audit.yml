@@ -26,13 +26,22 @@ jobs:
         id: audit
         run: |
           CURRENT_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          CURRENT_RULES=$(cat .github/collaboration-rules.md 2>/dev/null || echo "No collaboration rules file found.")
+          if [ ! -f .github/collaboration-rules.md ]; then
+            echo "Expected .github/collaboration-rules.md to exist for audit logging." >&2
+            exit 1
+          fi
+
+          CURRENT_RULES=$(cat .github/collaboration-rules.md)
           PREVIOUS_SHA="${{ github.event.before }}"
 
           if [ "${{ github.event_name }}" = "push" ] && \
              [ -n "$PREVIOUS_SHA" ] && \
              git rev-parse --verify "${PREVIOUS_SHA}^{commit}" >/dev/null 2>&1; then
-            PREVIOUS_RULES=$(git show "${PREVIOUS_SHA}:.github/collaboration-rules.md" 2>/dev/null || echo "File did not exist previously.")
+            if git cat-file -e "${PREVIOUS_SHA}:.github/collaboration-rules.md" 2>/dev/null; then
+              PREVIOUS_RULES=$(git show "${PREVIOUS_SHA}:.github/collaboration-rules.md")
+            else
+              PREVIOUS_RULES="File was created in this revision."
+            fi
             RULES_DIFF=$(git diff "$PREVIOUS_SHA" "${{ github.sha }}" -- .github/collaboration-rules.md 2>/dev/null || true)
           else
             PREVIOUS_RULES="Manual audit run or previous version unavailable."

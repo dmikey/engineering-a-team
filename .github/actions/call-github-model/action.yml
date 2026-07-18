@@ -46,10 +46,9 @@ runs:
         API_TOKEN: ${{ inputs.token }}
         RULES_FILE: ${{ github.workspace }}/.github/collaboration-rules.md
       run: |
-        PROMPT_FILE=$(mktemp /tmp/collaboration-rules-prompt.XXXXXX)
+        PROMPT_FILE=$(mktemp)
         python3 - <<'PYEOF' > "$PROMPT_FILE"
         import os
-        import sys
         from pathlib import Path
         
         prompt = os.environ["SYSTEM_PROMPT"].rstrip()
@@ -59,7 +58,7 @@ runs:
             try:
                 rules = rules_file.read_text(encoding="utf-8").strip()
             except (OSError, UnicodeDecodeError) as exc:
-                print(f"Warning: could not read collaboration rules file: {exc}", file=sys.stderr)
+                raise SystemExit(f"Failed to read collaboration rules file: {exc}")
             else:
                 if rules:
                     prompt = f"{prompt}\n\nFollow these repository collaboration rules for agent interaction and decision-making:\n\n{rules}"
