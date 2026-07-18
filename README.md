@@ -99,6 +99,7 @@ Post any of these in an issue or PR comment (write access required):
 | `/po product-health-report` | Trigger Alex for a product health report |
 | `/po run-playwright` | Trigger Alex to run Playwright tests |
 | `/council [topic]` | Convene the full council on a topic |
+| `/profile comms [comment\|issue\|discussion]` | Set your personal communication channel preference |
 | `/help` | List all commands |
 
 ---
@@ -132,6 +133,8 @@ Override defaults using GitHub repository variables
 | `COUNCIL_MODEL` | `gpt-4o` | Model for Council Moderator |
 | `AGENT_MAX_TOKENS` | `2048` | Max response tokens |
 | `AGENT_TEMPERATURE` | `0.7` | Generation temperature |
+| `AGENT_DEFAULT_COMMUNICATION_METHOD` | `comment` | Default channel for agent-router notifications (`comment`, `issue`, or `discussion`) |
+| `AGENT_COMMUNICATION_PREFERENCES` | `{}` | JSON map of per-user communication preferences, e.g. `{\"octocat\":\"discussion\"}` |
 | `QA_SEVERITY_THRESHOLD` | `HIGH` | Minimum severity to open an issue |
 | `PM_MILESTONE_LOOKAHEAD_DAYS` | `30` | Days ahead for milestone drift detection |
 | `PO_RUN_PLAYWRIGHT` | `true` | Run Playwright tests when config is found |
