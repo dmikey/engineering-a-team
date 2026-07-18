@@ -49,8 +49,30 @@ runs:
         PROMPT_FILE=$(mktemp)
         python3 - <<'PYEOF' > "$PROMPT_FILE"
         import os
+        import re
         from pathlib import Path
         
+        def validate_rules(rules: str, rules_file: Path) -> None:
+            if not rules:
+                raise SystemExit(
+                    f"Collaboration rules file {rules_file} is empty. "
+                    "Add markdown headings and rule items, or remove the file if shared rules are not needed."
+                )
+
+            if "\x00" in rules:
+                raise SystemExit(
+                    f"Collaboration rules file {rules_file} contains NUL bytes. "
+                    "Use plain UTF-8 markdown text."
+                )
+
+            has_heading = re.search(r"(?m)^#{1,6}[ \t]+\S", rules) is not None
+            has_list_item = re.search(r"(?m)^(?:[-*][ \t]+\S|\d+\.[ \t]+\S)", rules) is not None
+            if not has_heading or not has_list_item:
+                raise SystemExit(
+                    f"Collaboration rules file {rules_file} must be valid markdown with at least one heading "
+                    "and one ordered or unordered list item."
+                )
+
         system_prompt = os.environ.get("SYSTEM_PROMPT")
         if system_prompt is None:
             raise SystemExit("Missing required input: system-prompt. This should be provided by the workflow calling this action.")
@@ -68,8 +90,8 @@ runs:
             except (OSError, UnicodeDecodeError) as exc:
                 raise SystemExit(f"Failed to read collaboration rules file {rules_file}: {exc}")
             else:
-                if rules:
-                    prompt = f"{prompt}\n\nFollow these repository collaboration rules for agent interaction and decision-making:\n\n{rules}"
+                validate_rules(rules, rules_file)
+                prompt = f"{prompt}\n\nFollow these repository collaboration rules for agent interaction and decision-making:\n\n{rules}"
         
         print(prompt)
         PYEOF

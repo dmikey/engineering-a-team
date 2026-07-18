@@ -30,12 +30,22 @@ jobs:
           EVENT_TIMESTAMP: ${{ github.event.head_commit.timestamp || '' }}
         run: |
           CURRENT_DATE="${EVENT_TIMESTAMP:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
-          if [ ! -f "$RULES_FILE" ]; then
+          if [ ! -e "$RULES_FILE" ]; then
             echo "Expected $RULES_FILE to exist after checkout. This indicates a workflow configuration issue." >&2
             exit 1
           fi
-
-          CURRENT_RULES=$(cat "$RULES_FILE")
+          if [ ! -f "$RULES_FILE" ]; then
+            echo "Expected $RULES_FILE to be a regular file, but it is not." >&2
+            exit 1
+          fi
+          if [ ! -r "$RULES_FILE" ]; then
+            echo "Expected $RULES_FILE to be readable during audit, but the runner cannot read it." >&2
+            exit 1
+          fi
+          if ! CURRENT_RULES=$(cat "$RULES_FILE"); then
+            echo "Failed to read $RULES_FILE while building the collaboration rules audit record." >&2
+            exit 1
+          fi
           PREVIOUS_SHA="${{ github.event.before }}"
 
           if [ "${{ github.event_name }}" = "push" ] && \
