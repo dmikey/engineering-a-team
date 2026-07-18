@@ -199,7 +199,23 @@ jobs:
         run: |
           COMMENT="$QA_RESPONSE"
 
-          if ! echo "$QA_RESPONSE" | grep -Fq '**Recommendation**: [✅ APPROVE]'; then
+          if python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          response = os.environ.get("QA_RESPONSE", "")
+          match = re.search(r"^\*\*Recommendation\*\*:\s*\[(.*?)\]\s*$", response, re.MULTILINE)
+          if not match:
+              sys.exit(1)
+
+          recommendation = match.group(1).upper()
+          if "REQUEST CHANGES" in recommendation or "BLOCK" in recommendation:
+              sys.exit(0)
+
+          sys.exit(1)
+          PY
+          then
             COMMENT="$COMMENT
 
             @copilot please address the QA findings above and push the required fixes to this PR."
