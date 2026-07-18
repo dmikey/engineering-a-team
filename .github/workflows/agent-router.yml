@@ -32,6 +32,10 @@ jobs:
   route:
     name: Route agent command
     runs-on: ubuntu-latest
+    env:
+      REPO_OWNER: ${{ github.repository_owner }}
+      REPO_NAME: ${{ github.event.repository.name }}
+      ROUTER_DISCUSSION_CATEGORY: ${{ vars.AGENT_ROUTER_DISCUSSION_CATEGORY || 'General' }}
     # Only process comments that start with /
     if: |
       startsWith(github.event.comment.body, '/qa') ||
@@ -168,22 +172,36 @@ jobs:
               --title "🤖 Agent Router Help (requested from #$ISSUE_NUMBER)" \
               --body "$HELP_BODY"
           elif [ "$CHANNEL" = "discussion" ]; then
-            OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
-            REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
             REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
             CATEGORY_ID=""
             [ -n "$REPO_ID" ] && CATEGORY_ID=$(gh api graphql \
-              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
-              -f o="$OWNER" -f r="$REPO" \
-              --jq '.data.repository.discussionCategories.nodes[0].id' \
+              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:20){nodes{id name}}}}' \
+              -f o="$REPO_OWNER" -f r="$REPO_NAME" \
+              --jq ".data.repository.discussionCategories.nodes[] | select(.name == \"$ROUTER_DISCUSSION_CATEGORY\") | .id" \
               2>/dev/null || echo "")
 
-            [ -n "$CATEGORY_ID" ] && gh api graphql \
+            if [ -z "$CATEGORY_ID" ]; then
+              CATEGORY_ID=$(gh api graphql \
+                -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+                -f o="$REPO_OWNER" -f r="$REPO_NAME" \
+                --jq '.data.repository.discussionCategories.nodes[0].id' \
+                2>/dev/null || echo "")
+            fi
+
+            DISCUSSION_URL=""
+            [ -n "$CATEGORY_ID" ] && DISCUSSION_URL=$(gh api graphql \
               -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
               -f ri="$REPO_ID" -f ci="$CATEGORY_ID" \
               -f t="🤖 Agent Router Help (requested from #$ISSUE_NUMBER)" \
-              -f b="$HELP_BODY" >/dev/null 2>&1
-            gh issue comment "$ISSUE_NUMBER" --body "ℹ️ Posted help using your preferred channel (**discussion**) when available."
+              -f b="$HELP_BODY" \
+              --jq '.data.createDiscussion.discussion.url' \
+              2>/dev/null || echo "")
+
+            if [ -n "$DISCUSSION_URL" ]; then
+              gh issue comment "$ISSUE_NUMBER" --body "✅ Posted help as a discussion: $DISCUSSION_URL"
+            else
+              gh issue comment "$ISSUE_NUMBER" --body "$HELP_BODY"
+            fi
           else
             gh issue comment "$ISSUE_NUMBER" --body "$HELP_BODY"
           fi
@@ -256,21 +274,33 @@ jobs:
           if [ "$CHANNEL" = "issue" ]; then
             gh issue create --title "🔍 QA dispatch update (re: #$ISSUE_NUMBER)" --body "$MESSAGE" 2>/dev/null || true
           elif [ "$CHANNEL" = "discussion" ]; then
-            OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
-            REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
             REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
             CATEGORY_ID=""
             [ -n "$REPO_ID" ] && CATEGORY_ID=$(gh api graphql \
-              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
-              -f o="$OWNER" -f r="$REPO" \
-              --jq '.data.repository.discussionCategories.nodes[0].id' \
+              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:20){nodes{id name}}}}' \
+              -f o="$REPO_OWNER" -f r="$REPO_NAME" \
+              --jq ".data.repository.discussionCategories.nodes[] | select(.name == \"$ROUTER_DISCUSSION_CATEGORY\") | .id" \
               2>/dev/null || echo "")
-            [ -n "$CATEGORY_ID" ] && gh api graphql \
+            if [ -z "$CATEGORY_ID" ]; then
+              CATEGORY_ID=$(gh api graphql \
+                -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+                -f o="$REPO_OWNER" -f r="$REPO_NAME" \
+                --jq '.data.repository.discussionCategories.nodes[0].id' \
+                2>/dev/null || echo "")
+            fi
+            DISCUSSION_URL=""
+            [ -n "$CATEGORY_ID" ] && DISCUSSION_URL=$(gh api graphql \
               -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
               -f ri="$REPO_ID" -f ci="$CATEGORY_ID" \
               -f t="🔍 QA dispatch update (re: #$ISSUE_NUMBER)" \
-              -f b="$MESSAGE" >/dev/null 2>&1
-            gh issue comment "$ISSUE_NUMBER" --body "ℹ️ Posted QA dispatch update using your preferred channel (**discussion**) when available." 2>/dev/null || true
+              -f b="$MESSAGE" \
+              --jq '.data.createDiscussion.discussion.url' \
+              2>/dev/null || echo "")
+            if [ -n "$DISCUSSION_URL" ]; then
+              gh issue comment "$ISSUE_NUMBER" --body "✅ Posted QA dispatch update as a discussion: $DISCUSSION_URL" 2>/dev/null || true
+            else
+              gh issue comment "$ISSUE_NUMBER" --body "$MESSAGE" 2>/dev/null || true
+            fi
           else
             gh issue comment "$ISSUE_NUMBER" --body "$MESSAGE" 2>/dev/null || true
           fi
@@ -314,21 +344,33 @@ jobs:
           if [ "$CHANNEL" = "issue" ]; then
             gh issue create --title "📋 PM dispatch update (re: #$ISSUE_NUMBER)" --body "$MESSAGE" 2>/dev/null || true
           elif [ "$CHANNEL" = "discussion" ]; then
-            OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
-            REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
             REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
             CATEGORY_ID=""
             [ -n "$REPO_ID" ] && CATEGORY_ID=$(gh api graphql \
-              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
-              -f o="$OWNER" -f r="$REPO" \
-              --jq '.data.repository.discussionCategories.nodes[0].id' \
+              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:20){nodes{id name}}}}' \
+              -f o="$REPO_OWNER" -f r="$REPO_NAME" \
+              --jq ".data.repository.discussionCategories.nodes[] | select(.name == \"$ROUTER_DISCUSSION_CATEGORY\") | .id" \
               2>/dev/null || echo "")
-            [ -n "$CATEGORY_ID" ] && gh api graphql \
+            if [ -z "$CATEGORY_ID" ]; then
+              CATEGORY_ID=$(gh api graphql \
+                -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+                -f o="$REPO_OWNER" -f r="$REPO_NAME" \
+                --jq '.data.repository.discussionCategories.nodes[0].id' \
+                2>/dev/null || echo "")
+            fi
+            DISCUSSION_URL=""
+            [ -n "$CATEGORY_ID" ] && DISCUSSION_URL=$(gh api graphql \
               -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
               -f ri="$REPO_ID" -f ci="$CATEGORY_ID" \
               -f t="📋 PM dispatch update (re: #$ISSUE_NUMBER)" \
-              -f b="$MESSAGE" >/dev/null 2>&1
-            gh issue comment "$ISSUE_NUMBER" --body "ℹ️ Posted PM dispatch update using your preferred channel (**discussion**) when available." 2>/dev/null || true
+              -f b="$MESSAGE" \
+              --jq '.data.createDiscussion.discussion.url' \
+              2>/dev/null || echo "")
+            if [ -n "$DISCUSSION_URL" ]; then
+              gh issue comment "$ISSUE_NUMBER" --body "✅ Posted PM dispatch update as a discussion: $DISCUSSION_URL" 2>/dev/null || true
+            else
+              gh issue comment "$ISSUE_NUMBER" --body "$MESSAGE" 2>/dev/null || true
+            fi
           else
             gh issue comment "$ISSUE_NUMBER" --body "$MESSAGE" 2>/dev/null || true
           fi
@@ -361,21 +403,33 @@ jobs:
           if [ "$CHANNEL" = "issue" ]; then
             gh issue create --title "🧪 PO dispatch update (re: #$ISSUE_NUMBER)" --body "$MESSAGE" 2>/dev/null || true
           elif [ "$CHANNEL" = "discussion" ]; then
-            OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
-            REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
             REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
             CATEGORY_ID=""
             [ -n "$REPO_ID" ] && CATEGORY_ID=$(gh api graphql \
-              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
-              -f o="$OWNER" -f r="$REPO" \
-              --jq '.data.repository.discussionCategories.nodes[0].id' \
+              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:20){nodes{id name}}}}' \
+              -f o="$REPO_OWNER" -f r="$REPO_NAME" \
+              --jq ".data.repository.discussionCategories.nodes[] | select(.name == \"$ROUTER_DISCUSSION_CATEGORY\") | .id" \
               2>/dev/null || echo "")
-            [ -n "$CATEGORY_ID" ] && gh api graphql \
+            if [ -z "$CATEGORY_ID" ]; then
+              CATEGORY_ID=$(gh api graphql \
+                -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+                -f o="$REPO_OWNER" -f r="$REPO_NAME" \
+                --jq '.data.repository.discussionCategories.nodes[0].id' \
+                2>/dev/null || echo "")
+            fi
+            DISCUSSION_URL=""
+            [ -n "$CATEGORY_ID" ] && DISCUSSION_URL=$(gh api graphql \
               -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
               -f ri="$REPO_ID" -f ci="$CATEGORY_ID" \
               -f t="🧪 PO dispatch update (re: #$ISSUE_NUMBER)" \
-              -f b="$MESSAGE" >/dev/null 2>&1
-            gh issue comment "$ISSUE_NUMBER" --body "ℹ️ Posted PO dispatch update using your preferred channel (**discussion**) when available." 2>/dev/null || true
+              -f b="$MESSAGE" \
+              --jq '.data.createDiscussion.discussion.url' \
+              2>/dev/null || echo "")
+            if [ -n "$DISCUSSION_URL" ]; then
+              gh issue comment "$ISSUE_NUMBER" --body "✅ Posted PO dispatch update as a discussion: $DISCUSSION_URL" 2>/dev/null || true
+            else
+              gh issue comment "$ISSUE_NUMBER" --body "$MESSAGE" 2>/dev/null || true
+            fi
           else
             gh issue comment "$ISSUE_NUMBER" --body "$MESSAGE" 2>/dev/null || true
           fi
@@ -406,21 +460,33 @@ jobs:
           if [ "$CHANNEL" = "issue" ]; then
             gh issue create --title "🏛️ Council dispatch update (re: #$ISSUE_NUMBER)" --body "$MESSAGE" 2>/dev/null || true
           elif [ "$CHANNEL" = "discussion" ]; then
-            OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
-            REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
             REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
             CATEGORY_ID=""
             [ -n "$REPO_ID" ] && CATEGORY_ID=$(gh api graphql \
-              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
-              -f o="$OWNER" -f r="$REPO" \
-              --jq '.data.repository.discussionCategories.nodes[0].id' \
+              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:20){nodes{id name}}}}' \
+              -f o="$REPO_OWNER" -f r="$REPO_NAME" \
+              --jq ".data.repository.discussionCategories.nodes[] | select(.name == \"$ROUTER_DISCUSSION_CATEGORY\") | .id" \
               2>/dev/null || echo "")
-            [ -n "$CATEGORY_ID" ] && gh api graphql \
+            if [ -z "$CATEGORY_ID" ]; then
+              CATEGORY_ID=$(gh api graphql \
+                -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+                -f o="$REPO_OWNER" -f r="$REPO_NAME" \
+                --jq '.data.repository.discussionCategories.nodes[0].id' \
+                2>/dev/null || echo "")
+            fi
+            DISCUSSION_URL=""
+            [ -n "$CATEGORY_ID" ] && DISCUSSION_URL=$(gh api graphql \
               -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
               -f ri="$REPO_ID" -f ci="$CATEGORY_ID" \
               -f t="🏛️ Council dispatch update (re: #$ISSUE_NUMBER)" \
-              -f b="$MESSAGE" >/dev/null 2>&1
-            gh issue comment "$ISSUE_NUMBER" --body "ℹ️ Posted council dispatch update using your preferred channel (**discussion**) when available." 2>/dev/null || true
+              -f b="$MESSAGE" \
+              --jq '.data.createDiscussion.discussion.url' \
+              2>/dev/null || echo "")
+            if [ -n "$DISCUSSION_URL" ]; then
+              gh issue comment "$ISSUE_NUMBER" --body "✅ Posted council dispatch update as a discussion: $DISCUSSION_URL" 2>/dev/null || true
+            else
+              gh issue comment "$ISSUE_NUMBER" --body "$MESSAGE" 2>/dev/null || true
+            fi
           else
             gh issue comment "$ISSUE_NUMBER" --body "$MESSAGE" 2>/dev/null || true
           fi
