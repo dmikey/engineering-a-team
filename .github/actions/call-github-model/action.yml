@@ -1,0 +1,95 @@
+name: 'Call GitHub Model'
+description: >
+  Invoke a GitHub Models API endpoint and return the text response.
+  All agent AI calls must go through this action.
+
+inputs:
+  model:
+    description: 'Model identifier (e.g. gpt-4o-mini, gpt-4o)'
+    default: 'gpt-4o-mini'
+  system-prompt:
+    description: 'System prompt defining the agent persona and instructions'
+    required: true
+  user-prompt:
+    description: 'User message — the context or question for the agent'
+    required: true
+  temperature:
+    description: 'Sampling temperature (0.0–1.0)'
+    default: '0.7'
+  max-tokens:
+    description: 'Maximum tokens in the response'
+    default: '2048'
+  token:
+    description: 'GitHub token or Models API token (needs models:read scope)'
+    required: true
+
+outputs:
+  response:
+    description: 'Plain-text response from the model'
+    value: ${{ steps.invoke.outputs.response }}
+  raw-json:
+    description: 'Full JSON response body (for advanced parsing)'
+    value: ${{ steps.invoke.outputs.raw_json }}
+
+runs:
+  using: composite
+  steps:
+    - name: Invoke GitHub Model
+      id: invoke
+      shell: bash
+      env:
+        GH_MODEL: ${{ inputs.model }}
+        SYSTEM_PROMPT: ${{ inputs.system-prompt }}
+        USER_PROMPT: ${{ inputs.user-prompt }}
+        TEMPERATURE: ${{ inputs.temperature }}
+        MAX_TOKENS: ${{ inputs.max-tokens }}
+        API_TOKEN: ${{ inputs.token }}
+      run: |
+        # Build JSON payload using Python to safely handle special characters
+        PAYLOAD=$(python3 - <<'PYEOF'
+        import json, os
+        payload = {
+            "model":       os.environ["GH_MODEL"],
+            "temperature": float(os.environ["TEMPERATURE"]),
+            "max_tokens":  int(os.environ["MAX_TOKENS"]),
+            "messages": [
+                {"role": "system", "content": os.environ["SYSTEM_PROMPT"]},
+                {"role": "user",   "content": os.environ["USER_PROMPT"]}
+            ]
+        }
+        print(json.dumps(payload))
+        PYEOF
+        )
+
+        RAW=$(curl -s \
+          -X POST \
+          -H "Authorization: Bearer $API_TOKEN" \
+          -H "Content-Type: application/json" \
+          -H "Accept: application/json" \
+          "https://models.inference.ai.azure.com/chat/completions" \
+          -d "$PAYLOAD")
+
+        # Capture raw JSON
+        {
+          echo "raw_json<<GH_RAW_EOF"
+          echo "$RAW"
+          echo "GH_RAW_EOF"
+        } >> "$GITHUB_OUTPUT"
+
+        # Extract text response (fall back to error message)
+        CONTENT=$(echo "$RAW" | python3 -c "
+        import json, sys
+        data = json.load(sys.stdin)
+        choices = data.get('choices', [])
+        if choices:
+            print(choices[0]['message']['content'])
+        else:
+            err = data.get('error', {}).get('message', 'No response from model')
+            print(f'⚠️ Model call failed: {err}')
+        " 2>/dev/null || echo "⚠️ Failed to parse model response")
+
+        {
+          echo "response<<GH_RESP_EOF"
+          echo "$CONTENT"
+          echo "GH_RESP_EOF"
+        } >> "$GITHUB_OUTPUT"

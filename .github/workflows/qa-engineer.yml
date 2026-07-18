@@ -1,0 +1,253 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# QA Engineer Agent — Quinn
+#
+# Triggers:  pull_request (opened / synchronize / reopened)
+#            issues labeled "needs-qa"
+#            workflow_dispatch
+#            workflow_call (from council-discussion or agent-router)
+#
+# Skills:    code-review · issue-creation · pr-feedback · security-scan
+#
+# Reads persona from .github/agents.md (QA Engineer section).
+# Model defaults to gpt-4o-mini; override with repository variable QA_MODEL.
+# ──────────────────────────────────────────────────────────────────────────────
+name: QA Engineer Agent
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review (leave blank for latest)'
+        required: false
+      extra_context:
+        description: 'Additional context for the QA review'
+        required: false
+  workflow_call:
+    inputs:
+      pr_number:
+        type: string
+        description: 'PR number to review'
+        required: false
+      extra_context:
+        type: string
+        description: 'Additional context'
+        required: false
+    secrets:
+      MODELS_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  QA_MODEL: ${{ vars.QA_MODEL || 'gpt-4o-mini' }}
+  AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
+  AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
+  QA_SEVERITY_THRESHOLD: ${{ vars.QA_SEVERITY_THRESHOLD || 'HIGH' }}
+
+jobs:
+  qa-review:
+    name: Quinn · QA Engineer Review
+    runs-on: ubuntu-latest
+    # Run on PRs, manual dispatch, workflow_call, or issues labeled "needs-qa"
+    if: |
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call' ||
+      (github.event_name == 'issues' &&
+       contains(github.event.issue.labels.*.name, 'needs-qa'))
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Gather context ───────────────────────────────────────────────────
+      - name: Gather PR context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            PR_TITLE="${{ github.event.pull_request.title }}"
+            PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+            BASE_REF="${{ github.base_ref }}"
+
+            # Diff stats and content (truncated to stay within token limits)
+            DIFF_STAT=$(git diff "origin/$BASE_REF"...HEAD --stat 2>/dev/null | head -80 || echo "N/A")
+            FILES=$(git diff --name-only "origin/$BASE_REF"...HEAD 2>/dev/null | head -50 || echo "N/A")
+            DIFF_CONTENT=$(git diff "origin/$BASE_REF"...HEAD 2>/dev/null | head -400 || echo "N/A")
+            PR_BODY=$(gh pr view "$PR_NUMBER" --json body --jq '.body' 2>/dev/null || echo "")
+
+          elif [ -n "${{ inputs.pr_number }}" ]; then
+            PR_NUMBER="${{ inputs.pr_number }}"
+            PR_INFO=$(gh pr view "$PR_NUMBER" --json title,author,body 2>/dev/null || echo '{}')
+            PR_TITLE=$(echo "$PR_INFO" | python3 -c "import json,sys; print(json.load(sys.stdin).get('title',''))" 2>/dev/null || echo "PR #$PR_NUMBER")
+            PR_AUTHOR=$(echo "$PR_INFO" | python3 -c "import json,sys; print(json.load(sys.stdin).get('author',{}).get('login',''))" 2>/dev/null || echo "")
+            PR_BODY=$(echo "$PR_INFO" | python3 -c "import json,sys; print(json.load(sys.stdin).get('body',''))" 2>/dev/null || echo "")
+            DIFF_STAT=$(gh pr diff "$PR_NUMBER" --stat 2>/dev/null | head -80 || echo "N/A")
+            FILES=$(gh pr diff "$PR_NUMBER" --name-only 2>/dev/null | head -50 || echo "N/A")
+            DIFF_CONTENT=$(gh pr diff "$PR_NUMBER" 2>/dev/null | head -400 || echo "N/A")
+
+          else
+            # No PR — review the issue body or extra context
+            PR_NUMBER="N/A"
+            PR_TITLE="Manual QA Review"
+            PR_AUTHOR=""
+            PR_BODY="${{ inputs.extra_context }}"
+            DIFF_STAT="N/A"
+            FILES="N/A"
+            DIFF_CONTENT="N/A"
+          fi
+
+          {
+            echo "pr_number=$PR_NUMBER"
+            echo "pr_title=$PR_TITLE"
+            echo "pr_author=$PR_AUTHOR"
+            echo "context<<QA_CTX_EOF"
+            echo "## PR Information"
+            echo "- Number: $PR_NUMBER"
+            echo "- Title: $PR_TITLE"
+            echo "- Author: $PR_AUTHOR"
+            echo "- Description: $PR_BODY"
+            echo ""
+            echo "## Changed Files"
+            echo "$FILES"
+            echo ""
+            echo "## Diff Statistics"
+            echo "$DIFF_STAT"
+            echo ""
+            echo "## Diff Content (truncated)"
+            echo "$DIFF_CONTENT"
+            echo ""
+            echo "## Additional Context"
+            echo "${{ inputs.extra_context }}"
+            echo "QA_CTX_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── Call GitHub Model ────────────────────────────────────────────────
+      - name: Quinn — QA Engineer analysis
+        id: qa
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.QA_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Quinn, a senior QA Engineer with 10+ years of experience in
+            software quality assurance, security review, and test strategy.
+
+            Your role on this engineering team:
+            - Review code changes thoroughly for bugs, security issues, and
+              quality concerns
+            - Identify missing test coverage and suggest specific test cases
+            - Assess risk and provide an approval recommendation
+            - Be constructive, specific, and actionable — never vague
+
+            Always format your response EXACTLY as follows:
+
+            ## QA Review — PR #<number>
+
+            **Risk Level**: [LOW | MEDIUM | HIGH | CRITICAL]
+            **Recommendation**: [✅ APPROVE | 🔄 REQUEST CHANGES | 🚫 BLOCK]
+
+            ### Summary
+            Two to three sentences summarising the quality profile of these changes.
+
+            ### Issues Found
+            For each issue use this format:
+            - **[SEVERITY]** `file:line` — Description and why it matters
+              - 💡 Fix: concrete recommendation
+
+            If no issues found, write "No issues found."
+
+            ### Security Assessment
+            Evaluate for: injection, secret exposure, insecure deps, auth bypass,
+            OWASP Top 10. State "No security concerns" if clean.
+
+            ### Test Coverage Gaps
+            List specific missing tests with their purpose. State "Coverage looks
+            adequate" if nothing is missing.
+
+            ### Notes for Author
+            Any non-blocking suggestions or praise.
+          user-prompt: |
+            Please review the following pull request:
+
+            ${{ steps.ctx.outputs.context }}
+
+      # ── Post PR comment ──────────────────────────────────────────────────
+      - name: Post review comment on PR
+        if: |
+          (github.event_name == 'pull_request' ||
+           github.event_name == 'workflow_call') &&
+          steps.ctx.outputs.pr_number != 'N/A'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          QA_RESPONSE: ${{ steps.qa.outputs.response }}
+          PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
+        run: |
+          COMMENT="$QA_RESPONSE
+
+          ---
+          *🤖 Automated review by Quinn (QA Engineer Agent) · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+          gh pr comment "$PR_NUMBER" --body "$COMMENT"
+
+      # ── Open issue for HIGH/CRITICAL findings ───────────────────────────
+      - name: Open issue for serious findings
+        if: |
+          contains(steps.qa.outputs.response, 'CRITICAL') ||
+          (env.QA_SEVERITY_THRESHOLD != 'CRITICAL' &&
+           contains(steps.qa.outputs.response, 'HIGH'))
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          QA_RESPONSE: ${{ steps.qa.outputs.response }}
+          PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
+          PR_TITLE: ${{ steps.ctx.outputs.pr_title }}
+        run: |
+          ISSUE_BODY="## 🔍 QA Finding
+
+          QA Engineer agent (Quinn) flagged serious issues in PR #$PR_NUMBER.
+
+          **PR**: #$PR_NUMBER — $PR_TITLE
+          **Workflow run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ---
+
+          $QA_RESPONSE"
+
+          gh issue create \
+            --title "🐛 QA: Issues detected in PR #$PR_NUMBER — $PR_TITLE" \
+            --body "$ISSUE_BODY" \
+            --label "bug,qa-review" \
+            2>/dev/null || \
+          gh issue create \
+            --title "🐛 QA: Issues detected in PR #$PR_NUMBER — $PR_TITLE" \
+            --body "$ISSUE_BODY"
+
+      # ── Post issue comment for needs-qa trigger ──────────────────────────
+      - name: Post comment on needs-qa issue
+        if: |
+          github.event_name == 'issues' &&
+          contains(github.event.issue.labels.*.name, 'needs-qa')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          QA_RESPONSE: ${{ steps.qa.outputs.response }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          COMMENT="$QA_RESPONSE
+
+          ---
+          *🤖 Automated analysis by Quinn (QA Engineer Agent) · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+          gh issue comment "$ISSUE_NUMBER" --body "$COMMENT"

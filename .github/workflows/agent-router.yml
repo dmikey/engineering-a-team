@@ -1,0 +1,240 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Agent Router
+#
+# Listens for slash-commands in issue and pull request comments, then
+# dispatches the appropriate agent workflow.
+#
+# Supported commands:
+#   /qa [context]       — Trigger QA Engineer review
+#   /pm [task]          — Trigger Project Manager (groom-backlog | check-milestones | full-sprint-report)
+#   /po [task]          — Trigger Product Owner (product-health-report | suggest-features | run-playwright)
+#   /council [topic]    — Trigger full council discussion
+#   /help               — Post a help comment listing available commands
+#
+# Only repository members with write access can trigger agents.
+# ──────────────────────────────────────────────────────────────────────────────
+name: Agent Router
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  route:
+    name: Route agent command
+    runs-on: ubuntu-latest
+    # Only process comments that start with /
+    if: |
+      startsWith(github.event.comment.body, '/qa') ||
+      startsWith(github.event.comment.body, '/pm') ||
+      startsWith(github.event.comment.body, '/po') ||
+      startsWith(github.event.comment.body, '/council') ||
+      startsWith(github.event.comment.body, '/help')
+
+    steps:
+      # ── Verify the commenter has write access ────────────────────────────
+      - name: Check commenter permissions
+        id: auth
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENTER: ${{ github.event.comment.user.login }}
+        run: |
+          PERMISSION=$(gh api \
+            "repos/${{ github.repository }}/collaborators/$COMMENTER/permission" \
+            --jq '.permission' \
+            2>/dev/null || echo "none")
+
+          echo "permission=$PERMISSION" >> "$GITHUB_OUTPUT"
+
+          if [[ "$PERMISSION" == "admin" || "$PERMISSION" == "write" || "$PERMISSION" == "maintain" ]]; then
+            echo "authorized=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "authorized=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── React to unauthorised commands ───────────────────────────────────
+      - name: Reject unauthorized command
+        if: steps.auth.outputs.authorized == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENT_URL: ${{ github.event.comment.html_url }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "⛔ Sorry, only repository collaborators with write access can trigger agents."
+
+      # ── Parse command and arguments ──────────────────────────────────────
+      - name: Parse command
+        id: parse
+        if: steps.auth.outputs.authorized == 'true'
+        run: |
+          BODY="${{ github.event.comment.body }}"
+          COMMAND=$(echo "$BODY" | awk '{print $1}')
+          ARGS=$(echo "$BODY" | cut -d' ' -f2- | xargs)
+
+          echo "command=$COMMAND" >> "$GITHUB_OUTPUT"
+          echo "args=$ARGS" >> "$GITHUB_OUTPUT"
+
+          # Determine if this is on an issue or PR
+          if [ "${{ github.event_name }}" = "pull_request_review_comment" ]; then
+            echo "ref_type=pr" >> "$GITHUB_OUTPUT"
+            echo "ref_number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ github.event.issue.pull_request }}" ]; then
+            echo "ref_type=pr" >> "$GITHUB_OUTPUT"
+            echo "ref_number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref_type=issue" >> "$GITHUB_OUTPUT"
+            echo "ref_number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── /help ────────────────────────────────────────────────────────────
+      - name: Post help message
+        if: |
+          steps.auth.outputs.authorized == 'true' &&
+          steps.parse.outputs.command == '/help'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.parse.outputs.ref_number }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body "## 🤖 Engineering Team Agent Commands
+
+          | Command | Description |
+          |---------|-------------|
+          | \`/qa [context]\` | Trigger QA Engineer (Quinn) to review this PR or issue |
+          | \`/pm [task]\` | Trigger Project Manager (Morgan) — tasks: \`groom-backlog\`, \`check-milestones\`, \`full-sprint-report\` |
+          | \`/po [task]\` | Trigger Product Owner (Alex) — tasks: \`product-health-report\`, \`suggest-features\`, \`run-playwright\` |
+          | \`/council [topic]\` | Convene the full council for a discussion on this topic |
+          | \`/help\` | Show this message |
+
+          **Examples**:
+          \`\`\`
+          /qa please review the authentication changes
+          /pm groom-backlog
+          /po suggest-features
+          /council Should we adopt TypeScript for this project?
+          \`\`\`
+
+          > Only collaborators with **write access** can invoke agents.
+
+          *🤖 [Agent Router](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+      # ── /qa ──────────────────────────────────────────────────────────────
+      - name: Route to QA Engineer
+        if: |
+          steps.auth.outputs.authorized == 'true' &&
+          steps.parse.outputs.command == '/qa'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.parse.outputs.ref_number }}
+          REF_TYPE: ${{ steps.parse.outputs.ref_type }}
+          ARGS: ${{ steps.parse.outputs.args }}
+        run: |
+          # Acknowledge
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "🔍 Dispatching **Quinn (QA Engineer)** to review... ⏳" \
+            2>/dev/null || true
+
+          # Dispatch QA Engineer workflow
+          if [ "$REF_TYPE" = "pr" ]; then
+            gh workflow run qa-engineer.yml \
+              -f pr_number="$ISSUE_NUMBER" \
+              -f extra_context="$ARGS" \
+              2>/dev/null || \
+            gh issue comment "$ISSUE_NUMBER" \
+              --body "⚠️ Could not dispatch QA Engineer workflow. Check that the workflow file exists and Actions are enabled."
+          else
+            gh workflow run qa-engineer.yml \
+              -f extra_context="Issue #$ISSUE_NUMBER: $ARGS" \
+              2>/dev/null || \
+            gh issue comment "$ISSUE_NUMBER" \
+              --body "⚠️ Could not dispatch QA Engineer workflow."
+          fi
+
+      # ── /pm ──────────────────────────────────────────────────────────────
+      - name: Route to Project Manager
+        if: |
+          steps.auth.outputs.authorized == 'true' &&
+          steps.parse.outputs.command == '/pm'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.parse.outputs.ref_number }}
+          ARGS: ${{ steps.parse.outputs.args }}
+        run: |
+          # Determine task
+          TASK="full-sprint-report"
+          case "$ARGS" in
+            groom-backlog*)     TASK="groom-backlog" ;;
+            check-milestones*)  TASK="check-milestones" ;;
+            full-sprint-report*) TASK="full-sprint-report" ;;
+          esac
+
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "📋 Dispatching **Morgan (Project Manager)** for task: \`$TASK\`... ⏳" \
+            2>/dev/null || true
+
+          gh workflow run project-manager.yml \
+            -f task="$TASK" \
+            2>/dev/null || \
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "⚠️ Could not dispatch Project Manager workflow."
+
+      # ── /po ──────────────────────────────────────────────────────────────
+      - name: Route to Product Owner
+        if: |
+          steps.auth.outputs.authorized == 'true' &&
+          steps.parse.outputs.command == '/po'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.parse.outputs.ref_number }}
+          ARGS: ${{ steps.parse.outputs.args }}
+        run: |
+          TASK="product-health-report"
+          case "$ARGS" in
+            suggest-features*)    TASK="suggest-features" ;;
+            run-playwright*)      TASK="run-playwright" ;;
+            product-health-report*) TASK="product-health-report" ;;
+          esac
+
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "🧪 Dispatching **Alex (Product Owner)** for task: \`$TASK\`... ⏳" \
+            2>/dev/null || true
+
+          gh workflow run product-owner.yml \
+            -f task="$TASK" \
+            2>/dev/null || \
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "⚠️ Could not dispatch Product Owner workflow."
+
+      # ── /council ─────────────────────────────────────────────────────────
+      - name: Route to Council Discussion
+        if: |
+          steps.auth.outputs.authorized == 'true' &&
+          steps.parse.outputs.command == '/council'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.parse.outputs.ref_number }}
+          ARGS: ${{ steps.parse.outputs.args }}
+        run: |
+          TOPIC="$ARGS"
+          if [ -z "$TOPIC" ]; then
+            TOPIC="Review of issue/PR #$ISSUE_NUMBER"
+          fi
+
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "🏛️ Convening the **Engineering Council**... ⏳" \
+            2>/dev/null || true
+
+          gh workflow run council-discussion.yml \
+            -f topic="$TOPIC" \
+            -f issue_number="$ISSUE_NUMBER" \
+            2>/dev/null || \
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "⚠️ Could not dispatch Council Discussion workflow."

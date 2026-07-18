@@ -1,0 +1,373 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Project Manager Agent — Morgan
+#
+# Triggers:  schedule (every Monday 09:00 UTC)
+#            issues (opened, labeled)
+#            milestones (created, edited, closed)
+#            workflow_dispatch
+#            workflow_call (from council-discussion or agent-router)
+#
+# Skills:    backlog-grooming · milestone-management · discussion-creation
+#            issue-labeling
+#
+# Reads persona from .github/agents.md (Project Manager section).
+# Model defaults to gpt-4o-mini; override with repository variable PM_MODEL.
+# ──────────────────────────────────────────────────────────────────────────────
+name: Project Manager Agent
+
+on:
+  schedule:
+    # Every Monday at 09:00 UTC — override with PM_SCHEDULE variable
+    - cron: '0 9 * * 1'
+  issues:
+    types: [opened, labeled, milestoned]
+  milestone:
+    types: [created, edited, closed]
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Task to perform'
+        type: choice
+        options:
+          - groom-backlog
+          - check-milestones
+          - full-sprint-report
+        default: full-sprint-report
+  workflow_call:
+    inputs:
+      task:
+        type: string
+        description: 'Task: groom-backlog | check-milestones | full-sprint-report'
+        default: full-sprint-report
+      extra_context:
+        type: string
+        description: 'Additional context for the PM'
+        required: false
+    secrets:
+      MODELS_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+  discussions: write
+
+env:
+  PM_MODEL: ${{ vars.PM_MODEL || 'gpt-4o-mini' }}
+  AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
+  AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
+  PM_MILESTONE_LOOKAHEAD: ${{ vars.PM_MILESTONE_LOOKAHEAD_DAYS || '30' }}
+
+jobs:
+  project-management:
+    name: Morgan · Project Manager
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Gather backlog and milestone data ────────────────────────────────
+      - name: Gather project data
+        id: data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TASK="${{ inputs.task || 'full-sprint-report' }}"
+          echo "task=$TASK" >> "$GITHUB_OUTPUT"
+
+          # Open issues (up to 100, sorted by created date)
+          ISSUES=$(gh issue list \
+            --state open \
+            --limit 100 \
+            --json number,title,labels,assignees,createdAt,updatedAt,milestone,body \
+            2>/dev/null || echo "[]")
+
+          # Open milestones
+          MILESTONES=$(gh api "repos/${{ github.repository }}/milestones?state=open&per_page=20" \
+            --jq '[.[] | {number:.number, title:.title, due_on:.due_on, open_issues:.open_issues, closed_issues:.closed_issues, description:.description}]' \
+            2>/dev/null || echo "[]")
+
+          # Recent closed issues (last 14 days = velocity indicator)
+          RECENTLY_CLOSED=$(gh issue list \
+            --state closed \
+            --limit 20 \
+            --json number,title,closedAt,labels \
+            2>/dev/null || echo "[]")
+
+          # Summary stats
+          OPEN_COUNT=$(echo "$ISSUES" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+          MILESTONE_COUNT=$(echo "$MILESTONES" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+          CURRENT_DATE=$(date -u +"%Y-%m-%d")
+
+          {
+            echo "open_count=$OPEN_COUNT"
+            echo "milestone_count=$MILESTONE_COUNT"
+            echo "current_date=$CURRENT_DATE"
+            echo "project_data<<PM_DATA_EOF"
+            echo "## Current Date"
+            echo "$CURRENT_DATE"
+            echo ""
+            echo "## Open Issues ($OPEN_COUNT total)"
+            echo "$ISSUES" | python3 -c "
+          import json, sys
+          issues = json.load(sys.stdin)
+          for i in issues[:50]:
+              labels = [l['name'] for l in i.get('labels', [])]
+              milestone = i.get('milestone', {})
+              ms = milestone.get('title', 'No milestone') if milestone else 'No milestone'
+              assignees = [a['login'] for a in i.get('assignees', [])]
+              print(f\"- #{i['number']}: {i['title']}\")
+              print(f\"  Labels: {', '.join(labels) or 'none'} | Milestone: {ms} | Assignees: {', '.join(assignees) or 'unassigned'}\")
+              print(f\"  Created: {i['createdAt'][:10]} | Updated: {i['updatedAt'][:10]}\")
+          " 2>/dev/null || echo "$ISSUES"
+            echo ""
+            echo "## Open Milestones ($MILESTONE_COUNT total)"
+            echo "$MILESTONES" | python3 -c "
+          import json, sys
+          from datetime import datetime
+          milestones = json.load(sys.stdin)
+          today = datetime.utcnow()
+          for m in milestones:
+              due = m.get('due_on', 'No due date')
+              if due and due != 'No due date':
+                  due_dt = datetime.strptime(due[:10], '%Y-%m-%d')
+                  days_left = (due_dt - today).days
+                  due_str = f'{due[:10]} ({days_left} days remaining)'
+              else:
+                  due_str = 'No due date'
+              print(f\"- [{m['number']}] {m['title']}: {m['open_issues']} open / {m['closed_issues']} closed — Due: {due_str}\")
+              if m.get('description'):
+                  print(f\"  Description: {m['description']}\")
+          " 2>/dev/null || echo "$MILESTONES"
+            echo ""
+            echo "## Recently Closed Issues (velocity indicator)"
+            echo "$RECENTLY_CLOSED" | python3 -c "
+          import json, sys
+          issues = json.load(sys.stdin)
+          for i in issues:
+              print(f\"- #{i['number']}: {i['title']} (closed: {i.get('closedAt','')[:10]})\")
+          " 2>/dev/null || echo "$RECENTLY_CLOSED"
+            echo ""
+            echo "## Additional Context"
+            echo "${{ inputs.extra_context }}"
+            echo "PM_DATA_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── Morgan — Project Manager analysis ───────────────────────────────
+      - name: Morgan — backlog grooming analysis
+        id: pm-groom
+        if: |
+          contains(fromJSON('["groom-backlog", "full-sprint-report"]'),
+                   steps.data.outputs.task)
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.PM_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Morgan, an experienced engineering Project Manager. You keep
+            teams focused, on schedule, and aligned with business goals.
+
+            Your job right now is BACKLOG GROOMING:
+            - Analyse the open issues and assign a priority to each
+            - Identify issues that are blocking others
+            - Identify issues with no clear owner or milestone
+            - Suggest milestone assignments for unassigned issues
+
+            Format your response EXACTLY as:
+
+            ## Backlog Grooming Report — <date>
+
+            ### Priority Classification
+            For each issue provide: `#<number> <title>` → Priority: [CRITICAL|HIGH|MEDIUM|LOW]
+            Reason: one sentence
+
+            ### Blocked Issues
+            List issues that are blocked, and what is blocking them.
+            State "None identified" if none.
+
+            ### Milestone Recommendations
+            List issues that should be added to a milestone and which one.
+            State "None" if everything looks good.
+
+            ### Orphaned Issues
+            Issues with no labels, no assignee, and no milestone — they need
+            attention. State "None" if all issues are properly triaged.
+
+            ### Action Items for Team
+            Up to 5 concrete next steps (numbered list).
+          user-prompt: |
+            Please groom the backlog for this repository:
+
+            ${{ steps.data.outputs.project_data }}
+
+      - name: Morgan — milestone health analysis
+        id: pm-milestone
+        if: |
+          contains(fromJSON('["check-milestones", "full-sprint-report"]'),
+                   steps.data.outputs.task) &&
+          steps.data.outputs.milestone_count != '0'
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.PM_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Morgan, an experienced engineering Project Manager. You keep
+            teams focused, on schedule, and aligned with business goals.
+
+            Your job right now is MILESTONE HEALTH CHECK:
+            - Assess whether each milestone is on track given the due date and
+              remaining open issues
+            - Flag milestones at risk of slipping
+            - Recommend scope changes or timeline adjustments
+
+            Format your response EXACTLY as:
+
+            ## Milestone Health Report — <date>
+
+            For each milestone:
+            ### <Milestone Title>
+            - **Status**: [ON TRACK 🟢 | AT RISK 🟡 | OFF TRACK 🔴 | NO DATE ⚪]
+            - **Open / Closed**: X open, Y closed
+            - **Days Remaining**: N days (or "No due date")
+            - **Assessment**: one to two sentences
+            - **Recommendation**: concrete action (e.g. "Defer issues #12, #15",
+              "Add 2 weeks to due date", "Pull in more resources")
+
+            ### Overall Health Summary
+            One paragraph summarising the overall project health.
+          user-prompt: |
+            Please assess milestone health:
+
+            ${{ steps.data.outputs.project_data }}
+
+      # ── Apply priority labels ────────────────────────────────────────────
+      - name: Apply priority labels to issues
+        if: |
+          steps.pm-groom.outputs.response != '' &&
+          steps.data.outputs.open_count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GROOMING_REPORT: ${{ steps.pm-groom.outputs.response }}
+        run: |
+          # Ensure priority labels exist
+          for LABEL in "priority: critical" "priority: high" "priority: medium" "priority: low" "blocked"; do
+            COLOR=""
+            case "$LABEL" in
+              "priority: critical") COLOR="d73a4a" ;;
+              "priority: high")     COLOR="e4e669" ;;
+              "priority: medium")   COLOR="0075ca" ;;
+              "priority: low")      COLOR="cfd3d7" ;;
+              "blocked")            COLOR="e11d48" ;;
+            esac
+            gh label create "$LABEL" --color "$COLOR" --force 2>/dev/null || true
+          done
+
+          # Parse priority assignments from the grooming report and apply labels
+          echo "$GROOMING_REPORT" | python3 - <<'PYEOF'
+          import re, os, subprocess, sys
+
+          report = os.environ.get('GROOMING_REPORT', '')
+          # Find patterns like "#123 ... Priority: HIGH"
+          pattern = r'#(\d+)[^\n]*Priority:\s*(CRITICAL|HIGH|MEDIUM|LOW)'
+          matches = re.findall(pattern, report, re.IGNORECASE)
+
+          label_map = {
+              'CRITICAL': 'priority: critical',
+              'HIGH':     'priority: high',
+              'MEDIUM':   'priority: medium',
+              'LOW':      'priority: low',
+          }
+
+          for issue_num, priority in matches:
+              label = label_map.get(priority.upper())
+              if label:
+                  print(f'Applying "{label}" to issue #{issue_num}')
+                  subprocess.run(
+                      ['gh', 'issue', 'edit', issue_num, '--add-label', label],
+                      capture_output=True
+                  )
+          PYEOF
+
+      # ── Post weekly sprint report ────────────────────────────────────────
+      - name: Compose and post weekly sprint report
+        if: |
+          github.event_name == 'schedule' ||
+          steps.data.outputs.task == 'full-sprint-report'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GROOM_REPORT: ${{ steps.pm-groom.outputs.response }}
+          MILESTONE_REPORT: ${{ steps.pm-milestone.outputs.response }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+          OPEN_COUNT: ${{ steps.data.outputs.open_count }}
+          MILESTONE_COUNT: ${{ steps.data.outputs.milestone_count }}
+        run: |
+          REPORT="# 📋 Weekly Sprint Report — $CURRENT_DATE
+
+          > Generated by Morgan (Project Manager Agent)
+
+          **Open Issues**: $OPEN_COUNT | **Active Milestones**: $MILESTONE_COUNT
+
+          ---
+
+          $GROOM_REPORT
+
+          ---
+
+          $MILESTONE_REPORT
+
+          ---
+          *🤖 Automated report by Morgan (Project Manager Agent) · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+          # Try to post as a Discussion; fall back to Issue
+          OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
+          REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+
+          REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
+          DISCUSSION_CREATED=false
+
+          if [ -n "$REPO_ID" ]; then
+            CATEGORY_ID=$(gh api graphql \
+              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:20){nodes{id name}}}}' \
+              -f o="$OWNER" -f r="$REPO" \
+              --jq '.data.repository.discussionCategories.nodes[] | select(.name == "General") | .id' \
+              2>/dev/null || echo "")
+
+            if [ -z "$CATEGORY_ID" ]; then
+              CATEGORY_ID=$(gh api graphql \
+                -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+                -f o="$OWNER" -f r="$REPO" \
+                --jq '.data.repository.discussionCategories.nodes[0].id' \
+                2>/dev/null || echo "")
+            fi
+
+            if [ -n "$CATEGORY_ID" ]; then
+              TITLE="📋 Weekly Sprint Report — $CURRENT_DATE"
+              DISCUSSION_URL=$(gh api graphql \
+                -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
+                -f ri="$REPO_ID" -f ci="$CATEGORY_ID" \
+                -f t="$TITLE" -f b="$REPORT" \
+                --jq '.data.createDiscussion.discussion.url' \
+                2>/dev/null || echo "")
+              if [ -n "$DISCUSSION_URL" ]; then
+                echo "✅ Sprint report posted as Discussion: $DISCUSSION_URL"
+                DISCUSSION_CREATED=true
+              fi
+            fi
+          fi
+
+          if [ "$DISCUSSION_CREATED" = "false" ]; then
+            gh issue create \
+              --title "📋 Weekly Sprint Report — $CURRENT_DATE" \
+              --body "$REPORT" \
+              --label "sprint-report" \
+              2>/dev/null || \
+            gh issue create \
+              --title "📋 Weekly Sprint Report — $CURRENT_DATE" \
+              --body "$REPORT"
+            echo "✅ Sprint report posted as Issue (Discussion fallback)"
+          fi

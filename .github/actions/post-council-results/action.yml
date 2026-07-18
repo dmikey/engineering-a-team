@@ -1,0 +1,118 @@
+name: 'Post Council Results'
+description: >
+  Post a council decision to GitHub Discussions (if enabled) or fall back
+  to a labeled GitHub Issue.
+
+inputs:
+  title:
+    description: 'Title for the Discussion or Issue'
+    required: true
+  body:
+    description: 'Markdown body of the council decision'
+    required: true
+  category:
+    description: 'Preferred GitHub Discussion category name'
+    default: 'General'
+  labels:
+    description: 'Comma-separated labels to apply (Issue fallback only)'
+    default: 'council-decision'
+  token:
+    description: 'GitHub token with discussions:write and issues:write'
+    required: true
+
+outputs:
+  url:
+    description: 'URL of the created Discussion or Issue'
+    value: ${{ steps.post.outputs.url }}
+  type:
+    description: '"discussion" or "issue"'
+    value: ${{ steps.post.outputs.type }}
+
+runs:
+  using: composite
+  steps:
+    - name: Post to Discussions or Issues
+      id: post
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        TITLE: ${{ inputs.title }}
+        BODY: ${{ inputs.body }}
+        CATEGORY: ${{ inputs.category }}
+        LABELS: ${{ inputs.labels }}
+        REPO: ${{ github.repository }}
+      run: |
+        OWNER=$(echo "$REPO" | cut -d'/' -f1)
+        REPO_NAME=$(echo "$REPO" | cut -d'/' -f2)
+
+        # Attempt to create a GitHub Discussion via GraphQL
+        REPO_ID=$(gh api "repos/$REPO" --jq '.node_id' 2>/dev/null || echo "")
+
+        DISCUSSION_URL=""
+        if [ -n "$REPO_ID" ]; then
+          # Find the category ID
+          CATEGORY_ID=$(gh api graphql \
+            -f query='query($owner:String!,$repo:String!){
+              repository(owner:$owner,name:$repo){
+                discussionCategories(first:20){
+                  nodes{ id name }
+                }
+              }
+            }' \
+            -f owner="$OWNER" -f repo="$REPO_NAME" \
+            --jq ".data.repository.discussionCategories.nodes[] | select(.name == \"$CATEGORY\") | .id" \
+            2>/dev/null || echo "")
+
+          # Fall back to the first available category if named one not found
+          if [ -z "$CATEGORY_ID" ]; then
+            CATEGORY_ID=$(gh api graphql \
+              -f query='query($owner:String!,$repo:String!){
+                repository(owner:$owner,name:$repo){
+                  discussionCategories(first:1){
+                    nodes{ id }
+                  }
+                }
+              }' \
+              -f owner="$OWNER" -f repo="$REPO_NAME" \
+              --jq '.data.repository.discussionCategories.nodes[0].id' \
+              2>/dev/null || echo "")
+          fi
+
+          if [ -n "$CATEGORY_ID" ]; then
+            DISCUSSION_URL=$(gh api graphql \
+              -f query='mutation($repoId:ID!,$catId:ID!,$title:String!,$body:String!){
+                createDiscussion(input:{repositoryId:$repoId,categoryId:$catId,title:$title,body:$body}){
+                  discussion{ url }
+                }
+              }' \
+              -f repoId="$REPO_ID" -f catId="$CATEGORY_ID" \
+              -f title="$TITLE" -f body="$BODY" \
+              --jq '.data.createDiscussion.discussion.url' \
+              2>/dev/null || echo "")
+          fi
+        fi
+
+        if [ -n "$DISCUSSION_URL" ]; then
+          echo "url=$DISCUSSION_URL" >> "$GITHUB_OUTPUT"
+          echo "type=discussion" >> "$GITHUB_OUTPUT"
+          echo "✅ Council decision posted as Discussion: $DISCUSSION_URL"
+        else
+          # Fallback: create a labeled Issue
+          LABEL_ARGS=""
+          IFS=',' read -ra LABEL_ARR <<< "$LABELS"
+          for lbl in "${LABEL_ARR[@]}"; do
+            lbl=$(echo "$lbl" | xargs)
+            LABEL_ARGS="$LABEL_ARGS --label \"$lbl\""
+          done
+
+          ISSUE_URL=$(gh issue create \
+            --title "$TITLE" \
+            --body "$BODY" \
+            --label "council-decision" \
+            2>/dev/null || \
+            gh issue create --title "$TITLE" --body "$BODY")
+
+          echo "url=$ISSUE_URL" >> "$GITHUB_OUTPUT"
+          echo "type=issue" >> "$GITHUB_OUTPUT"
+          echo "✅ Council decision posted as Issue: $ISSUE_URL"
+        fi
