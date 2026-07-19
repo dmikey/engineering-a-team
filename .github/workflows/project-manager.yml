@@ -60,8 +60,6 @@ env:
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
   PM_MILESTONE_LOOKAHEAD: ${{ vars.PM_MILESTONE_LOOKAHEAD_DAYS || '30' }}
-  COPILOT_ASSIGNEE: ${{ vars.COPILOT_ASSIGNEE || '@copilot' }}
-  COPILOT_ASSIGNEE_CANDIDATES: ${{ vars.COPILOT_ASSIGNEE_CANDIDATES || 'copilot,github-copilot[bot]' }}
 
 jobs:
   project-management:
@@ -250,17 +248,20 @@ jobs:
 
             ${{ steps.data.outputs.project_data }}
 
-      # ── Apply priority labels and assign highest-priority issue ──────────
-      - name: Apply priority labels and assign top issue to Copilot
+      # ── Apply priority labels and hand highest-priority issue to agent ───
+      - name: Apply priority labels and create agent task for top issue
         if: |
           steps.pm-groom.outputs.response != '' &&
           steps.data.outputs.open_count != '0'
         env:
-          GH_TOKEN: ${{ secrets.GH_USER_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_USER_PAT }}
           GROOMING_REPORT: ${{ steps.pm-groom.outputs.response }}
-          COPILOT_ASSIGNEE: ${{ env.COPILOT_ASSIGNEE }}
-          COPILOT_ASSIGNEE_CANDIDATES: ${{ env.COPILOT_ASSIGNEE_CANDIDATES }}
         run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "GH_USER_PAT is required to create agent tasks."
+            exit 1
+          fi
+
           # Ensure priority labels exist
           for LABEL in "priority: critical" "priority: high" "priority: medium" "priority: low" "blocked"; do
             COLOR=""
@@ -279,8 +280,6 @@ jobs:
           import re, os, subprocess
 
           report = os.environ.get('GROOMING_REPORT', '')
-          configured_assignee = os.environ.get('COPILOT_ASSIGNEE', '').strip()
-          candidate_list = os.environ.get('COPILOT_ASSIGNEE_CANDIDATES', '').strip()
           repository = os.environ.get('GITHUB_REPOSITORY', '').strip()
 
           # Find patterns like "#123 ... Priority: HIGH"
@@ -318,64 +317,44 @@ jobs:
                   highest_priority = priority_key
 
           if highest_issue_num:
-            def normalize(login):
-              return login.strip().lstrip('@')
-
-            def can_assign(login):
-              if not repository:
-                return False
-              check = subprocess.run(
-                ['gh', 'api', f'repos/{repository}/assignees/{login}'],
-                capture_output=True,
-                text=True
-              )
-              return check.returncode == 0
-
-            candidates = []
-            if configured_assignee:
-              candidates.append(normalize(configured_assignee))
-            if candidate_list:
-              candidates.extend(normalize(x) for x in candidate_list.split(',') if x.strip())
-
-            # De-duplicate while preserving order.
-            seen = set()
-            ordered_candidates = []
-            for c in candidates:
-              if c and c not in seen:
-                seen.add(c)
-                ordered_candidates.append(c)
-
-            if highest_issue_num and ordered_candidates:
-              assigned = False
-              for assignee_login in ordered_candidates:
-                if not can_assign(assignee_login):
-                  print(f'Skipping assignee {assignee_login}: not assignable in this repository')
-                  continue
-
-                print(
-                  f'Assigning highest-priority issue #{highest_issue_num} '
-                  f'({highest_priority}) to {assignee_login}'
-                )
-                assign = subprocess.run(
-                  ['gh', 'issue', 'edit', highest_issue_num, '--add-assignee', assignee_login],
+              issue_meta = subprocess.run(
+                  ['gh', 'issue', 'view', highest_issue_num, '--json', 'title,url', '--jq', '.title + "\\n" + .url'],
                   capture_output=True,
                   text=True
-                )
-                if assign.returncode == 0:
-                  assigned = True
-                  break
+              )
+              issue_title = f'Issue #{highest_issue_num}'
+              issue_url = ''
+              if issue_meta.returncode == 0:
+                  parts = issue_meta.stdout.strip().splitlines()
+                  if len(parts) >= 1 and parts[0].strip():
+                      issue_title = parts[0].strip()
+                  if len(parts) >= 2 and parts[1].strip():
+                      issue_url = parts[1].strip()
 
-                print(
-                  f'Assignment failed for {assignee_login}: '
-                  f'{assign.stderr.strip()}'
-                )
+              prompt = (
+                  f'Handle the highest-priority backlog issue in {repository}. '\
+                  f'Issue #{highest_issue_num} is prioritized as {highest_priority}. '\
+                  f'Title: {issue_title}. '\
+                  f'URL: {issue_url or "N/A"}. '\
+                  'Investigate, implement the fix, and open a pull request with a clear summary and tests.'
+              )
 
-              if not assigned:
-                print(
-                  'Copilot assignment skipped: none of the configured assignee candidates '
-                  'are assignable for this repository. Ensure Copilot has repository access '
-                  'and set COPILOT_ASSIGNEE/COPILOT_ASSIGNEE_CANDIDATES accordingly.'
-                )
+              print(
+                  f'Creating agent task for highest-priority issue #{highest_issue_num} '
+                  f'({highest_priority})'
+              )
+              task = subprocess.run(
+                  ['gh', 'agent-task', 'create', prompt, '--repo', repository],
+                  capture_output=True,
+                  text=True
+              )
+              if task.returncode != 0:
+                  print(
+                      f'Agent task creation failed for #{highest_issue_num}: '
+                      f'{task.stderr.strip()}'
+                  )
+              elif task.stdout.strip():
+                  print(task.stdout.strip())
           PYEOF
 
       # ── Post weekly sprint report ────────────────────────────────────────

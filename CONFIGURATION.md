@@ -37,9 +37,9 @@ The model-calling workflows in this repository request `models: read`
 permission explicitly. If GitHub Models access is still denied, provide a
 `MODELS_TOKEN` secret instead of relying on `GITHUB_TOKEN`.
 
-### GH_USER_PAT (for Copilot issue assignment)
+### GH_USER_PAT (for agent task creation)
 
-To assign issues to native GitHub Copilot, create a user token (PAT or OAuth)
+To create agent tasks from backlog grooming, create a user token (PAT or OAuth)
 and store it as a repository secret named `GH_USER_PAT`.
 
 ```
@@ -48,10 +48,8 @@ Name:  GH_USER_PAT
 Value: <your user PAT or OAuth token>
 ```
 
-The Project Manager workflow uses `GH_USER_PAT` when applying backlog grooming
-updates that include Copilot assignment. If `GH_USER_PAT` is not set, it
-falls back to `GITHUB_TOKEN`, but Copilot assignment will fail because GitHub
-App installation tokens cannot assign agents.
+The Project Manager workflow uses `GH_USER_PAT` for `gh agent-task create`
+when handing off the highest-priority issue after grooming.
 
 ---
 
@@ -89,8 +87,6 @@ Settings → Secrets and variables → Variables → New repository variable
 |----------|---------|-------------|
 | `PM_MODEL` | `gpt-4o-mini` | Override model for Project Manager |
 | `PM_MILESTONE_LOOKAHEAD_DAYS` | `30` | Days before a milestone due date to start drift detection |
-| `COPILOT_ASSIGNEE` | `@copilot` | Assignee login used when PM backlog grooming auto-assigns the single highest-priority open issue |
-| `COPILOT_ASSIGNEE_CANDIDATES` | `copilot,github-copilot[bot]` | Comma-separated fallback assignee logins the PM workflow will try if the primary assignee is not assignable |
 
 ### Product Owner Variables
 
