@@ -5,6 +5,10 @@ quality software: reviewing code, managing the backlog, and championing the
 product. A **council mechanism** lets them discuss complex decisions and reach
 consensus.
 
+This repository is self-maintained by agentic systems: the same workflows and
+agents that operate your engineering process also continuously evaluate,
+improve, and evolve this repository.
+
 ---
 
 ## Agents
