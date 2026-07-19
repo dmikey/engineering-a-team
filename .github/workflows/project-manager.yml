@@ -113,6 +113,9 @@ jobs:
           if [[ -z "$PERIOD_INPUT" || ! "$PERIOD_INPUT" =~ ^[0-9]+$ ]]; then
             PERIOD_INPUT=30
           fi
+          if [ "$PERIOD_INPUT" -lt 1 ] || [ "$PERIOD_INPUT" -gt 365 ]; then
+            PERIOD_INPUT=30
+          fi
 
           if [ -z "$SORT_INPUT" ]; then
             SORT_INPUT=$(echo "$EXTRA_CONTEXT" | sed -nE 's/.*sort=(success-rate|runs|failures|avg-duration|last-run).*/\1/p' | head -n1)
@@ -504,6 +507,7 @@ jobs:
           print(kpi_lines)
           print("\n---")
           print("*KPIs are based on recent GitHub Actions workflow runs for each agent workflow.*")
+          print("*Note: metrics are computed from the most recent 100 workflow runs returned by the GitHub API.*")
           print(f"*🤖 Automated dashboard by Morgan (Project Manager Agent) · [Workflow run]({workflow_url})*")
           PYEOF
 
