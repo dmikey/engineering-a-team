@@ -388,7 +388,7 @@ jobs:
           fi
 
           if [ "$TASK" = "agent-performance-dashboard" ]; then
-            DASHBOARD_ARGS=(-f task="$TASK")
+            DASHBOARD_ARGS=(-f task="$TASK" -f extra_context="$ARGS")
             [ -n "$PERIOD_DAYS" ] && DASHBOARD_ARGS+=(-f "metrics_period_days=$PERIOD_DAYS")
             [ -n "$SORT_BY" ] && DASHBOARD_ARGS+=(-f "metrics_sort_by=$SORT_BY")
             gh workflow run project-manager.yml "${DASHBOARD_ARGS[@]}" 2>/dev/null || \

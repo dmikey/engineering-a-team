@@ -110,9 +110,6 @@ jobs:
           if [ -z "$PERIOD_INPUT" ]; then
             PERIOD_INPUT=$(echo "$EXTRA_CONTEXT" | sed -nE 's/.*period=([0-9]+).*/\1/p' | head -n1)
           fi
-          if [ -z "$PERIOD_INPUT" ]; then
-            PERIOD_INPUT=$(echo "$EXTRA_CONTEXT" | sed -nE 's/.*days=([0-9]+).*/\1/p' | head -n1)
-          fi
           if [[ -z "$PERIOD_INPUT" || ! "$PERIOD_INPUT" =~ ^[0-9]+$ ]]; then
             PERIOD_INPUT=30
           fi
