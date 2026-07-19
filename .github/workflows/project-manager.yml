@@ -248,20 +248,16 @@ jobs:
 
             ${{ steps.data.outputs.project_data }}
 
-      # ── Apply priority labels and hand highest-priority issue to agent ───
-      - name: Apply priority labels and create agent task for top issue
+      # ── Apply priority labels and trigger Copilot assignment workflow ─────
+      - name: Apply priority labels and trigger top issue agent workflow
         if: |
           steps.pm-groom.outputs.response != '' &&
           steps.data.outputs.open_count != '0'
         env:
-          GH_TOKEN: ${{ secrets.GH_USER_PAT }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AGENT_DISPATCH_TOKEN: ${{ secrets.GH_USER_PAT }}
           GROOMING_REPORT: ${{ steps.pm-groom.outputs.response }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "GH_USER_PAT is required to create agent tasks."
-            exit 1
-          fi
-
           # Ensure priority labels exist
           for LABEL in "priority: critical" "priority: high" "priority: medium" "priority: low" "blocked"; do
             COLOR=""
@@ -280,7 +276,7 @@ jobs:
           import re, os, subprocess
 
           report = os.environ.get('GROOMING_REPORT', '')
-          repository = os.environ.get('GITHUB_REPOSITORY', '').strip()
+          dispatch_token = os.environ.get('AGENT_DISPATCH_TOKEN', '').strip()
 
           # Find patterns like "#123 ... Priority: HIGH"
           pattern = r'#(\d+)[^\n]*Priority:\s*(CRITICAL|HIGH|MEDIUM|LOW)'
@@ -317,44 +313,30 @@ jobs:
                   highest_priority = priority_key
 
           if highest_issue_num:
-              issue_meta = subprocess.run(
-                  ['gh', 'issue', 'view', highest_issue_num, '--json', 'title,url', '--jq', '.title + "\\n" + .url'],
-                  capture_output=True,
-                  text=True
-              )
-              issue_title = f'Issue #{highest_issue_num}'
-              issue_url = ''
-              if issue_meta.returncode == 0:
-                  parts = issue_meta.stdout.strip().splitlines()
-                  if len(parts) >= 1 and parts[0].strip():
-                      issue_title = parts[0].strip()
-                  if len(parts) >= 2 and parts[1].strip():
-                      issue_url = parts[1].strip()
-
-              prompt = (
-                  f'Handle the highest-priority backlog issue in {repository}. '\
-                  f'Issue #{highest_issue_num} is prioritized as {highest_priority}. '\
-                  f'Title: {issue_title}. '\
-                  f'URL: {issue_url or "N/A"}. '\
-                  'Investigate, implement the fix, and open a pull request with a clear summary and tests.'
-              )
-
-              print(
-                  f'Creating agent task for highest-priority issue #{highest_issue_num} '
-                  f'({highest_priority})'
-              )
-              task = subprocess.run(
-                  ['gh', 'agent-task', 'create', prompt, '--repo', repository],
-                  capture_output=True,
-                  text=True
-              )
-              if task.returncode != 0:
+              if not dispatch_token:
+                  print('Skipping Copilot assignment workflow dispatch: GH_USER_PAT is not configured')
+              else:
                   print(
-                      f'Agent task creation failed for #{highest_issue_num}: '
-                      f'{task.stderr.strip()}'
+                      f'Dispatching assign-top-priority-agent workflow for issue #{highest_issue_num} '
+                      f'({highest_priority})'
                   )
-              elif task.stdout.strip():
-                  print(task.stdout.strip())
+                  dispatch = subprocess.run(
+                      [
+                          'gh', 'workflow', 'run', 'assign-top-priority-agent.lock.yml',
+                          '-f', f'issue_number={highest_issue_num}',
+                          '-f', f'priority={highest_priority}',
+                      ],
+                      capture_output=True,
+                      text=True,
+                      env={**os.environ, 'GH_TOKEN': dispatch_token},
+                  )
+                  if dispatch.returncode != 0:
+                      print(
+                          'Copilot assignment workflow dispatch failed: '
+                          f'{dispatch.stderr.strip()}'
+                      )
+                  elif dispatch.stdout.strip():
+                      print(dispatch.stdout.strip())
           PYEOF
 
       # ── Post weekly sprint report ────────────────────────────────────────

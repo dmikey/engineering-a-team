@@ -37,9 +37,10 @@ The model-calling workflows in this repository request `models: read`
 permission explicitly. If GitHub Models access is still denied, provide a
 `MODELS_TOKEN` secret instead of relying on `GITHUB_TOKEN`.
 
-### GH_USER_PAT (for agent task creation)
+### GH_USER_PAT (for Copilot agent workflow dispatch)
 
-To create agent tasks from backlog grooming, create a user token (PAT or OAuth)
+To dispatch the dedicated Copilot assignment workflow and authorize its
+`assign-to-agent` safe output, create a user token (PAT or OAuth)
 and store it as a repository secret named `GH_USER_PAT`.
 
 ```
@@ -48,8 +49,10 @@ Name:  GH_USER_PAT
 Value: <your user PAT or OAuth token>
 ```
 
-The Project Manager workflow uses `GH_USER_PAT` for `gh agent-task create`
-when handing off the highest-priority issue after grooming.
+The Project Manager workflow uses `GH_USER_PAT` to dispatch
+`assign-top-priority-agent.lock.yml`, and that workflow uses the same secret in
+its `assign-to-agent` safe output. GitHub App installation tokens are not
+accepted for Copilot assignment, so `GH_USER_PAT` is required for this path.
 
 ---
 
