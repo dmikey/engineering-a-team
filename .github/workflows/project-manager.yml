@@ -108,20 +108,17 @@ jobs:
           SORT_INPUT="${{ inputs.metrics_sort_by || '' }}"
 
           if [ -z "$PERIOD_INPUT" ]; then
-            PERIOD_INPUT=$(echo "$EXTRA_CONTEXT" | grep -oE 'period=[0-9]+' | head -n1 | cut -d= -f2 || true)
+            PERIOD_INPUT=$(echo "$EXTRA_CONTEXT" | sed -nE 's/.*period=([0-9]+).*/\1/p' | head -n1)
           fi
           if [ -z "$PERIOD_INPUT" ]; then
-            PERIOD_INPUT=$(echo "$EXTRA_CONTEXT" | grep -oE 'days=[0-9]+' | head -n1 | cut -d= -f2 || true)
+            PERIOD_INPUT=$(echo "$EXTRA_CONTEXT" | sed -nE 's/.*days=([0-9]+).*/\1/p' | head -n1)
           fi
-          if [ -z "$PERIOD_INPUT" ]; then
-            PERIOD_INPUT=30
-          fi
-          if ! [[ "$PERIOD_INPUT" =~ ^[0-9]+$ ]]; then
+          if [ -z "$PERIOD_INPUT" ] || ! [[ "$PERIOD_INPUT" =~ ^[0-9]+$ ]]; then
             PERIOD_INPUT=30
           fi
 
           if [ -z "$SORT_INPUT" ]; then
-            SORT_INPUT=$(echo "$EXTRA_CONTEXT" | grep -oE 'sort=(success-rate|runs|failures|avg-duration|last-run)' | head -n1 | cut -d= -f2 || true)
+            SORT_INPUT=$(echo "$EXTRA_CONTEXT" | sed -nE 's/.*sort=(success-rate|runs|failures|avg-duration|last-run).*/\1/p' | head -n1)
           fi
           case "$SORT_INPUT" in
             success-rate|runs|failures|avg-duration|last-run) ;;
@@ -395,6 +392,7 @@ jobs:
           CURRENT_DATE: ${{ steps.data.outputs.current_date }}
           PERIOD_DAYS: ${{ steps.data.outputs.metrics_period_days }}
           SORT_BY: ${{ steps.data.outputs.metrics_sort_by }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if ! gh api "repos/${{ github.repository }}/actions/runs?per_page=100" > /tmp/agent-runs.json; then
             echo "❌ Failed to fetch workflow runs data for dashboard generation."
@@ -412,6 +410,7 @@ jobs:
           since = now - timedelta(days=period_days)
           sort_by = os.environ.get("SORT_BY", "success-rate")
           current_date = os.environ.get("CURRENT_DATE", now.strftime("%Y-%m-%d"))
+          workflow_url = os.environ.get("WORKFLOW_URL", "")
 
           agent_workflows = {
               "Quinn (QA Engineer)": ".github/workflows/qa-engineer.yml",
@@ -508,7 +507,7 @@ jobs:
           print(kpi_lines)
           print("\n---")
           print("*KPIs are based on recent GitHub Actions workflow runs for each agent workflow.*")
-          print(f"*🤖 Automated dashboard by Morgan (Project Manager Agent) · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*")
+          print(f"*🤖 Automated dashboard by Morgan (Project Manager Agent) · [Workflow run]({workflow_url})*")
           PYEOF
 
           REPORT=$(cat /tmp/agent-dashboard.md)
