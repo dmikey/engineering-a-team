@@ -14,7 +14,7 @@ on:
           - self-improvement
         default: pm
       task:
-        description: 'Task or focus for PM, PO, or self-improvement workflows'
+        description: 'Task or focus for PM, PO, or self-improvement workflows (PM also supports agent-performance-dashboard)'
         required: false
         default: ''
       pr_number:

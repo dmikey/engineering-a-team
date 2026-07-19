@@ -6,7 +6,7 @@
 #
 # Supported commands:
 #   /qa [context]       — Trigger QA Engineer review
-#   /pm [task]          — Trigger Project Manager (groom-backlog | check-milestones | full-sprint-report)
+#   /pm [task]          — Trigger Project Manager (groom-backlog | check-milestones | full-sprint-report | agent-performance-dashboard)
 #   /po [task]          — Trigger Product Owner (product-health-report | suggest-features | run-playwright)
 #   /council [topic]    — Trigger full council discussion
 #   /profile comms ...  — Set personal communication preference
@@ -149,7 +149,7 @@ jobs:
           | Command | Description |
           |---------|-------------|
           | \`/qa [context]\` | Trigger QA Engineer (Quinn) to review this PR or issue |
-          | \`/pm [task]\` | Trigger Project Manager (Morgan) — tasks: \`groom-backlog\`, \`check-milestones\`, \`full-sprint-report\` |
+          | \`/pm [task]\` | Trigger Project Manager (Morgan) — tasks: \`groom-backlog\`, \`check-milestones\`, \`full-sprint-report\`, \`agent-performance-dashboard\` |
           | \`/po [task]\` | Trigger Product Owner (Alex) — tasks: \`product-health-report\`, \`suggest-features\`, \`run-playwright\` |
           | \`/council [topic]\` | Convene the full council for a discussion on this topic |
           | \`/profile comms [comment\|issue\|discussion]\` | Set your personal notification channel preference |
@@ -334,13 +334,25 @@ jobs:
         run: |
           # Determine task
           TASK="full-sprint-report"
+          PERIOD_DAYS=""
+          SORT_BY=""
           case "$ARGS" in
             groom-backlog*)     TASK="groom-backlog" ;;
             check-milestones*)  TASK="check-milestones" ;;
             full-sprint-report*) TASK="full-sprint-report" ;;
+            agent-performance-dashboard*) TASK="agent-performance-dashboard" ;;
           esac
 
+          if [ "$TASK" = "agent-performance-dashboard" ]; then
+            PERIOD_DAYS=$(echo "$ARGS" | grep -oE 'period=[0-9]+' | head -n1 | cut -d= -f2 || true)
+            SORT_BY=$(echo "$ARGS" | grep -oE 'sort=(success-rate|runs|failures|avg-duration|last-run)' | head -n1 | cut -d= -f2 || true)
+          fi
+
           MESSAGE="📋 Dispatching **Morgan (Project Manager)** for task: \`$TASK\`... ⏳"
+          if [ "$TASK" = "agent-performance-dashboard" ]; then
+            [ -n "$PERIOD_DAYS" ] && MESSAGE="$MESSAGE"$'\n'"• Period: \`$PERIOD_DAYS\` days"
+            [ -n "$SORT_BY" ] && MESSAGE="$MESSAGE"$'\n'"• Sort: \`$SORT_BY\`"
+          fi
           if [ "$CHANNEL" = "issue" ]; then
             gh issue create --title "📋 PM dispatch update (re: #$ISSUE_NUMBER)" --body "$MESSAGE" 2>/dev/null || true
           elif [ "$CHANNEL" = "discussion" ]; then
@@ -375,11 +387,21 @@ jobs:
             gh issue comment "$ISSUE_NUMBER" --body "$MESSAGE" 2>/dev/null || true
           fi
 
-          gh workflow run project-manager.yml \
-            -f task="$TASK" \
-            2>/dev/null || \
-          gh issue comment "$ISSUE_NUMBER" \
-            --body "⚠️ Could not dispatch Project Manager workflow."
+          if [ "$TASK" = "agent-performance-dashboard" ]; then
+            DASHBOARD_ARGS=(-f task="$TASK" -f extra_context="$ARGS")
+            [ -n "$PERIOD_DAYS" ] && DASHBOARD_ARGS+=(-f "metrics_period_days=$PERIOD_DAYS")
+            [ -n "$SORT_BY" ] && DASHBOARD_ARGS+=(-f "metrics_sort_by=$SORT_BY")
+            gh workflow run project-manager.yml "${DASHBOARD_ARGS[@]}" 2>/dev/null || \
+              gh issue comment "$ISSUE_NUMBER" \
+                --body "⚠️ Could not dispatch Project Manager workflow."
+          else
+            gh workflow run project-manager.yml \
+              -f task="$TASK" \
+              -f extra_context="$ARGS" \
+              2>/dev/null || \
+            gh issue comment "$ISSUE_NUMBER" \
+              --body "⚠️ Could not dispatch Project Manager workflow."
+          fi
 
       # ── /po ──────────────────────────────────────────────────────────────
       - name: Route to Product Owner
