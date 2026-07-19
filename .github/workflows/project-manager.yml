@@ -396,11 +396,15 @@ jobs:
           PERIOD_DAYS: ${{ steps.data.outputs.metrics_period_days }}
           SORT_BY: ${{ steps.data.outputs.metrics_sort_by }}
         run: |
-          gh api "repos/${{ github.repository }}/actions/runs?per_page=100" > /tmp/agent-runs.json
+          if ! gh api "repos/${{ github.repository }}/actions/runs?per_page=100" > /tmp/agent-runs.json; then
+            echo "❌ Failed to fetch workflow runs data for dashboard generation."
+            exit 1
+          fi
 
           python3 - <<'PYEOF' > /tmp/agent-dashboard.md
           import json
           import os
+          from statistics import mean
           from datetime import datetime, timedelta, timezone
 
           now = datetime.now(timezone.utc)
@@ -425,6 +429,9 @@ jobs:
               for agent in agent_workflows
           }
 
+          def parse_ts(raw):
+              return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+
           for run in runs:
               path = run.get("path") or ""
               created_raw = run.get("created_at")
@@ -434,7 +441,7 @@ jobs:
 
               if not created_raw:
                   continue
-              created_at = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+              created_at = parse_ts(created_raw)
               if created_at < since:
                   continue
 
@@ -453,7 +460,7 @@ jobs:
               if status == "completed" and conclusion and conclusion != "success":
                   data["failures"] += 1
               if status == "completed" and created_raw and updated_raw:
-                  updated_at = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
+                  updated_at = parse_ts(updated_raw)
                   duration_minutes = max((updated_at - created_at).total_seconds() / 60.0, 0.0)
                   data["durations"].append(duration_minutes)
 
@@ -463,7 +470,7 @@ jobs:
               failures = data["failures"]
               successes = max(total - failures, 0)
               success_rate = (successes / total * 100.0) if total else 0.0
-              avg_duration = (sum(data["durations"]) / len(data["durations"])) if data["durations"] else 0.0
+              avg_duration = mean(data["durations"]) if data["durations"] else 0.0
               last_run = data["last_run"].strftime("%Y-%m-%d") if data["last_run"] else "No runs"
 
               rows.append({
