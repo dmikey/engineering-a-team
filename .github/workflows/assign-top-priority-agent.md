@@ -10,6 +10,7 @@ on:
         description: Priority selected by backlog grooming
         required: false
 permissions:
+  copilot-requests: write
   contents: read
   issues: read
   pull-requests: read
