@@ -80,7 +80,7 @@ to execute:
 
 - `qa`: optional `pr_number` and `extra_context`
 - `pm`: `task` such as `groom-backlog`, `check-milestones`, or `full-sprint-report`
-- `po`: `task` such as `product-health-report`, `suggest-features`, or `run-playwright`
+- `po`: `task` such as `product-health-report`, `suggest-features`, or `run-playwright`, plus optional `feature_prompt`, `base_url`, and `extra_context`
 - `council`: `topic`, optional `issue_number`, and `extra_context`
 - `self-improvement`: `task` as `full-loop`, `benchmark-only`, or `copilot-handoff`, plus optional `reference_repo`, `base_url`, and `extra_context`
 

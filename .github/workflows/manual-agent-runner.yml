@@ -33,6 +33,10 @@ on:
         description: 'Additional context passed to the selected workflow'
         required: false
         default: ''
+      feature_prompt:
+        description: 'Prompt for Product Owner feature suggestions'
+        required: false
+        default: ''
       base_url:
         description: 'Base URL for Product Owner Playwright or reference app runs'
         required: false
@@ -71,6 +75,7 @@ jobs:
     with:
       task: ${{ inputs.task != '' && inputs.task || 'product-health-report' }}
       extra_context: ${{ inputs.extra_context }}
+      feature_prompt: ${{ inputs.feature_prompt }}
       base_url: ${{ inputs.base_url }}
     secrets: inherit
 

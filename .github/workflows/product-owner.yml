@@ -35,6 +35,9 @@ on:
           - suggest-features
           - run-playwright
         default: product-health-report
+      feature_prompt:
+        description: 'Prompt for feature suggestions or issue ideas'
+        required: false
       base_url:
         description: 'Base URL for Playwright tests (if applicable)'
         required: false
@@ -47,6 +50,10 @@ on:
       extra_context:
         type: string
         description: 'Additional context for the PO'
+        required: false
+      feature_prompt:
+        type: string
+        description: 'Prompt for feature suggestions or issue ideas'
         required: false
       base_url:
         type: string
@@ -190,6 +197,9 @@ jobs:
             echo ""
             echo "## Additional Context"
             echo "${{ inputs.extra_context }}"
+            echo ""
+            echo "## Feature Suggestion Prompt"
+            echo "${{ inputs.feature_prompt }}"
             echo "PO_CTX_EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -275,7 +285,8 @@ jobs:
             Suggest between 1 and 3 features maximum.
           user-prompt: |
             Based on this product context, suggest features that are NOT already
-            in the open issues list:
+            in the open issues list. If a feature suggestion prompt is provided,
+            use it to steer the ideas and issue creation:
 
             ${{ steps.ctx.outputs.product_context }}
 

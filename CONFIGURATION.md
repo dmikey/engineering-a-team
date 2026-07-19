@@ -159,7 +159,9 @@ the GitHub Actions UI.
 
 For a single entrypoint, use **Manual Agent Runner** from the Actions tab. It
 dispatches to the underlying QA, Project Manager, Product Owner, Council, or
-Self-Improvement workflow and forwards the relevant inputs.
+Self-Improvement workflow and forwards the relevant inputs. For Product Owner
+feature suggestion runs, use `feature_prompt` to steer the generated GitHub
+issues.
 
 ---
 
