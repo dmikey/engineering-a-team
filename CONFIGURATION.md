@@ -49,10 +49,12 @@ Name:  GH_USER_PAT
 Value: <your user PAT or OAuth token>
 ```
 
-The Project Manager workflow uses `GH_USER_PAT` to dispatch
-`assign-top-priority-agent.lock.yml`, and that workflow uses the same secret in
+The Project Manager workflow dispatches `assign-top-priority-agent.lock.yml`
+with the repository `GITHUB_TOKEN`, which requires `actions: write` permission
+on that workflow. The dedicated assignment workflow then uses `GH_USER_PAT` in
 its `assign-to-agent` safe output. GitHub App installation tokens are not
-accepted for Copilot assignment, so `GH_USER_PAT` is required for this path.
+accepted for the Copilot assignment itself, so `GH_USER_PAT` is still required
+for that path.
 
 ---
 
