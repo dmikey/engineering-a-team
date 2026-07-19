@@ -32,13 +32,38 @@ on:
           - groom-backlog
           - check-milestones
           - full-sprint-report
+          - agent-performance-dashboard
         default: full-sprint-report
+      metrics_period_days:
+        description: 'Dashboard window in days (used by agent-performance-dashboard)'
+        required: false
+        default: '30'
+      metrics_sort_by:
+        description: 'Dashboard sort metric (used by agent-performance-dashboard)'
+        type: choice
+        options:
+          - success-rate
+          - runs
+          - failures
+          - avg-duration
+          - last-run
+        default: success-rate
   workflow_call:
     inputs:
       task:
         type: string
-        description: 'Task: groom-backlog | check-milestones | full-sprint-report'
+        description: 'Task: groom-backlog | check-milestones | full-sprint-report | agent-performance-dashboard'
         default: full-sprint-report
+      metrics_period_days:
+        type: string
+        description: 'Dashboard window in days'
+        required: false
+        default: '30'
+      metrics_sort_by:
+        type: string
+        description: 'Dashboard sort metric'
+        required: false
+        default: success-rate
       extra_context:
         type: string
         description: 'Additional context for the PM'
@@ -78,7 +103,34 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TASK="${{ inputs.task || 'full-sprint-report' }}"
+          EXTRA_CONTEXT="${{ inputs.extra_context }}"
+          PERIOD_INPUT="${{ inputs.metrics_period_days || '' }}"
+          SORT_INPUT="${{ inputs.metrics_sort_by || '' }}"
+
+          if [ -z "$PERIOD_INPUT" ]; then
+            PERIOD_INPUT=$(echo "$EXTRA_CONTEXT" | grep -oE 'period=[0-9]+' | head -n1 | cut -d= -f2 || true)
+          fi
+          if [ -z "$PERIOD_INPUT" ]; then
+            PERIOD_INPUT=$(echo "$EXTRA_CONTEXT" | grep -oE 'days=[0-9]+' | head -n1 | cut -d= -f2 || true)
+          fi
+          if [ -z "$PERIOD_INPUT" ]; then
+            PERIOD_INPUT=30
+          fi
+          if ! [[ "$PERIOD_INPUT" =~ ^[0-9]+$ ]]; then
+            PERIOD_INPUT=30
+          fi
+
+          if [ -z "$SORT_INPUT" ]; then
+            SORT_INPUT=$(echo "$EXTRA_CONTEXT" | grep -oE 'sort=(success-rate|runs|failures|avg-duration|last-run)' | head -n1 | cut -d= -f2 || true)
+          fi
+          case "$SORT_INPUT" in
+            success-rate|runs|failures|avg-duration|last-run) ;;
+            *) SORT_INPUT="success-rate" ;;
+          esac
+
           echo "task=$TASK" >> "$GITHUB_OUTPUT"
+          echo "metrics_period_days=$PERIOD_INPUT" >> "$GITHUB_OUTPUT"
+          echo "metrics_sort_by=$SORT_INPUT" >> "$GITHUB_OUTPUT"
 
           # Open issues (up to 100, sorted by created date)
           ISSUES=$(gh issue list \
@@ -334,6 +386,170 @@ jobs:
                 elif dispatch.stdout.strip():
                   print(dispatch.stdout.strip())
           PYEOF
+
+      # ── Post agent performance dashboard ──────────────────────────────────
+      - name: Compose and post agent performance dashboard
+        if: steps.data.outputs.task == 'agent-performance-dashboard'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+          PERIOD_DAYS: ${{ steps.data.outputs.metrics_period_days }}
+          SORT_BY: ${{ steps.data.outputs.metrics_sort_by }}
+        run: |
+          gh api "repos/${{ github.repository }}/actions/runs?per_page=100" > /tmp/agent-runs.json
+
+          python3 - <<'PYEOF' > /tmp/agent-dashboard.md
+          import json
+          import os
+          from datetime import datetime, timedelta, timezone
+
+          now = datetime.now(timezone.utc)
+          period_days = int(os.environ.get("PERIOD_DAYS", "30"))
+          since = now - timedelta(days=period_days)
+          sort_by = os.environ.get("SORT_BY", "success-rate")
+          current_date = os.environ.get("CURRENT_DATE", now.strftime("%Y-%m-%d"))
+
+          agent_workflows = {
+              "Quinn (QA Engineer)": ".github/workflows/qa-engineer.yml",
+              "Morgan (Project Manager)": ".github/workflows/project-manager.yml",
+              "Alex (Product Owner)": ".github/workflows/product-owner.yml",
+              "Casey (Council Moderator)": ".github/workflows/council-discussion.yml",
+          }
+
+          with open("/tmp/agent-runs.json", "r", encoding="utf-8") as fh:
+              payload = json.load(fh)
+
+          runs = payload.get("workflow_runs", [])
+          metrics = {
+              agent: {"runs": 0, "failures": 0, "durations": [], "last_run": None}
+              for agent in agent_workflows
+          }
+
+          for run in runs:
+              path = run.get("path") or ""
+              created_raw = run.get("created_at")
+              updated_raw = run.get("updated_at")
+              status = run.get("status")
+              conclusion = run.get("conclusion")
+
+              if not created_raw:
+                  continue
+              created_at = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+              if created_at < since:
+                  continue
+
+              matched_agent = None
+              for agent, workflow_path in agent_workflows.items():
+                  if path.endswith(workflow_path):
+                      matched_agent = agent
+                      break
+              if not matched_agent:
+                  continue
+
+              data = metrics[matched_agent]
+              data["runs"] += 1
+              if data["last_run"] is None or created_at > data["last_run"]:
+                  data["last_run"] = created_at
+              if status == "completed" and conclusion and conclusion != "success":
+                  data["failures"] += 1
+              if status == "completed" and created_raw and updated_raw:
+                  updated_at = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
+                  duration_minutes = max((updated_at - created_at).total_seconds() / 60.0, 0.0)
+                  data["durations"].append(duration_minutes)
+
+          rows = []
+          for agent, data in metrics.items():
+              total = data["runs"]
+              failures = data["failures"]
+              successes = max(total - failures, 0)
+              success_rate = (successes / total * 100.0) if total else 0.0
+              avg_duration = (sum(data["durations"]) / len(data["durations"])) if data["durations"] else 0.0
+              last_run = data["last_run"].strftime("%Y-%m-%d") if data["last_run"] else "No runs"
+
+              rows.append({
+                  "agent": agent,
+                  "runs": total,
+                  "failures": failures,
+                  "success_rate": success_rate,
+                  "avg_duration": avg_duration,
+                  "last_run": last_run,
+                  "last_run_sort": data["last_run"] or datetime(1970, 1, 1, tzinfo=timezone.utc),
+              })
+
+          if sort_by == "runs":
+              rows.sort(key=lambda r: r["runs"], reverse=True)
+          elif sort_by == "failures":
+              rows.sort(key=lambda r: r["failures"], reverse=True)
+          elif sort_by == "avg-duration":
+              rows.sort(key=lambda r: r["avg_duration"], reverse=True)
+          elif sort_by == "last-run":
+              rows.sort(key=lambda r: r["last_run_sort"], reverse=True)
+          else:
+              rows.sort(key=lambda r: r["success_rate"], reverse=True)
+
+          kpi_lines = "\n".join(
+              f"| {r['agent']} | {r['runs']} | {r['success_rate']:.1f}% | {r['failures']} | {r['avg_duration']:.1f} | {r['last_run']} |"
+              for r in rows
+          )
+
+          print(f"# 📊 Agent Performance Dashboard — {current_date}\n")
+          print("> Generated by Morgan (Project Manager Agent)\n")
+          print(f"**Time Period**: Last {period_days} days  ")
+          print(f"**Sorted By**: `{sort_by}`\n")
+          print("| Agent | Runs | Success Rate | Failures | Avg Duration (min) | Last Run |")
+          print("|------|-----:|-------------:|---------:|-------------------:|---------|")
+          print(kpi_lines)
+          print("\n---")
+          print("*KPIs are based on recent GitHub Actions workflow runs for each agent workflow.*")
+          print(f"*🤖 Automated dashboard by Morgan (Project Manager Agent) · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*")
+          PYEOF
+
+          REPORT=$(cat /tmp/agent-dashboard.md)
+          OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
+          REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
+          DISCUSSION_CREATED=false
+
+          if [ -n "$REPO_ID" ]; then
+            CATEGORY_ID=$(gh api graphql \
+              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:20){nodes{id name}}}}' \
+              -f o="$OWNER" -f r="$REPO" \
+              --jq '.data.repository.discussionCategories.nodes[] | select(.name == "General") | .id' \
+              2>/dev/null || echo "")
+
+            if [ -z "$CATEGORY_ID" ]; then
+              CATEGORY_ID=$(gh api graphql \
+                -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+                -f o="$OWNER" -f r="$REPO" \
+                --jq '.data.repository.discussionCategories.nodes[0].id' \
+                2>/dev/null || echo "")
+            fi
+
+            if [ -n "$CATEGORY_ID" ]; then
+              TITLE="📊 Agent Performance Dashboard — $CURRENT_DATE"
+              DISCUSSION_URL=$(gh api graphql \
+                -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
+                -f ri="$REPO_ID" -f ci="$CATEGORY_ID" \
+                -f t="$TITLE" -f b="$REPORT" \
+                --jq '.data.createDiscussion.discussion.url' \
+                2>/dev/null || echo "")
+              if [ -n "$DISCUSSION_URL" ]; then
+                echo "✅ Agent performance dashboard posted as Discussion: $DISCUSSION_URL"
+                DISCUSSION_CREATED=true
+              fi
+            fi
+          fi
+
+          if [ "$DISCUSSION_CREATED" = "false" ]; then
+            gh issue create \
+              --title "📊 Agent Performance Dashboard — $CURRENT_DATE" \
+              --body "$REPORT" \
+              2>/dev/null || \
+            gh issue create \
+              --title "📊 Agent Performance Dashboard — $CURRENT_DATE" \
+              --body "$REPORT"
+            echo "✅ Agent performance dashboard posted as Issue (Discussion fallback)"
+          fi
 
       # ── Post weekly sprint report ────────────────────────────────────────
       - name: Compose and post weekly sprint report
