@@ -37,6 +37,22 @@ The model-calling workflows in this repository request `models: read`
 permission explicitly. If GitHub Models access is still denied, provide a
 `MODELS_TOKEN` secret instead of relying on `GITHUB_TOKEN`.
 
+### GH_USER_PAT (for Copilot issue assignment)
+
+To assign issues to native GitHub Copilot, create a user token (PAT or OAuth)
+and store it as a repository secret named `GH_USER_PAT`.
+
+```
+Settings → Secrets and variables → Secrets → New repository secret
+Name:  GH_USER_PAT
+Value: <your user PAT or OAuth token>
+```
+
+The Project Manager workflow uses `GH_USER_PAT` when applying backlog grooming
+updates that include Copilot assignment. If `GH_USER_PAT` is not set, it
+falls back to `GITHUB_TOKEN`, but Copilot assignment will fail because GitHub
+App installation tokens cannot assign agents.
+
 ---
 
 ## Repository Variables

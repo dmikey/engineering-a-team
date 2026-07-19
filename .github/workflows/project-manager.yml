@@ -46,6 +46,8 @@ on:
     secrets:
       MODELS_TOKEN:
         required: false
+      GH_USER_PAT:
+        required: false
 
 permissions:
   contents: read
@@ -253,7 +255,7 @@ jobs:
           steps.pm-groom.outputs.response != '' &&
           steps.data.outputs.open_count != '0'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_USER_PAT || secrets.GITHUB_TOKEN }}
           GROOMING_REPORT: ${{ steps.pm-groom.outputs.response }}
           COPILOT_ASSIGNEE: ${{ env.COPILOT_ASSIGNEE }}
         run: |
