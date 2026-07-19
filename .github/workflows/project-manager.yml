@@ -58,6 +58,7 @@ env:
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
   PM_MILESTONE_LOOKAHEAD: ${{ vars.PM_MILESTONE_LOOKAHEAD_DAYS || '30' }}
+  COPILOT_ASSIGNEE: ${{ vars.COPILOT_ASSIGNEE || '@copilot' }}
 
 jobs:
   project-management:
@@ -246,14 +247,15 @@ jobs:
 
             ${{ steps.data.outputs.project_data }}
 
-      # ── Apply priority labels ────────────────────────────────────────────
-      - name: Apply priority labels to issues
+      # ── Apply priority labels and assign highest-priority issue ──────────
+      - name: Apply priority labels and assign top issue to Copilot
         if: |
           steps.pm-groom.outputs.response != '' &&
           steps.data.outputs.open_count != '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GROOMING_REPORT: ${{ steps.pm-groom.outputs.response }}
+          COPILOT_ASSIGNEE: ${{ env.COPILOT_ASSIGNEE }}
         run: |
           # Ensure priority labels exist
           for LABEL in "priority: critical" "priority: high" "priority: medium" "priority: low" "blocked"; do
@@ -270,9 +272,11 @@ jobs:
 
           # Parse priority assignments from the grooming report and apply labels
           echo "$GROOMING_REPORT" | python3 - <<'PYEOF'
-          import re, os, subprocess, sys
+          import re, os, subprocess
 
           report = os.environ.get('GROOMING_REPORT', '')
+          copilot_assignee = os.environ.get('COPILOT_ASSIGNEE', '').strip()
+
           # Find patterns like "#123 ... Priority: HIGH"
           pattern = r'#(\d+)[^\n]*Priority:\s*(CRITICAL|HIGH|MEDIUM|LOW)'
           matches = re.findall(pattern, report, re.IGNORECASE)
@@ -283,14 +287,45 @@ jobs:
               'MEDIUM':   'priority: medium',
               'LOW':      'priority: low',
           }
+          priority_rank = {
+              'CRITICAL': 0,
+              'HIGH': 1,
+              'MEDIUM': 2,
+              'LOW': 3,
+          }
+
+          highest_issue_num = None
+          highest_priority = None
 
           for issue_num, priority in matches:
-              label = label_map.get(priority.upper())
+              priority_key = priority.upper()
+              label = label_map.get(priority_key)
               if label:
                   print(f'Applying "{label}" to issue #{issue_num}')
                   subprocess.run(
                       ['gh', 'issue', 'edit', issue_num, '--add-label', label],
                       capture_output=True
+                  )
+
+              if highest_priority is None or priority_rank[priority_key] < priority_rank[highest_priority]:
+                  highest_issue_num = issue_num
+                  highest_priority = priority_key
+
+          if highest_issue_num and copilot_assignee:
+              assignee_login = copilot_assignee.lstrip('@')
+              print(
+                  f'Assigning highest-priority issue #{highest_issue_num} '
+                  f'({highest_priority}) to {assignee_login}'
+              )
+              assign = subprocess.run(
+                  ['gh', 'issue', 'edit', highest_issue_num, '--add-assignee', assignee_login],
+                  capture_output=True,
+                  text=True
+              )
+              if assign.returncode != 0:
+                  print(
+                      f'Copilot assignment skipped for #{highest_issue_num}: '
+                      f'{assign.stderr.strip()}'
                   )
           PYEOF
 

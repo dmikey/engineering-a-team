@@ -73,6 +73,7 @@ Settings → Secrets and variables → Variables → New repository variable
 |----------|---------|-------------|
 | `PM_MODEL` | `gpt-4o-mini` | Override model for Project Manager |
 | `PM_MILESTONE_LOOKAHEAD_DAYS` | `30` | Days before a milestone due date to start drift detection |
+| `COPILOT_ASSIGNEE` | `@copilot` | Assignee login used when PM backlog grooming auto-assigns the single highest-priority open issue |
 
 ### Product Owner Variables
 
@@ -89,7 +90,7 @@ Settings → Secrets and variables → Variables → New repository variable
 | `SELF_IMPROVEMENT_MODEL` | `gpt-4o-mini` | Override model for the self-improvement evaluator |
 | `REFERENCE_APP_REPO` | current repository | Optional override for the `owner/repo` used as the Get Milk benchmark source |
 | `REFERENCE_APP_BASE_URL` | _(empty)_ | Optional live URL for the Get Milk app |
-| `COPILOT_ASSIGNEE` | _(empty)_ | Optional assignee for native GitHub Copilot handoff when supported |
+| `COPILOT_ASSIGNEE` | `@copilot` | Assignee login used for native GitHub Copilot handoff when supported |
 
 ### Council Variables
 
