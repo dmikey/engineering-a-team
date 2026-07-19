@@ -61,6 +61,7 @@ env:
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
   PM_MILESTONE_LOOKAHEAD: ${{ vars.PM_MILESTONE_LOOKAHEAD_DAYS || '30' }}
   COPILOT_ASSIGNEE: ${{ vars.COPILOT_ASSIGNEE || '@copilot' }}
+  COPILOT_ASSIGNEE_CANDIDATES: ${{ vars.COPILOT_ASSIGNEE_CANDIDATES || 'copilot,github-copilot[bot]' }}
 
 jobs:
   project-management:
@@ -258,6 +259,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_USER_PAT || secrets.GITHUB_TOKEN }}
           GROOMING_REPORT: ${{ steps.pm-groom.outputs.response }}
           COPILOT_ASSIGNEE: ${{ env.COPILOT_ASSIGNEE }}
+          COPILOT_ASSIGNEE_CANDIDATES: ${{ env.COPILOT_ASSIGNEE_CANDIDATES }}
         run: |
           # Ensure priority labels exist
           for LABEL in "priority: critical" "priority: high" "priority: medium" "priority: low" "blocked"; do
@@ -277,7 +279,9 @@ jobs:
           import re, os, subprocess
 
           report = os.environ.get('GROOMING_REPORT', '')
-          copilot_assignee = os.environ.get('COPILOT_ASSIGNEE', '').strip()
+          configured_assignee = os.environ.get('COPILOT_ASSIGNEE', '').strip()
+          candidate_list = os.environ.get('COPILOT_ASSIGNEE_CANDIDATES', '').strip()
+          repository = os.environ.get('GITHUB_REPOSITORY', '').strip()
 
           # Find patterns like "#123 ... Priority: HIGH"
           pattern = r'#(\d+)[^\n]*Priority:\s*(CRITICAL|HIGH|MEDIUM|LOW)'
@@ -313,22 +317,65 @@ jobs:
                   highest_issue_num = issue_num
                   highest_priority = priority_key
 
-          if highest_issue_num and copilot_assignee:
-              assignee_login = copilot_assignee.lstrip('@')
-              print(
+          if highest_issue_num:
+            def normalize(login):
+              return login.strip().lstrip('@')
+
+            def can_assign(login):
+              if not repository:
+                return False
+              check = subprocess.run(
+                ['gh', 'api', f'repos/{repository}/assignees/{login}'],
+                capture_output=True,
+                text=True
+              )
+              return check.returncode == 0
+
+            candidates = []
+            if configured_assignee:
+              candidates.append(normalize(configured_assignee))
+            if candidate_list:
+              candidates.extend(normalize(x) for x in candidate_list.split(',') if x.strip())
+
+            # De-duplicate while preserving order.
+            seen = set()
+            ordered_candidates = []
+            for c in candidates:
+              if c and c not in seen:
+                seen.add(c)
+                ordered_candidates.append(c)
+
+            if highest_issue_num and ordered_candidates:
+              assigned = False
+              for assignee_login in ordered_candidates:
+                if not can_assign(assignee_login):
+                  print(f'Skipping assignee {assignee_login}: not assignable in this repository')
+                  continue
+
+                print(
                   f'Assigning highest-priority issue #{highest_issue_num} '
                   f'({highest_priority}) to {assignee_login}'
-              )
-              assign = subprocess.run(
+                )
+                assign = subprocess.run(
                   ['gh', 'issue', 'edit', highest_issue_num, '--add-assignee', assignee_login],
                   capture_output=True,
                   text=True
-              )
-              if assign.returncode != 0:
-                  print(
-                      f'Copilot assignment skipped for #{highest_issue_num}: '
-                      f'{assign.stderr.strip()}'
-                  )
+                )
+                if assign.returncode == 0:
+                  assigned = True
+                  break
+
+                print(
+                  f'Assignment failed for {assignee_login}: '
+                  f'{assign.stderr.strip()}'
+                )
+
+              if not assigned:
+                print(
+                  'Copilot assignment skipped: none of the configured assignee candidates '
+                  'are assignable for this repository. Ensure Copilot has repository access '
+                  'and set COPILOT_ASSIGNEE/COPILOT_ASSIGNEE_CANDIDATES accordingly.'
+                )
           PYEOF
 
       # ── Post weekly sprint report ────────────────────────────────────────

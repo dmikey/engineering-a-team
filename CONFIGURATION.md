@@ -90,6 +90,7 @@ Settings → Secrets and variables → Variables → New repository variable
 | `PM_MODEL` | `gpt-4o-mini` | Override model for Project Manager |
 | `PM_MILESTONE_LOOKAHEAD_DAYS` | `30` | Days before a milestone due date to start drift detection |
 | `COPILOT_ASSIGNEE` | `@copilot` | Assignee login used when PM backlog grooming auto-assigns the single highest-priority open issue |
+| `COPILOT_ASSIGNEE_CANDIDATES` | `copilot,github-copilot[bot]` | Comma-separated fallback assignee logins the PM workflow will try if the primary assignee is not assignable |
 
 ### Product Owner Variables
 
