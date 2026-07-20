@@ -83,6 +83,7 @@ to execute:
 - `pm`: `task` such as `groom-backlog`, `check-milestones`, `full-sprint-report`, or `agent-performance-dashboard` (optional `extra_context`: `period=<days> sort=<success-rate|runs|failures|avg-duration|last-run>`)
 - `po`: `task` such as `product-health-report`, `suggest-features`, or `run-playwright`, plus optional `feature_prompt`, `base_url`, and `extra_context`
 - `council`: `topic`, optional `issue_number`, and `extra_context`
+- `roadmap`: set `task` to a roadmap horizon (for example `30/60/90 days`), optional `topic` as focus, and optional `extra_context`
 - `self-improvement`: `task` as `full-loop`, `benchmark-only`, or `copilot-handoff`, plus optional `reference_repo`, `base_url`, and `extra_context`
 - `task-assignment`: `task` as `assign-tasks` (default) or `workload-dashboard`, plus optional `extra_context`
 
@@ -102,6 +103,7 @@ Post any of these in an issue or PR comment (write access required):
 | `/pm check-milestones` | Trigger Morgan to check milestone health |
 | `/pm full-sprint-report` | Trigger Morgan for a full sprint report |
 | `/pm agent-performance-dashboard [period=<days> sort=<metric>]` | Trigger Morgan to publish an agent KPI dashboard |
+| `/pm roadmap-collaboration [focus]` | Trigger the shared Alex + Morgan roadmap workflow |
 | `/po suggest-features` | Trigger Alex to suggest features |
 | `/po product-health-report` | Trigger Alex for a product health report |
 | `/po run-playwright` | Trigger Alex to run Playwright tests |
@@ -126,6 +128,11 @@ gh workflow run council-discussion.yml \
 Each agent independently analyses the topic, then the Council Moderator
 synthesises a consensus decision with action items.
 
+The council also runs automatically to review product decisions:
+
+- Every weekday at 14:30 UTC
+- After successful completion of the Product Owner workflow
+
 ---
 
 ## Configuration
@@ -141,7 +148,7 @@ Override defaults using GitHub repository variables
 | `COUNCIL_MODEL` | `gpt-4o` | Model for Council Moderator |
 | `AGENT_MAX_TOKENS` | `2048` | Max response tokens |
 | `AGENT_TEMPERATURE` | `0.7` | Generation temperature |
-| `AGENT_DEFAULT_COMMUNICATION_METHOD` | `comment` | Default channel for agent-router notifications (`comment`, `issue`, or `discussion`) |
+| `AGENT_DEFAULT_COMMUNICATION_METHOD` | `discussion` | Default channel for agent-router notifications (`comment`, `issue`, or `discussion`) |
 | `AGENT_COMMUNICATION_PREFERENCES` | `{}` | JSON map of per-user communication preferences, e.g. `{\"octocat\":\"discussion\"}` |
 | `AGENT_ROUTER_DISCUSSION_CATEGORY` | `General` | Discussion category used when router notifications are posted as discussions |
 | `QA_SEVERITY_THRESHOLD` | `HIGH` | Minimum severity to open an issue |
@@ -164,6 +171,8 @@ Default automation cadence is tuned for active development:
 - Project Manager runs every weekday at 09:00 UTC
 - Task Assignment System runs every weekday at 11:00 UTC
 - Product Owner runs every weekday at 13:00 UTC
+- Council runs every weekday at 14:30 UTC
+- Roadmap Collaboration runs weekly on Monday at 15:00 UTC
 - Self-Improvement Loop runs every weekday at 17:00 UTC
 - Product Owner also runs on pushes to the default branch
 
@@ -243,6 +252,7 @@ To add a new agent:
     qa-engineer.yml          # Quinn — QA reviews
     project-manager.yml      # Morgan — backlog & milestones
     product-owner.yml        # Alex — features & Playwright
+    roadmap-collaboration.yml# Alex + Morgan — shared roadmap planning
     self-improvement-loop.yml# Casey — benchmark-driven repo improvement
     council-discussion.yml   # Casey — multi-agent council
     agent-router.yml         # Routes /commands from comments
@@ -284,6 +294,21 @@ Weekdays 13:00 UTC or on push to default branch
             ├─► Playwright tests run (if configured)
             └─► Product health report posted
 
+      Weekdays 14:30 UTC and after successful Product Owner runs
+        └─► council-discussion.yml
+            ├─► call-github-model (Quinn perspective)
+            ├─► call-github-model (Morgan perspective)
+            ├─► call-github-model (Alex perspective)
+            ├─► call-github-model (Casey synthesis)
+            └─► Council decision posted to Discussion/Issue
+
+      Mondays 15:00 UTC
+        └─► roadmap-collaboration.yml
+            ├─► call-github-model (Alex product direction)
+            ├─► call-github-model (Morgan delivery plan)
+            ├─► call-github-model (Casey merged roadmap)
+            └─► Shared roadmap posted to Discussion/Issue
+
 Weekdays 17:00 UTC
   └─► self-improvement-loop.yml
       ├─► Benchmarks workflow repo against Get Milk signals
@@ -292,12 +317,8 @@ Weekdays 17:00 UTC
       └─► Feeds backlog back into PM, QA, and Council workflows
 
 /council topic
-    └─► council-discussion.yml
-            ├─► call-github-model (Quinn perspective)
-            ├─► call-github-model (Morgan perspective)
-            ├─► call-github-model (Alex perspective)
-            ├─► call-github-model (Casey synthesis)
-            └─► Council decision posted to Discussion/Issue
+  └─► council-discussion.yml
+      └─► On-demand council decision posted to Discussion/Issue
 
 /qa /pm /po /ta in comment
     └─► agent-router.yml

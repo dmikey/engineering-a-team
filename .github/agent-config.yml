@@ -187,13 +187,18 @@ council:
   # Label used to request a council review on an issue or PR.
   trigger_label: council-review
 
+  # Additional automated council cadence for product decisions.
+  # Defined in .github/workflows/council-discussion.yml.
+  # - Weekdays at 14:30 UTC (scheduled sweep)
+  # - On successful completion of Product Owner Agent workflow
+
 # ─── Agent Router ────────────────────────────────────────────────────────────
 
 router:
   # Default communication method used when a user has not set a personal
   # preference. Repository variable: AGENT_DEFAULT_COMMUNICATION_METHOD
   # Options: comment | issue | discussion
-  default_communication_method: comment
+  default_communication_method: discussion
 
   # Optional JSON map of per-user communication preferences.
   # Repository variable: AGENT_COMMUNICATION_PREFERENCES
@@ -212,3 +217,13 @@ router:
     "/po":       product-owner.yml
     "/council":  council-discussion.yml
     "/profile":  agent-router.yml
+
+# ─── Roadmap Collaboration ───────────────────────────────────────────────────
+
+roadmap_collaboration:
+  # Weekly PM + PO roadmap alignment workflow.
+  # Defined in .github/workflows/roadmap-collaboration.yml.
+  enabled: true
+
+  # Weekly schedule in UTC.
+  schedule: "0 15 * * 1"   # Monday 15:00 UTC
