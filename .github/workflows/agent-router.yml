@@ -42,6 +42,7 @@ jobs:
       startsWith(github.event.comment.body, '/pm') ||
       startsWith(github.event.comment.body, '/po') ||
       startsWith(github.event.comment.body, '/council') ||
+      startsWith(github.event.comment.body, '/ta') ||
       startsWith(github.event.comment.body, '/profile') ||
       startsWith(github.event.comment.body, '/help')
 
@@ -152,6 +153,7 @@ jobs:
           | \`/pm [task]\` | Trigger Project Manager (Morgan) — tasks: \`groom-backlog\`, \`check-milestones\`, \`full-sprint-report\`, \`agent-performance-dashboard\`, \`roadmap-collaboration\` |
           | \`/po [task]\` | Trigger Product Owner (Alex) — tasks: \`product-health-report\`, \`suggest-features\`, \`run-playwright\` |
           | \`/council [topic]\` | Convene the full council for a discussion on this topic |
+          | \`/ta [task]\` | Run the Task Assignment System — tasks: \`assign-tasks\` (default), \`workload-dashboard\` |
           | \`/profile comms [comment\|issue\|discussion]\` | Set your personal notification channel preference |
           | \`/help\` | Show this message |
 
@@ -162,6 +164,7 @@ jobs:
           /pm roadmap-collaboration
           /po suggest-features
           /council Should we adopt TypeScript for this project?
+          /ta assign-tasks
           \`\`\`
 
           > Only collaborators with **write access** can invoke agents.
@@ -529,3 +532,62 @@ jobs:
             2>/dev/null || \
           gh issue comment "$ISSUE_NUMBER" \
             --body "⚠️ Could not dispatch Council Discussion workflow."
+
+      # ── /ta ──────────────────────────────────────────────────────────────
+      - name: Route to Task Assignment System
+        if: |
+          steps.auth.outputs.authorized == 'true' &&
+          steps.parse.outputs.command == '/ta'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.parse.outputs.ref_number }}
+          ARGS: ${{ steps.parse.outputs.args }}
+          CHANNEL: ${{ steps.prefs.outputs.channel }}
+        run: |
+          TASK="assign-tasks"
+          case "$ARGS" in
+            workload-dashboard*) TASK="workload-dashboard" ;;
+            assign-tasks*)       TASK="assign-tasks" ;;
+          esac
+
+          MESSAGE="🎯 Dispatching **Task Assignment System** for task: \`$TASK\`... ⏳"
+          if [ "$CHANNEL" = "issue" ]; then
+            gh issue create --title "🎯 Task Assignment dispatch (re: #$ISSUE_NUMBER)" --body "$MESSAGE" 2>/dev/null || true
+          elif [ "$CHANNEL" = "discussion" ]; then
+            REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
+            CATEGORY_ID=""
+            [ -n "$REPO_ID" ] && CATEGORY_ID=$(gh api graphql \
+              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:20){nodes{id name}}}}' \
+              -f o="$REPO_OWNER" -f r="$REPO_NAME" \
+              --jq ".data.repository.discussionCategories.nodes[] | select(.name == \"$ROUTER_DISCUSSION_CATEGORY\") | .id" \
+              2>/dev/null || echo "")
+            if [ -z "$CATEGORY_ID" ]; then
+              CATEGORY_ID=$(gh api graphql \
+                -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+                -f o="$REPO_OWNER" -f r="$REPO_NAME" \
+                --jq '.data.repository.discussionCategories.nodes[0].id' \
+                2>/dev/null || echo "")
+            fi
+            DISCUSSION_URL=""
+            [ -n "$CATEGORY_ID" ] && DISCUSSION_URL=$(gh api graphql \
+              -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
+              -f ri="$REPO_ID" -f ci="$CATEGORY_ID" \
+              -f t="🎯 Task Assignment dispatch (re: #$ISSUE_NUMBER)" \
+              -f b="$MESSAGE" \
+              --jq '.data.createDiscussion.discussion.url' \
+              2>/dev/null || echo "")
+            if [ -n "$DISCUSSION_URL" ]; then
+              gh issue comment "$ISSUE_NUMBER" --body "✅ Posted task assignment dispatch update as a discussion: $DISCUSSION_URL" 2>/dev/null || true
+            else
+              gh issue comment "$ISSUE_NUMBER" --body "$MESSAGE" 2>/dev/null || true
+            fi
+          else
+            gh issue comment "$ISSUE_NUMBER" --body "$MESSAGE" 2>/dev/null || true
+          fi
+
+          gh workflow run task-assignment.yml \
+            -f task="$TASK" \
+            -f extra_context="Issue #$ISSUE_NUMBER: $ARGS" \
+            2>/dev/null || \
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "⚠️ Could not dispatch Task Assignment workflow. Check that the workflow file exists and Actions are enabled."

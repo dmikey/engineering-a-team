@@ -141,6 +141,32 @@ self_improvement:
   # Repository variable: COPILOT_ASSIGNEE
   copilot_assignee: ""
 
+# ─── Task Assignment System ──────────────────────────────────────────────────
+
+task_assignment:
+  # Enable or disable the task assignment workflow.
+  # Repository variable: TA_ENABLED (true/false)
+  enabled: true
+
+  # Model override for the task assignment system.
+  # Inherits PM_MODEL then falls back to default_model when unset.
+  # Repository variable: TA_MODEL
+  model: gpt-4o-mini
+
+  # Cron schedule for automatic assignment runs (UTC).
+  # Defined in .github/workflows/task-assignment.yml.
+  schedule: "0 11 * * 1-5"   # Every weekday at 11:00 UTC
+
+  # Performance window in days used to compute success-rate scores.
+  performance_window_days: 30
+
+  # Workload window in hours used to assess recent agent activity.
+  workload_window_hours: 24
+
+  # Minimum confidence level for posting issue comments (HIGH | MEDIUM).
+  # LOW-confidence assignments are shown only in the dashboard.
+  min_comment_confidence: MEDIUM
+
 # ─── Council ─────────────────────────────────────────────────────────────────
 
 council:

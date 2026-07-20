@@ -110,6 +110,12 @@ Settings → Secrets and variables → Variables → New repository variable
 | `REFERENCE_APP_BASE_URL` | _(empty)_ | Optional live URL for the Get Milk app |
 | `COPILOT_ASSIGNEE` | `@copilot` | Assignee login used for native GitHub Copilot handoff when supported |
 
+### Task Assignment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TA_MODEL` | `gpt-4o-mini` | Override model for the Task Assignment System (falls back to `PM_MODEL` then `AGENT_MODEL`) |
+
 ### Council Variables
 
 | Variable | Default | Description |
@@ -147,6 +153,7 @@ Default schedules (UTC):
 | Agent | Default | Override |
 |-------|---------|---------|
 | Project Manager | Every weekday 09:00 | Edit `cron` in `project-manager.yml` |
+| Task Assignment | Every weekday 11:00 | Edit `cron` in `task-assignment.yml` |
 | Product Owner | Every weekday 13:00 | Edit `cron` in `product-owner.yml` |
 | Council Discussion | Every weekday 14:30 + Product Owner completion trigger | Edit `cron` and `workflow_run` in `council-discussion.yml` |
 | Roadmap Collaboration | Weekly Monday 15:00 | Edit `cron` in `roadmap-collaboration.yml` |
@@ -166,9 +173,15 @@ the GitHub Actions UI.
 
 For a single entrypoint, use **Manual Agent Runner** from the Actions tab. It
 dispatches to the underlying QA, Project Manager, Product Owner, Council,
+<<<<<<< HEAD
+Self-Improvement, or Task Assignment workflow and forwards the relevant inputs.
+For Product Owner feature suggestion runs, use `feature_prompt` to steer the
+generated GitHub issues.
+=======
 Roadmap Collaboration, or Self-Improvement workflow and forwards the relevant inputs. For Product Owner
 feature suggestion runs, use `feature_prompt` to steer the generated GitHub
 issues.
+>>>>>>> origin/main
 
 ---
 

@@ -19,6 +19,7 @@ improve, and evolve this repository.
 | 📋 Project Manager | Morgan | Grooms backlog, manages milestones | Every weekday |
 | 🧪 Product Owner | Alex | Suggests features, runs Playwright | Every weekday + default-branch push |
 | 🏛️ Council Moderator | Casey | Facilitates multi-agent discussions | On demand |
+| 🎯 Task Assignment | — | Assigns tasks by availability & performance | Every weekday 11:00 UTC |
 
 ---
 
@@ -84,6 +85,7 @@ to execute:
 - `council`: `topic`, optional `issue_number`, and `extra_context`
 - `roadmap`: set `task` to a roadmap horizon (for example `30/60/90 days`), optional `topic` as focus, and optional `extra_context`
 - `self-improvement`: `task` as `full-loop`, `benchmark-only`, or `copilot-handoff`, plus optional `reference_repo`, `base_url`, and `extra_context`
+- `task-assignment`: `task` as `assign-tasks` (default) or `workload-dashboard`, plus optional `extra_context`
 
 You can still run the individual workflows directly from the Actions tab if
 you want the workflow-specific form.
@@ -106,6 +108,7 @@ Post any of these in an issue or PR comment (write access required):
 | `/po product-health-report` | Trigger Alex for a product health report |
 | `/po run-playwright` | Trigger Alex to run Playwright tests |
 | `/council [topic]` | Convene the full council on a topic |
+| `/ta [assign-tasks\|workload-dashboard]` | Run the Task Assignment System |
 | `/profile comms [comment\|issue\|discussion]` | Set your personal communication channel preference |
 | `/help` | List all commands |
 
@@ -154,6 +157,7 @@ Override defaults using GitHub repository variables
 | `REFERENCE_APP_REPO` | current repository | Optional override for the `owner/repo` used for the Get Milk benchmark app |
 | `REFERENCE_APP_BASE_URL` | _(empty)_ | Optional live URL for the Get Milk benchmark app |
 | `SELF_IMPROVEMENT_MODEL` | `gpt-4o-mini` | Model for self-improvement evaluation |
+| `TA_MODEL` | `gpt-4o-mini` | Model for the Task Assignment System (falls back to `PM_MODEL` then `AGENT_MODEL`) |
 | `COPILOT_ASSIGNEE` | _(empty)_ | Optional native Copilot assignee identity |
 | `COUNCIL_DISCUSSION_CATEGORY` | `Team Decisions` | GitHub Discussion category |
 
@@ -165,6 +169,7 @@ is loaded dynamically on every model call, and changes are logged by the
 Default automation cadence is tuned for active development:
 
 - Project Manager runs every weekday at 09:00 UTC
+- Task Assignment System runs every weekday at 11:00 UTC
 - Product Owner runs every weekday at 13:00 UTC
 - Council runs every weekday at 14:30 UTC
 - Roadmap Collaboration runs weekly on Monday at 15:00 UTC
@@ -273,6 +278,14 @@ Weekdays 09:00 UTC
             ├─► Labels applied to issues
             └─► Sprint report posted to Discussion/Issue
 
+Weekdays 11:00 UTC
+    └─► task-assignment.yml
+            ├─► Fetches live workflow run status (availability)
+            ├─► Computes 30-day performance scores per agent
+            ├─► Matches open issues to best-fit agent
+            ├─► Posts per-issue assignment recommendations
+            └─► Workload dashboard posted to Discussion/Issue
+
 Weekdays 13:00 UTC or on push to default branch
     └─► product-owner.yml
             ├─► call-github-model (Alex — health report)
@@ -307,7 +320,7 @@ Weekdays 17:00 UTC
   └─► council-discussion.yml
       └─► On-demand council decision posted to Discussion/Issue
 
-/qa /pm /po in comment
+/qa /pm /po /ta in comment
     └─► agent-router.yml
             └─► Dispatches the appropriate workflow
 ```
