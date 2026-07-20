@@ -153,6 +153,7 @@ jobs:
           | \`/pm [task]\` | Trigger Project Manager (Morgan) — tasks: \`groom-backlog\`, \`check-milestones\`, \`full-sprint-report\`, \`agent-performance-dashboard\`, \`skill-development-suggestions\`, \`roadmap-collaboration\` |
           | \`/po [task]\` | Trigger Product Owner (Alex) — tasks: \`product-health-report\`, \`suggest-features\`, \`run-playwright\` |
           | \`/council [topic]\` | Convene the full council for a discussion on this topic |
+          | \`/council sprint-prioritization [goal]\` | Run a council sprint prioritization meeting to rank the backlog |
           | \`/ta [task]\` | Run the Task Assignment System — tasks: \`assign-tasks\` (default), \`workload-dashboard\` |
           | \`/profile comms [comment\|issue\|discussion]\` | Set your personal notification channel preference |
           | \`/help\` | Show this message |
@@ -164,6 +165,7 @@ jobs:
           /pm roadmap-collaboration
           /po suggest-features
           /council Should we adopt TypeScript for this project?
+          /council sprint-prioritization focus on security fixes
           /ta assign-tasks
           \`\`\`
 
@@ -487,6 +489,55 @@ jobs:
           ARGS: ${{ steps.parse.outputs.args }}
           CHANNEL: ${{ steps.prefs.outputs.channel }}
         run: |
+          # Detect sprint-prioritization sub-command
+          case "$ARGS" in
+            sprint-prioritization*)
+              SPRINT_GOAL=$(echo "$ARGS" | sed -E 's/^sprint-prioritization[[:space:]]*//')
+              MESSAGE="🏛️ Convening the **Engineering Council** for **Sprint Prioritization**... ⏳"
+              if [ "$CHANNEL" = "issue" ]; then
+                gh issue create --title "🏛️ Council sprint prioritization dispatch (re: #$ISSUE_NUMBER)" --body "$MESSAGE" 2>/dev/null || true
+              elif [ "$CHANNEL" = "discussion" ]; then
+                REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
+                CATEGORY_ID=""
+                [ -n "$REPO_ID" ] && CATEGORY_ID=$(gh api graphql \
+                  -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:20){nodes{id name}}}}' \
+                  -f o="$REPO_OWNER" -f r="$REPO_NAME" \
+                  --jq ".data.repository.discussionCategories.nodes[] | select(.name == \"$ROUTER_DISCUSSION_CATEGORY\") | .id" \
+                  2>/dev/null || echo "")
+                if [ -z "$CATEGORY_ID" ]; then
+                  CATEGORY_ID=$(gh api graphql \
+                    -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+                    -f o="$REPO_OWNER" -f r="$REPO_NAME" \
+                    --jq '.data.repository.discussionCategories.nodes[0].id' \
+                    2>/dev/null || echo "")
+                fi
+                DISCUSSION_URL=""
+                [ -n "$CATEGORY_ID" ] && DISCUSSION_URL=$(gh api graphql \
+                  -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
+                  -f ri="$REPO_ID" -f ci="$CATEGORY_ID" \
+                  -f t="🏛️ Council sprint prioritization dispatch (re: #$ISSUE_NUMBER)" \
+                  -f b="$MESSAGE" \
+                  --jq '.data.createDiscussion.discussion.url' \
+                  2>/dev/null || echo "")
+                if [ -n "$DISCUSSION_URL" ]; then
+                  gh issue comment "$ISSUE_NUMBER" --body "✅ Posted council sprint prioritization dispatch as a discussion: $DISCUSSION_URL" 2>/dev/null || true
+                else
+                  gh issue comment "$ISSUE_NUMBER" --body "$MESSAGE" 2>/dev/null || true
+                fi
+              else
+                gh issue comment "$ISSUE_NUMBER" --body "$MESSAGE" 2>/dev/null || true
+              fi
+
+              gh workflow run council-sprint-prioritization.yml \
+                -f sprint_goal="$SPRINT_GOAL" \
+                -f issue_number="$ISSUE_NUMBER" \
+                2>/dev/null || \
+              gh issue comment "$ISSUE_NUMBER" \
+                --body "⚠️ Could not dispatch Council Sprint Prioritization workflow."
+              exit 0
+              ;;
+          esac
+
           TOPIC="$ARGS"
           if [ -z "$TOPIC" ]; then
             TOPIC="Review of issue/PR #$ISSUE_NUMBER"

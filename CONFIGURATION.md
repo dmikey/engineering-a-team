@@ -133,6 +133,7 @@ Council automation cadence is configured in workflow YAML:
 
 - Weekdays at 14:30 UTC (scheduled product decision sweep)
 - On successful Product Owner workflow completion
+- Mondays at 08:00 UTC (council sprint prioritization sweep)
 
 ---
 
@@ -162,6 +163,7 @@ Default schedules (UTC):
 | Task Assignment | Every weekday 11:00 | Edit `cron` in `task-assignment.yml` |
 | Product Owner | Every weekday 13:00 | Edit `cron` in `product-owner.yml` |
 | Council Discussion | Every weekday 14:30 + Product Owner completion trigger | Edit `cron` and `workflow_run` in `council-discussion.yml` |
+| Council Sprint Prioritization | Every Monday 08:00 | Edit `cron` in `council-sprint-prioritization.yml` |
 | Roadmap Collaboration | Weekly Monday 15:00 | Edit `cron` in `roadmap-collaboration.yml` |
 | Self-Improvement Loop | Every weekday 17:00 | Edit `cron` in `self-improvement-loop.yml` |
 
@@ -179,7 +181,7 @@ the GitHub Actions UI.
 
 For a single entrypoint, use **Manual Agent Runner** from the Actions tab. It
 dispatches to the underlying QA, Project Manager, Product Owner, Council,
-Roadmap Collaboration, Self-Improvement, or Task Assignment workflow and forwards the relevant inputs.
+Council Sprint Prioritization, Roadmap Collaboration, Self-Improvement, or Task Assignment workflow and forwards the relevant inputs.
 For Product Owner feature suggestion runs, use `feature_prompt` to steer the
 generated GitHub issues.
 

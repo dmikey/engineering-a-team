@@ -1,0 +1,476 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Council Sprint Prioritization — Casey (Council Moderator)
+#
+# Convenes a multi-agent council where QA Engineer, Project Manager, and
+# Product Owner each evaluate the open backlog independently from their
+# domain perspective. The Council Moderator then synthesises all perspectives
+# into a ranked sprint backlog with priorities and action items.
+# Results are posted to GitHub Discussions (or Issues as fallback).
+#
+# Triggers:  schedule (Monday 08:00 UTC — start-of-sprint sweep)
+#            workflow_dispatch
+#            workflow_call (from agent-router or other workflows)
+#
+# Model:     gpt-4o (overridable via COUNCIL_MODEL variable)
+# ──────────────────────────────────────────────────────────────────────────────
+name: Council Sprint Prioritization
+
+on:
+  schedule:
+    # Every Monday at 08:00 UTC — kick off the weekly sprint planning sweep.
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+    inputs:
+      sprint_goal:
+        description: 'Optional sprint goal or focus area'
+        required: false
+      extra_context:
+        description: 'Additional context for the prioritization meeting'
+        required: false
+      issue_number:
+        description: 'Related issue or PR number to link the result back to (optional)'
+        required: false
+  workflow_call:
+    inputs:
+      sprint_goal:
+        type: string
+        description: 'Optional sprint goal or focus area'
+        required: false
+      extra_context:
+        type: string
+        description: 'Additional context for the prioritization meeting'
+        required: false
+      issue_number:
+        type: string
+        description: 'Related issue or PR number'
+        required: false
+    outputs:
+      decision_url:
+        description: 'URL of the posted sprint prioritization result'
+        value: ${{ jobs.sprint-prioritization.outputs.decision_url }}
+      decision:
+        description: 'The sprint prioritization plan text'
+        value: ${{ jobs.sprint-prioritization.outputs.decision }}
+    secrets:
+      MODELS_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+  models: read
+  pull-requests: write
+  discussions: write
+
+env:
+  COUNCIL_MODEL: ${{ vars.COUNCIL_MODEL || 'gpt-4o' }}
+  AGENT_MODEL: ${{ vars.AGENT_MODEL || 'gpt-4o-mini' }}
+  AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
+  AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
+
+jobs:
+  sprint-prioritization:
+    name: Council Sprint Prioritization
+    runs-on: ubuntu-latest
+
+    outputs:
+      decision_url: ${{ steps.post-result.outputs.url }}
+      decision: ${{ steps.moderator.outputs.response }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Gather backlog and context ────────────────────────────────────────
+      - name: Gather backlog data
+        id: backlog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SPRINT_GOAL="${{ inputs.sprint_goal }}"
+          EXTRA_CONTEXT="${{ inputs.extra_context }}"
+          REF_NUMBER="${{ inputs.issue_number }}"
+          CURRENT_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          # Open issues (up to 100, sorted by created date)
+          ISSUES=$(gh issue list \
+            --state open \
+            --limit 100 \
+            --json number,title,labels,assignees,createdAt,updatedAt,milestone,body \
+            2>/dev/null || echo "[]")
+
+          # Open milestones
+          MILESTONES=$(gh api "repos/${{ github.repository }}/milestones?state=open&per_page=20" \
+            --jq '[.[] | {number:.number, title:.title, due_on:.due_on, open_issues:.open_issues, closed_issues:.closed_issues, description:.description}]' \
+            2>/dev/null || echo "[]")
+
+          # Recently closed issues (velocity indicator)
+          RECENTLY_CLOSED=$(gh issue list \
+            --state closed \
+            --limit 20 \
+            --json number,title,closedAt,labels \
+            2>/dev/null || echo "[]")
+
+          OPEN_COUNT=$(echo "$ISSUES" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+          MILESTONE_COUNT=$(echo "$MILESTONES" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+
+          {
+            echo "ref_number=$REF_NUMBER"
+            echo "current_date=$CURRENT_DATE"
+            echo "open_count=$OPEN_COUNT"
+            echo "backlog_context<<BACKLOG_CTX_EOF"
+            echo "## Sprint Prioritization Context"
+            echo "Date: $CURRENT_DATE"
+            echo "Repository: ${{ github.repository }}"
+            if [ -n "$SPRINT_GOAL" ]; then
+              echo ""
+              echo "## Sprint Goal"
+              echo "$SPRINT_GOAL"
+            fi
+            if [ -n "$EXTRA_CONTEXT" ]; then
+              echo ""
+              echo "## Additional Context"
+              echo "$EXTRA_CONTEXT"
+            fi
+            echo ""
+            echo "## Open Backlog ($OPEN_COUNT issues)"
+            echo "$ISSUES" | python3 -c "
+          import json, sys
+          issues = json.load(sys.stdin)
+          for i in issues[:60]:
+              labels = [l['name'] for l in i.get('labels', [])]
+              milestone = i.get('milestone') or {}
+              ms = milestone.get('title', 'No milestone')
+              assignees = [a['login'] for a in i.get('assignees', [])]
+              print(f\"- #{i['number']}: {i['title']}\")
+              print(f\"  Labels: {', '.join(labels) or 'none'} | Milestone: {ms} | Assignees: {', '.join(assignees) or 'unassigned'}\")
+              print(f\"  Created: {i['createdAt'][:10]} | Updated: {i['updatedAt'][:10]}\")
+          " 2>/dev/null || echo "$ISSUES"
+            echo ""
+            echo "## Open Milestones ($MILESTONE_COUNT total)"
+            echo "$MILESTONES" | python3 -c "
+          import json, sys
+          from datetime import datetime
+          milestones = json.load(sys.stdin)
+          today = datetime.utcnow()
+          for m in milestones:
+              due = m.get('due_on', 'No due date')
+              if due and due != 'No due date':
+                  due_dt = datetime.strptime(due[:10], '%Y-%m-%d')
+                  days_left = (due_dt - today).days
+                  due_str = f'{due[:10]} ({days_left} days remaining)'
+              else:
+                  due_str = 'No due date'
+              print(f\"- [{m['number']}] {m['title']}: {m['open_issues']} open / {m['closed_issues']} closed — Due: {due_str}\")
+              if m.get('description'):
+                  print(f\"  Description: {m['description']}\")
+          " 2>/dev/null || echo "$MILESTONES"
+            echo ""
+            echo "## Recently Closed Issues (velocity signal)"
+            echo "$RECENTLY_CLOSED" | python3 -c "
+          import json, sys
+          items = json.load(sys.stdin)
+          if not items:
+              print('No recently closed issues.')
+          for i in items:
+              labels = [l['name'] for l in i.get('labels', [])]
+              print(f\"- #{i['number']}: {i['title']} (closed {i.get('closedAt','')[:10]}) [{', '.join(labels) or 'none'}]\")
+          " 2>/dev/null || echo "$RECENTLY_CLOSED"
+            echo "BACKLOG_CTX_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── Acknowledge the sprint prioritization request ─────────────────────
+      - name: Post acknowledgment
+        if: |
+          steps.backlog.outputs.ref_number != '' &&
+          (github.event_name == 'issues' || github.event_name == 'pull_request' || github.event_name == 'workflow_call')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NUMBER: ${{ steps.backlog.outputs.ref_number }}
+        run: |
+          COMMENT="## 🏛️ Council Sprint Prioritization Initiated
+
+          The engineering council has convened to prioritize the sprint backlog.
+
+          **Participants**:
+          - 🔍 Quinn (QA Engineer) — risk assessment and testing complexity
+          - 📋 Morgan (Project Manager) — timeline, dependencies, and capacity
+          - 🧪 Alex (Product Owner) — user value and product strategy
+
+          **Moderator**: Casey (Council Moderator)
+
+          The ranked sprint backlog will be posted shortly. ⏳
+
+          *[Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+          if [ "${{ github.event_name }}" = "issues" ] || [ "${{ github.event_name }}" = "workflow_call" ]; then
+            gh issue comment "$REF_NUMBER" --body "$COMMENT" 2>/dev/null || true
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            gh pr comment "$REF_NUMBER" --body "$COMMENT" 2>/dev/null || true
+          fi
+
+      # ══════════════════════════════════════════════════════════════════════
+      # Round 1 — Each agent evaluates the backlog independently
+      # ══════════════════════════════════════════════════════════════════════
+
+      - name: Quinn — QA risk and complexity assessment
+        id: qa-perspective
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.AGENT_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Quinn, a senior QA Engineer. You are participating in a
+            council sprint prioritization meeting. Evaluate the open backlog
+            from a quality, risk, and testability perspective to help rank
+            issues for the upcoming sprint.
+
+            Be concise (max 400 words). Structure your response as:
+
+            ### Quinn's Sprint Assessment (QA Engineer)
+
+            **Risk Tier 1 — Address First** (security, critical bugs, blockers):
+            List issue numbers and one-sentence rationale.
+
+            **Risk Tier 2 — High Testing Complexity** (need QA groundwork before implementation):
+            List issue numbers and one-sentence rationale.
+
+            **Risk Tier 3 — Standard Items** (normal testing effort):
+            List issue numbers briefly.
+
+            **QA Sprint Recommendations**:
+            - Top 3 issues Quinn recommends for this sprint and why.
+            - Any items that should be BLOCKED pending QA review.
+          user-prompt: |
+            Please assess the backlog for sprint prioritization:
+
+            ${{ steps.backlog.outputs.backlog_context }}
+
+      - name: Morgan — PM timeline and dependency ranking
+        id: pm-perspective
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.AGENT_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Morgan, an experienced Project Manager. You are participating
+            in a council sprint prioritization meeting. Evaluate the open backlog
+            from a timeline, dependency, and capacity perspective to help rank
+            issues for the upcoming sprint.
+
+            Be concise (max 400 words). Structure your response as:
+
+            ### Morgan's Sprint Assessment (Project Manager)
+
+            **Milestone-Critical Items** (must complete to hit upcoming milestones):
+            List issue numbers and one-sentence rationale.
+
+            **Dependency-Ordered Items** (must be done before other work can proceed):
+            List issue numbers and ordering rationale.
+
+            **Capacity Estimate**:
+            Rough assessment of how many issues fit in a sprint given the backlog size.
+
+            **PM Sprint Recommendations**:
+            - Top 3–5 issues Morgan recommends for this sprint and why.
+            - Any items that should be DEFERRED to a future sprint.
+          user-prompt: |
+            Please assess the backlog for sprint prioritization:
+
+            ${{ steps.backlog.outputs.backlog_context }}
+
+      - name: Alex — PO user value and product strategy ranking
+        id: po-perspective
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.AGENT_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Alex, a Product Owner. You are participating in a council
+            sprint prioritization meeting. Evaluate the open backlog from a
+            user value and product strategy perspective to help rank issues
+            for the upcoming sprint.
+
+            Be concise (max 400 words). Structure your response as:
+
+            ### Alex's Sprint Assessment (Product Owner)
+
+            **High User Value** (directly improves the user experience):
+            List issue numbers and one-sentence rationale.
+
+            **Strategic Alignment** (advances product goals and roadmap):
+            List issue numbers and one-sentence rationale.
+
+            **Nice-to-Have** (good ideas but not sprint-critical):
+            List issue numbers briefly.
+
+            **PO Sprint Recommendations**:
+            - Top 3–5 issues Alex recommends for this sprint and why.
+            - Any items Alex considers out-of-scope for this sprint.
+          user-prompt: |
+            Please assess the backlog for sprint prioritization:
+
+            ${{ steps.backlog.outputs.backlog_context }}
+
+      # ══════════════════════════════════════════════════════════════════════
+      # Round 2 — Council Moderator synthesises into ranked sprint backlog
+      # ══════════════════════════════════════════════════════════════════════
+
+      - name: Casey — Council Moderator sprint synthesis
+        id: moderator
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.COUNCIL_MODEL }}
+          max-tokens: 3500
+          temperature: '0.5'
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Casey, the Council Moderator for an autonomous engineering
+            team. Your role is to synthesise the QA, PM, and PO perspectives
+            into a clear, ranked sprint backlog that the team can act on.
+
+            Be fair, data-driven, and decisive. Acknowledge trade-offs where
+            agents disagree. Your output must be a concrete, ordered sprint
+            plan.
+
+            Format your response EXACTLY as:
+
+            # 🏛️ Council Sprint Prioritization
+
+            ## Sprint Overview
+            Brief one-paragraph summary of the sprint focus and rationale.
+
+            ## Council Assessment Summary
+
+            | Agent | Top Priority Theme | Key Concern |
+            |-------|-------------------|-------------|
+            | 🔍 Quinn (QA) | theme | concern |
+            | 📋 Morgan (PM) | theme | concern |
+            | 🧪 Alex (PO) | theme | concern |
+
+            ## Ranked Sprint Backlog
+
+            ### 🔴 Priority 1 — Must Do This Sprint
+            Numbered list of issues with brief rationale (format: `N. #<number> — <title> — <one-line rationale>`).
+
+            ### 🟡 Priority 2 — Should Do This Sprint
+            Numbered list of issues with brief rationale.
+
+            ### 🟢 Priority 3 — Nice to Have
+            Numbered list of issues with brief rationale.
+
+            ### ⏸️ Deferred — Next Sprint or Later
+            Numbered list of issues with brief deferral rationale.
+
+            ## Points of Consensus
+            What all three agents agreed on.
+
+            ## Trade-offs Resolved
+            Where agents disagreed and how the council resolved it. Write "All agents aligned." if no conflicts.
+
+            ## Sprint Action Items
+            Numbered list of concrete actions with suggested owners:
+            1. **[Owner]** Action description
+            2. ...
+          user-prompt: |
+            Please synthesise the following council perspectives into a ranked sprint backlog:
+
+            ---
+
+            ${{ steps.qa-perspective.outputs.response }}
+
+            ---
+
+            ${{ steps.pm-perspective.outputs.response }}
+
+            ---
+
+            ${{ steps.po-perspective.outputs.response }}
+
+            ---
+
+            Backlog context:
+            ${{ steps.backlog.outputs.backlog_context }}
+
+      # ── Compose and post sprint prioritization result ─────────────────────
+      - name: Compose full sprint prioritization record
+        id: compose
+        env:
+          QA_RESP: ${{ steps.qa-perspective.outputs.response }}
+          PM_RESP: ${{ steps.pm-perspective.outputs.response }}
+          PO_RESP: ${{ steps.po-perspective.outputs.response }}
+          MODERATOR_RESP: ${{ steps.moderator.outputs.response }}
+          DATE: ${{ steps.backlog.outputs.current_date }}
+        run: |
+          FULL_RECORD="$MODERATOR_RESP
+
+          ---
+
+          ## Council Transcript
+
+          <details>
+          <summary>View individual agent assessments</summary>
+
+          $QA_RESP
+
+          ---
+
+          $PM_RESP
+
+          ---
+
+          $PO_RESP
+
+          </details>
+
+          ---
+          *🤖 Sprint prioritization facilitated by Casey (Council Moderator) · Date: $DATE · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+          {
+            echo "full_record<<SPRINT_RECORD_EOF"
+            echo "$FULL_RECORD"
+            echo "SPRINT_RECORD_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post sprint prioritization result
+        id: post-result
+        uses: ./.github/actions/post-council-results
+        with:
+          title: "🏛️ Council Sprint Prioritization — ${{ steps.backlog.outputs.current_date }}"
+          body: ${{ steps.compose.outputs.full_record }}
+          category: ${{ vars.COUNCIL_DISCUSSION_CATEGORY || 'Team Decisions' }}
+          labels: 'council-decision,sprint-report'
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Link result back to the originating issue/PR ─────────────────────
+      - name: Link result to originating issue/PR
+        if: steps.backlog.outputs.ref_number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NUMBER: ${{ steps.backlog.outputs.ref_number }}
+          RESULT_URL: ${{ steps.post-result.outputs.url }}
+          RESULT_TYPE: ${{ steps.post-result.outputs.type }}
+        run: |
+          COMMENT="## 🏛️ Sprint Prioritization Complete
+
+          The engineering council has produced a ranked sprint backlog.
+
+          **View full plan**: $RESULT_URL
+          **Posted as**: $RESULT_TYPE
+
+          $(echo '${{ steps.moderator.outputs.response }}' | head -25)
+
+          ---
+          *🤖 Automated sprint prioritization · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+          if [ -n "$REF_NUMBER" ] && { [ "${{ github.event_name }}" = "issues" ] || [ "${{ github.event_name }}" = "workflow_call" ]; }; then
+            gh issue comment "$REF_NUMBER" --body "$COMMENT" 2>/dev/null || true
+          elif [ -n "$REF_NUMBER" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+            gh pr comment "$REF_NUMBER" --body "$COMMENT" 2>/dev/null || true
+          fi
