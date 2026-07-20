@@ -490,6 +490,7 @@ Weekdays 09:00 UTC
     └─► project-manager.yml
             ├─► call-github-model (Morgan — grooming)
             ├─► call-github-model (Morgan — milestones)
+    ├─► Uses latest Product + Project Roadmap to guide priority and assignment
             ├─► Labels applied to issues
             └─► Sprint report posted to Discussion/Issue
 

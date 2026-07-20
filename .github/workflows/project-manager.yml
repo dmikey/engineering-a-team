@@ -176,10 +176,81 @@ jobs:
           MILESTONE_COUNT=$(echo "$MILESTONES" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
           CURRENT_DATE=$(date -u +"%Y-%m-%d")
 
+          # Latest roadmap artifact (discussion preferred, issue fallback)
+          ROADMAP_SOURCE="none"
+          ROADMAP_URL=""
+          ROADMAP_BODY=""
+          REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+
+          ROADMAP_GQL=$(gh api graphql \
+            -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussions(first:20,orderBy:{field:CREATED_AT,direction:DESC}){nodes{title url bodyText createdAt}}}}' \
+            -f o="${{ github.repository_owner }}" \
+            -f r="$REPO_NAME" \
+            2>/dev/null || echo "")
+
+          if [ -n "$ROADMAP_GQL" ]; then
+            ROADMAP_URL=$(echo "$ROADMAP_GQL" | python3 -c "
+          import json, sys
+          try:
+              nodes = json.load(sys.stdin)['data']['repository']['discussions']['nodes']
+          except Exception:
+              nodes = []
+          for node in nodes:
+              if 'Product + Project Roadmap' in (node.get('title') or ''):
+                  print(node.get('url', ''))
+                  break
+          " 2>/dev/null || echo "")
+
+            ROADMAP_BODY=$(echo "$ROADMAP_GQL" | python3 -c "
+          import json, sys
+          try:
+              nodes = json.load(sys.stdin)['data']['repository']['discussions']['nodes']
+          except Exception:
+              nodes = []
+          for node in nodes:
+              if 'Product + Project Roadmap' in (node.get('title') or ''):
+                  print((node.get('bodyText') or '')[:4000])
+                  break
+          " 2>/dev/null || echo "")
+
+            if [ -n "$ROADMAP_URL" ]; then
+              ROADMAP_SOURCE="discussion"
+            fi
+          fi
+
+          if [ -z "$ROADMAP_URL" ]; then
+            ROADMAP_ISSUE_JSON=$(gh issue list \
+              --state all \
+              --search '"Product + Project Roadmap" in:title' \
+              --limit 1 \
+              --json url,body,title \
+              2>/dev/null || echo "[]")
+
+            ROADMAP_URL=$(echo "$ROADMAP_ISSUE_JSON" | python3 -c "
+          import json, sys
+          items = json.load(sys.stdin)
+          if items:
+              print(items[0].get('url', ''))
+          " 2>/dev/null || echo "")
+
+            ROADMAP_BODY=$(echo "$ROADMAP_ISSUE_JSON" | python3 -c "
+          import json, sys
+          items = json.load(sys.stdin)
+          if items:
+              print((items[0].get('body') or '')[:4000])
+          " 2>/dev/null || echo "")
+
+            if [ -n "$ROADMAP_URL" ]; then
+              ROADMAP_SOURCE="issue"
+            fi
+          fi
+
           {
             echo "open_count=$OPEN_COUNT"
             echo "milestone_count=$MILESTONE_COUNT"
             echo "current_date=$CURRENT_DATE"
+            echo "roadmap_source=$ROADMAP_SOURCE"
+            echo "roadmap_url=$ROADMAP_URL"
             echo "project_data<<PM_DATA_EOF"
             echo "## Current Date"
             echo "$CURRENT_DATE"
@@ -225,6 +296,16 @@ jobs:
               print(f\"- #{i['number']}: {i['title']} (closed: {i.get('closedAt','')[:10]})\")
           " 2>/dev/null || echo "$RECENTLY_CLOSED"
             echo ""
+            echo "## Product + Project Roadmap Context"
+            if [ "$ROADMAP_SOURCE" = "none" ]; then
+              echo "No roadmap artifact found yet."
+            else
+              echo "Source: $ROADMAP_SOURCE"
+              echo "URL: $ROADMAP_URL"
+              echo ""
+              echo "$ROADMAP_BODY"
+            fi
+            echo ""
             echo "## Additional Context"
             echo "${{ inputs.extra_context }}"
             echo "PM_DATA_EOF"
@@ -251,6 +332,8 @@ jobs:
             - Identify issues that are blocking others
             - Identify issues with no clear owner or milestone
             - Suggest milestone assignments for unassigned issues
+            - Use the latest Product + Project roadmap context to prefer issues
+              that advance agreed roadmap priorities
 
             Configured skill set for this run (repository variable PM_AGENT_SKILLS):
             ${{ env.PM_AGENT_SKILLS }}
@@ -338,6 +421,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GROOMING_REPORT: ${{ steps.pm-groom.outputs.response }}
           ASSIGNMENT_OWNER: ${{ github.actor }}
+          ROADMAP_URL: ${{ steps.data.outputs.roadmap_url }}
+          ROADMAP_SOURCE: ${{ steps.data.outputs.roadmap_source }}
+          PROJECT_DATA: ${{ steps.data.outputs.project_data }}
         run: |
           # Ensure priority labels exist
           for LABEL in "priority: critical" "priority: high" "priority: medium" "priority: low" "blocked"; do
@@ -379,8 +465,16 @@ jobs:
               'LOW': 3,
           }
 
-          highest_issue_num = None
+          # Extract roadmap-linked issue numbers from project context.
+          project_data = os.environ.get('PROJECT_DATA', '')
+          roadmap_section = ''
+          marker = '## Product + Project Roadmap Context'
+          if marker in project_data:
+              roadmap_section = project_data.split(marker, 1)[1]
+          roadmap_issue_numbers = set(re.findall(r'#(\d+)', roadmap_section))
+
           highest_priority = None
+          top_candidates = []
 
           for issue_num, priority in matches:
               priority_key = priority.upper()
@@ -389,12 +483,29 @@ jobs:
                   print(f'Applying "{label}" to issue #{issue_num}')
                   subprocess.run(
                       ['gh', 'issue', 'edit', issue_num, '--add-label', label],
-                      capture_output=True
+                      capture_output=True,
                   )
 
               if highest_priority is None or priority_rank[priority_key] < priority_rank[highest_priority]:
-                  highest_issue_num = issue_num
                   highest_priority = priority_key
+                  top_candidates = [issue_num]
+              elif priority_key == highest_priority:
+                  top_candidates.append(issue_num)
+
+          highest_issue_num = None
+          if top_candidates:
+              for candidate in top_candidates:
+                  if candidate in roadmap_issue_numbers:
+                      highest_issue_num = candidate
+                      break
+              if highest_issue_num is None:
+                  highest_issue_num = top_candidates[0]
+
+          if highest_issue_num and roadmap_issue_numbers:
+              print(
+                  f'Roadmap-aware selection enabled. Roadmap-linked candidates: '
+                  f'{sorted(roadmap_issue_numbers)}'
+              )
 
           if highest_issue_num is None:
               result = subprocess.run(
@@ -447,6 +558,21 @@ jobs:
                       )
                   else:
                       print(f'Assigned issue #{highest_issue_num} to {owner}')
+
+                  roadmap_url = os.environ.get('ROADMAP_URL', '').strip()
+                  roadmap_source = os.environ.get('ROADMAP_SOURCE', 'none').strip()
+                  if roadmap_url:
+                    note = (
+                      'Assigned via roadmap-aware prioritization.\n\n'
+                      f'Roadmap source: {roadmap_source}\n'
+                      f'Roadmap: {roadmap_url}\n'
+                      f'Priority: {highest_priority}'
+                    )
+                    subprocess.run(
+                      ['gh', 'issue', 'comment', highest_issue_num, '--body', note],
+                      capture_output=True,
+                      text=True,
+                    )
 
               print(
                   f'Dispatching assign-top-priority-agent workflow for issue #{highest_issue_num} '

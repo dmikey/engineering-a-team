@@ -56,6 +56,10 @@ its `assign-to-agent` safe output. GitHub App installation tokens are not
 accepted for the Copilot assignment itself, so `GH_USER_PAT` is still required
 for that path.
 
+Before dispatching assignment, Project Manager now evaluates the latest
+Product + Project roadmap artifact (discussion preferred, issue fallback) and
+uses it as a tie-breaker among top-priority issues.
+
 ---
 
 ## Repository Variables
