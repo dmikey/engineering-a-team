@@ -96,7 +96,7 @@ jobs:
           ISSUES=$(gh issue list \
             --state open \
             --limit 100 \
-            --json number,title,labels,assignees,createdAt,updatedAt,milestone,body \
+            --json number,title,labels,assignees,createdAt,updatedAt,milestone \
             2>/dev/null || echo "[]")
 
           # Open milestones
@@ -241,7 +241,7 @@ jobs:
             List issue numbers briefly.
 
             **QA Sprint Recommendations**:
-            - Top 3 issues Quinn recommends for this sprint and why.
+            - Top 3–5 issues Quinn recommends for this sprint and why.
             - Any items that should be BLOCKED pending QA review.
           user-prompt: |
             Please assess the backlog for sprint prioritization:
@@ -464,7 +464,7 @@ jobs:
           **View full plan**: $RESULT_URL
           **Posted as**: $RESULT_TYPE
 
-          $(echo '${{ steps.moderator.outputs.response }}' | head -25)
+          $(echo '${{ steps.moderator.outputs.response }}' | head -c 1500)...
 
           ---
           *🤖 Automated sprint prioritization · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
