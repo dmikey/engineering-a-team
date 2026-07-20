@@ -212,6 +212,33 @@ council:
   # - Weekdays at 14:30 UTC (scheduled sweep)
   # - On successful completion of Product Owner Agent workflow
 
+# ─── Council Sprint Prioritization ───────────────────────────────────────────
+
+council_sprint_prioritization:
+  # Enable or disable the council sprint prioritization workflow.
+  # Repository variable: COUNCIL_ENABLED (true/false) — shares the council flag
+  enabled: true
+
+  # Model used by the Council Moderator for sprint synthesis.
+  # Repository variable: COUNCIL_MODEL
+  model: gpt-4o
+
+  # GitHub Discussion category to post the ranked sprint backlog into.
+  # Repository variable: COUNCIL_DISCUSSION_CATEGORY
+  discussion_category: "Team Decisions"
+
+  # Labels applied to the sprint prioritization result Issue (fallback).
+  labels:
+    - council-decision
+    - sprint-report
+
+  # Automated sprint prioritization cadence.
+  # Defined in .github/workflows/council-sprint-prioritization.yml.
+  # - Every Monday at 08:00 UTC (start-of-sprint sweep)
+  # - On demand via /council sprint-prioritization slash-command
+  # - Manually via Manual Agent Runner (agent: council-sprint)
+  schedule: "0 8 * * 1"   # Every Monday at 08:00 UTC
+
 # ─── Agent Router ────────────────────────────────────────────────────────────
 
 router:

@@ -11,6 +11,7 @@ on:
           - pm
           - po
           - council
+          - council-sprint
           - roadmap
           - self-improvement
           - task-assignment
@@ -25,6 +26,10 @@ on:
         default: ''
       topic:
         description: 'Topic for council discussion'
+        required: false
+        default: ''
+      sprint_goal:
+        description: 'Sprint goal or focus area for council-sprint prioritization'
         required: false
         default: ''
       issue_number:
@@ -87,6 +92,15 @@ jobs:
     with:
       topic: ${{ inputs.topic != '' && inputs.topic || 'Manual council discussion' }}
       context: ${{ inputs.extra_context }}
+      issue_number: ${{ inputs.issue_number }}
+    secrets: inherit
+
+  run-council-sprint:
+    if: ${{ inputs.agent == 'council-sprint' }}
+    uses: ./.github/workflows/council-sprint-prioritization.yml
+    with:
+      sprint_goal: ${{ inputs.sprint_goal }}
+      extra_context: ${{ inputs.extra_context }}
       issue_number: ${{ inputs.issue_number }}
     secrets: inherit
 
