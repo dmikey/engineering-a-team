@@ -116,6 +116,12 @@ Settings → Secrets and variables → Variables → New repository variable
 |----------|---------|-------------|
 | `TA_MODEL` | `gpt-4o-mini` | Override model for the Task Assignment System (falls back to `PM_MODEL` then `AGENT_MODEL`) |
 
+### Skill Development Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SKILL_REMINDERS_OPT_IN` | `{}` | JSON map of agent names to `true`/`false` enabling reminder badges in the skill development report. Example: `{"Quinn (QA Engineer)": true}` |
+
 ### Council Variables
 
 | Variable | Default | Description |

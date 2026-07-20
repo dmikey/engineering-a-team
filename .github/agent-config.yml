@@ -167,6 +167,26 @@ task_assignment:
   # LOW-confidence assignments are shown only in the dashboard.
   min_comment_confidence: MEDIUM
 
+# ─── Skill Development Suggestions ──────────────────────────────────────────
+
+skill_development:
+  # Enable or disable the skill development suggestions workflow task.
+  # The task is triggered manually via `/pm skill-development-suggestions`
+  # or the workflow_dispatch / workflow_call task input.
+  enabled: true
+
+  # Number of days of workflow run history to analyse for suggestions.
+  # Uses the same metrics_period_days input as agent-performance-dashboard.
+  # Defaults to 30 when unset.
+  period_days: 30
+
+  # JSON map of agent names to boolean opt-in flags for reminder
+  # notifications. Agents set to true receive a reminder badge in the
+  # report and can be targeted by future scheduled reminder issues.
+  # Repository variable: SKILL_REMINDERS_OPT_IN
+  # Example: {"Quinn (QA Engineer)": true, "Morgan (Project Manager)": false}
+  skill_reminders_opt_in: "{}"
+
 # ─── Council ─────────────────────────────────────────────────────────────────
 
 council:
