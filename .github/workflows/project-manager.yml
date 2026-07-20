@@ -302,11 +302,18 @@ jobs:
       - name: Apply priority labels and trigger top issue agent workflow
         if: |
           steps.pm-groom.outputs.response != '' &&
+          !startsWith(steps.pm-groom.outputs.response, '⚠️') &&
           steps.data.outputs.open_count != '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GROOMING_REPORT: ${{ steps.pm-groom.outputs.response }}
         run: |
+          # Fail if the grooming report is a model error
+          if echo "$GROOMING_REPORT" | grep -q '⚠️ Model call failed'; then
+            echo "::error::Grooming model call failed — upstream API error. Skipping label and dispatch."
+            exit 1
+          fi
+
           # Ensure priority labels exist
           for LABEL in "priority: critical" "priority: high" "priority: medium" "priority: low" "blocked"; do
             COLOR=""
@@ -451,8 +458,9 @@ jobs:
       # ── Post weekly sprint report ────────────────────────────────────────
       - name: Compose and post weekly sprint report
         if: |
-          github.event_name == 'schedule' ||
-          steps.data.outputs.task == 'full-sprint-report'
+          (github.event_name == 'schedule' ||
+           steps.data.outputs.task == 'full-sprint-report') &&
+          !startsWith(steps.pm-groom.outputs.response, '⚠️')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GROOM_REPORT: ${{ steps.pm-groom.outputs.response }}
