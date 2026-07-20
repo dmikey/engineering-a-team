@@ -75,7 +75,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TASK="${{ inputs.task || 'assign-tasks' }}"
+          # Resolve task with explicit bash default so schedule runs work correctly
+          TASK="${{ inputs.task }}"
+          if [ -z "$TASK" ]; then
+            TASK="assign-tasks"
+          fi
           echo "task=$TASK" >> "$GITHUB_OUTPUT"
           CURRENT_DATE=$(date -u +"%Y-%m-%d")
           echo "current_date=$CURRENT_DATE" >> "$GITHUB_OUTPUT"
