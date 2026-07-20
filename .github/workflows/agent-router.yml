@@ -6,7 +6,7 @@
 #
 # Supported commands:
 #   /qa [context]       — Trigger QA Engineer review
-#   /pm [task]          — Trigger Project Manager (groom-backlog | check-milestones | full-sprint-report | agent-performance-dashboard)
+#   /pm [task]          — Trigger Project Manager (groom-backlog | check-milestones | full-sprint-report | agent-performance-dashboard | roadmap-collaboration)
 #   /po [task]          — Trigger Product Owner (product-health-report | suggest-features | run-playwright)
 #   /council [topic]    — Trigger full council discussion
 #   /profile comms ...  — Set personal communication preference
@@ -107,7 +107,7 @@ jobs:
         if: steps.auth.outputs.authorized == 'true'
         env:
           PREFS_JSON: ${{ vars.AGENT_COMMUNICATION_PREFERENCES || '{}' }}
-          DEFAULT_CHANNEL: ${{ vars.AGENT_DEFAULT_COMMUNICATION_METHOD || 'comment' }}
+          DEFAULT_CHANNEL: ${{ vars.AGENT_DEFAULT_COMMUNICATION_METHOD || 'discussion' }}
           COMMENTER: ${{ github.event.comment.user.login }}
         run: |
           CHANNEL=$(python3 - <<'PY'
@@ -149,7 +149,7 @@ jobs:
           | Command | Description |
           |---------|-------------|
           | \`/qa [context]\` | Trigger QA Engineer (Quinn) to review this PR or issue |
-          | \`/pm [task]\` | Trigger Project Manager (Morgan) — tasks: \`groom-backlog\`, \`check-milestones\`, \`full-sprint-report\`, \`agent-performance-dashboard\` |
+          | \`/pm [task]\` | Trigger Project Manager (Morgan) — tasks: \`groom-backlog\`, \`check-milestones\`, \`full-sprint-report\`, \`agent-performance-dashboard\`, \`roadmap-collaboration\` |
           | \`/po [task]\` | Trigger Product Owner (Alex) — tasks: \`product-health-report\`, \`suggest-features\`, \`run-playwright\` |
           | \`/council [topic]\` | Convene the full council for a discussion on this topic |
           | \`/profile comms [comment\|issue\|discussion]\` | Set your personal notification channel preference |
@@ -159,6 +159,7 @@ jobs:
           \`\`\`
           /qa please review the authentication changes
           /pm groom-backlog
+          /pm roadmap-collaboration
           /po suggest-features
           /council Should we adopt TypeScript for this project?
           \`\`\`
@@ -341,6 +342,7 @@ jobs:
             check-milestones*)  TASK="check-milestones" ;;
             full-sprint-report*) TASK="full-sprint-report" ;;
             agent-performance-dashboard*) TASK="agent-performance-dashboard" ;;
+            roadmap-collaboration*) TASK="roadmap-collaboration" ;;
           esac
 
           if [ "$TASK" = "agent-performance-dashboard" ]; then
@@ -387,7 +389,15 @@ jobs:
             gh issue comment "$ISSUE_NUMBER" --body "$MESSAGE" 2>/dev/null || true
           fi
 
-          if [ "$TASK" = "agent-performance-dashboard" ]; then
+          if [ "$TASK" = "roadmap-collaboration" ]; then
+            ROADMAP_FOCUS=$(echo "$ARGS" | sed -E 's/^roadmap-collaboration[[:space:]]*//')
+            gh workflow run roadmap-collaboration.yml \
+              -f horizon="30/60/90 days" \
+              -f focus="$ROADMAP_FOCUS" \
+              2>/dev/null || \
+            gh issue comment "$ISSUE_NUMBER" \
+              --body "⚠️ Could not dispatch Roadmap Collaboration workflow."
+          elif [ "$TASK" = "agent-performance-dashboard" ]; then
             DASHBOARD_ARGS=(-f task="$TASK" -f extra_context="$ARGS")
             [ -n "$PERIOD_DAYS" ] && DASHBOARD_ARGS+=(-f "metrics_period_days=$PERIOD_DAYS")
             [ -n "$SORT_BY" ] && DASHBOARD_ARGS+=(-f "metrics_sort_by=$SORT_BY")

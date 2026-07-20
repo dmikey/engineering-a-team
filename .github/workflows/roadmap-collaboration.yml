@@ -1,0 +1,301 @@
+# -----------------------------------------------------------------------------
+# Roadmap Collaboration - Morgan + Alex (PM + PO)
+#
+# Produces a shared product-and-delivery roadmap by combining:
+# - Alex (Product Owner): user value and product direction
+# - Morgan (Project Manager): sequencing, capacity, and risk planning
+#
+# Results are posted to GitHub Discussions (or Issues fallback).
+# -----------------------------------------------------------------------------
+name: Roadmap Collaboration
+
+on:
+  schedule:
+    # Weekly on Monday at 15:00 UTC.
+    - cron: '0 15 * * 1'
+  workflow_dispatch:
+    inputs:
+      horizon:
+        description: 'Roadmap horizon (e.g., 30/60/90 days, quarterly)'
+        required: false
+        default: '30/60/90 days'
+      focus:
+        description: 'Optional strategic focus area'
+        required: false
+        default: ''
+  workflow_call:
+    inputs:
+      horizon:
+        type: string
+        description: 'Roadmap horizon'
+        required: false
+        default: '30/60/90 days'
+      focus:
+        type: string
+        description: 'Optional strategic focus area'
+        required: false
+      extra_context:
+        type: string
+        description: 'Additional context for roadmap planning'
+        required: false
+    secrets:
+      MODELS_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+  discussions: write
+  models: read
+
+env:
+  PM_MODEL: ${{ vars.PM_MODEL || vars.AGENT_MODEL || 'gpt-4o-mini' }}
+  PO_MODEL: ${{ vars.PO_MODEL || vars.AGENT_MODEL || 'gpt-4o-mini' }}
+  COUNCIL_MODEL: ${{ vars.COUNCIL_MODEL || 'gpt-4o' }}
+  AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
+  AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
+
+jobs:
+  roadmap:
+    name: PM + PO Roadmap Planning
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Gather roadmap planning context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          HORIZON="${{ inputs.horizon || '30/60/90 days' }}"
+          FOCUS="${{ inputs.focus || '' }}"
+          EXTRA_CONTEXT="${{ inputs.extra_context || '' }}"
+          CURRENT_DATE=$(date -u +"%Y-%m-%d")
+
+          OPEN_ISSUES=$(gh issue list \
+            --state open \
+            --limit 100 \
+            --json number,title,labels,milestone,assignees,createdAt,updatedAt \
+            2>/dev/null || echo "[]")
+
+          FEATURE_ISSUES=$(gh issue list \
+            --state open \
+            --label "feature" \
+            --limit 40 \
+            --json number,title,labels,milestone,createdAt \
+            2>/dev/null || echo "[]")
+
+          PRIORITY_ISSUES=$(gh issue list \
+            --state open \
+            --search 'label:"priority: critical" OR label:"priority: high"' \
+            --limit 30 \
+            --json number,title,labels,milestone,createdAt \
+            2>/dev/null || echo "[]")
+
+          MILESTONES=$(gh api "repos/${{ github.repository }}/milestones?state=open&per_page=20" \
+            --jq '[.[] | {number:.number,title:.title,due_on:.due_on,open_issues:.open_issues,closed_issues:.closed_issues,description:.description}]' \
+            2>/dev/null || echo "[]")
+
+          RECENT_COMMITS=$(git log --oneline --no-merges -20 2>/dev/null || echo "")
+
+          {
+            echo "current_date=$CURRENT_DATE"
+            echo "horizon=$HORIZON"
+            echo "focus=$FOCUS"
+            echo "planning_context<<ROADMAP_CTX_EOF"
+            echo "## Roadmap Inputs"
+            echo "Date: $CURRENT_DATE"
+            echo "Horizon: $HORIZON"
+            echo "Focus: ${FOCUS:-General product + delivery alignment}"
+            echo ""
+            echo "## Open Feature Issues"
+            echo "$FEATURE_ISSUES" | python3 -c "
+          import json, sys
+          items = json.load(sys.stdin)
+          if not items:
+              print('None open.')
+          for i in items:
+              print(f\"- #{i['number']}: {i['title']}\")
+          " 2>/dev/null || echo "$FEATURE_ISSUES"
+            echo ""
+            echo "## High Priority Issues"
+            echo "$PRIORITY_ISSUES" | python3 -c "
+          import json, sys
+          items = json.load(sys.stdin)
+          if not items:
+              print('None flagged HIGH/CRITICAL.')
+          for i in items:
+              print(f\"- #{i['number']}: {i['title']}\")
+          " 2>/dev/null || echo "$PRIORITY_ISSUES"
+            echo ""
+            echo "## Open Milestones"
+            echo "$MILESTONES" | python3 -c "
+          import json, sys
+          items = json.load(sys.stdin)
+          if not items:
+              print('No open milestones.')
+          for m in items:
+              due = (m.get('due_on') or 'No due date')
+              due = due[:10] if due != 'No due date' else due
+              print(f\"- [{m['number']}] {m['title']}: {m['open_issues']} open / {m['closed_issues']} closed | Due: {due}\")
+          " 2>/dev/null || echo "$MILESTONES"
+            echo ""
+            echo "## Delivery Context"
+            echo "Total open issues snapshot:"
+            echo "$OPEN_ISSUES" | python3 -c "
+          import json, sys
+          print(len(json.load(sys.stdin)))
+          " 2>/dev/null || echo "unknown"
+            echo ""
+            echo "## Recent Commits"
+            echo "$RECENT_COMMITS"
+            echo ""
+            echo "## Additional Context"
+            echo "$EXTRA_CONTEXT"
+            echo "ROADMAP_CTX_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Alex — product roadmap direction
+        id: po-roadmap
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.PO_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Alex, Product Owner. Define user-centric product direction.
+
+            Produce:
+            - 3 to 5 strategic themes
+            - the most important outcomes for each theme
+            - clear success signals
+
+            Keep output concise and structured as:
+
+            ## Alex Product Direction
+            ### Strategic Themes
+            - Theme: ...
+              - User outcome: ...
+              - Success signal: ...
+
+            ### Product Bets
+            Numbered list of 3 to 5 bets with rationale.
+          user-prompt: |
+            Build product direction for a roadmap horizon of
+            "${{ steps.ctx.outputs.horizon }}".
+
+            ${{ steps.ctx.outputs.planning_context }}
+
+      - name: Morgan — delivery roadmap plan
+        id: pm-roadmap
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.PM_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Morgan, Project Manager. Turn product direction into a
+            practical execution roadmap with sequencing, ownership, dependencies,
+            and risk controls.
+
+            Keep output concise and structured as:
+
+            ## Morgan Delivery Plan
+            ### Sequenced Roadmap
+            - Now (0-30 days): ...
+            - Next (31-60 days): ...
+            - Later (61-90 days): ...
+
+            ### Dependencies and Risks
+            Bullet list with mitigation.
+
+            ### Capacity and Trade-offs
+            What must be deferred to keep focus.
+          user-prompt: |
+            Use this product direction and repository state to create an
+            execution roadmap:
+
+            ${{ steps.po-roadmap.outputs.response }}
+
+            ---
+
+            ${{ steps.ctx.outputs.planning_context }}
+
+      - name: Casey — merged PM + PO roadmap
+        id: merged-roadmap
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.COUNCIL_MODEL }}
+          max-tokens: 3000
+          temperature: '0.5'
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Casey, moderator. Merge Product Owner and Project Manager
+            roadmap drafts into one shared plan.
+
+            Output format:
+
+            # Product + Project Roadmap
+            ## Horizon
+            ## Strategic Priorities
+            ## 30/60/90 Day Plan
+            ## Dependencies and Risks
+            ## Decision Log
+            ## Next Actions
+
+            Keep the roadmap actionable and specific.
+          user-prompt: |
+            Merge these drafts into one aligned roadmap:
+
+            ---
+            ${{ steps.po-roadmap.outputs.response }}
+            ---
+            ${{ steps.pm-roadmap.outputs.response }}
+
+      - name: Compose roadmap record
+        id: compose
+        env:
+          ROADMAP: ${{ steps.merged-roadmap.outputs.response }}
+          PO_DRAFT: ${{ steps.po-roadmap.outputs.response }}
+          PM_DRAFT: ${{ steps.pm-roadmap.outputs.response }}
+          CURRENT_DATE: ${{ steps.ctx.outputs.current_date }}
+        run: |
+          FULL_RECORD="$ROADMAP
+
+          ---
+
+          ## Collaboration Transcript
+
+          <details>
+          <summary>View Product Owner and Project Manager drafts</summary>
+
+          $PO_DRAFT
+
+          ---
+
+          $PM_DRAFT
+
+          </details>
+
+          ---
+          *🤖 Roadmap collaboration by Alex + Morgan · Date: $CURRENT_DATE · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+          {
+            echo "full_record<<ROADMAP_RECORD_EOF"
+            echo "$FULL_RECORD"
+            echo "ROADMAP_RECORD_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post roadmap discussion
+        id: post-roadmap
+        uses: ./.github/actions/post-council-results
+        with:
+          title: "🗺️ Product + Project Roadmap — ${{ steps.ctx.outputs.current_date }}"
+          body: ${{ steps.compose.outputs.full_record }}
+          category: ${{ vars.COUNCIL_DISCUSSION_CATEGORY || 'Team Decisions' }}
+          labels: 'roadmap,product-owner'
+          token: ${{ secrets.GITHUB_TOKEN }}

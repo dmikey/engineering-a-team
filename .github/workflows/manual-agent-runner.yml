@@ -11,6 +11,7 @@ on:
           - pm
           - po
           - council
+          - roadmap
           - self-improvement
         default: pm
       task:
@@ -86,6 +87,15 @@ jobs:
       topic: ${{ inputs.topic != '' && inputs.topic || 'Manual council discussion' }}
       context: ${{ inputs.extra_context }}
       issue_number: ${{ inputs.issue_number }}
+    secrets: inherit
+
+  run-roadmap:
+    if: ${{ inputs.agent == 'roadmap' }}
+    uses: ./.github/workflows/roadmap-collaboration.yml
+    with:
+      horizon: ${{ inputs.task != '' && inputs.task || '30/60/90 days' }}
+      focus: ${{ inputs.topic }}
+      extra_context: ${{ inputs.extra_context }}
     secrets: inherit
 
   run-self-improvement:

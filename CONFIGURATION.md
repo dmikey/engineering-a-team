@@ -75,7 +75,7 @@ Settings → Secrets and variables → Variables → New repository variable
 | `COUNCIL_MODEL` | `gpt-4o` | Model for the Council Moderator (higher capability recommended) |
 | `AGENT_MAX_TOKENS` | `2048` | Maximum tokens per model response |
 | `AGENT_TEMPERATURE` | `0.7` | Sampling temperature (0.0 = deterministic, 1.0 = creative) |
-| `AGENT_DEFAULT_COMMUNICATION_METHOD` | `comment` | Default channel for agent-router notifications. Options: `comment`, `issue`, `discussion` |
+| `AGENT_DEFAULT_COMMUNICATION_METHOD` | `discussion` | Default channel for agent-router notifications. Options: `comment`, `issue`, `discussion` |
 | `AGENT_COMMUNICATION_PREFERENCES` | `{}` | JSON object mapping GitHub usernames to channels. Example: `{"octocat":"discussion","alice":"issue"}` |
 | `AGENT_ROUTER_DISCUSSION_CATEGORY` | `General` | Discussion category name used by agent-router when posting notifications as discussions |
 
@@ -117,6 +117,11 @@ Settings → Secrets and variables → Variables → New repository variable
 | `COUNCIL_MODEL` | `gpt-4o` | Model for Council Moderator synthesis |
 | `COUNCIL_DISCUSSION_CATEGORY` | `Team Decisions` | GitHub Discussion category for council decisions |
 
+Council automation cadence is configured in workflow YAML:
+
+- Weekdays at 14:30 UTC (scheduled product decision sweep)
+- On successful Product Owner workflow completion
+
 ---
 
 ## Collaboration Rules
@@ -143,6 +148,8 @@ Default schedules (UTC):
 |-------|---------|---------|
 | Project Manager | Every weekday 09:00 | Edit `cron` in `project-manager.yml` |
 | Product Owner | Every weekday 13:00 | Edit `cron` in `product-owner.yml` |
+| Council Discussion | Every weekday 14:30 + Product Owner completion trigger | Edit `cron` and `workflow_run` in `council-discussion.yml` |
+| Roadmap Collaboration | Weekly Monday 15:00 | Edit `cron` in `roadmap-collaboration.yml` |
 | Self-Improvement Loop | Every weekday 17:00 | Edit `cron` in `self-improvement-loop.yml` |
 
 GitHub Actions does not support repository variables inside `on.schedule`, so
@@ -158,8 +165,8 @@ All agent workflows support `workflow_dispatch`, so they can be started from
 the GitHub Actions UI.
 
 For a single entrypoint, use **Manual Agent Runner** from the Actions tab. It
-dispatches to the underlying QA, Project Manager, Product Owner, Council, or
-Self-Improvement workflow and forwards the relevant inputs. For Product Owner
+dispatches to the underlying QA, Project Manager, Product Owner, Council,
+Roadmap Collaboration, or Self-Improvement workflow and forwards the relevant inputs. For Product Owner
 feature suggestion runs, use `feature_prompt` to steer the generated GitHub
 issues.
 

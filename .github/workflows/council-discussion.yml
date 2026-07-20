@@ -7,6 +7,8 @@
 # Results are posted to GitHub Discussions (or Issues as fallback).
 #
 # Triggers:  issues or PRs labeled "council-review"
+#            Product Owner workflow completion (success)
+#            schedule (weekday product decision sweep)
 #            workflow_dispatch
 #            workflow_call (from agent-router or other workflows)
 #
@@ -15,10 +17,16 @@
 name: Council Discussion
 
 on:
+  schedule:
+    # Every weekday at 14:30 UTC, shortly after Product Owner runs.
+    - cron: '30 14 * * 1-5'
   issues:
     types: [labeled]
   pull_request:
     types: [labeled]
+  workflow_run:
+    workflows: ["Product Owner Agent"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       topic:
@@ -72,10 +80,14 @@ jobs:
   council:
     name: Council Discussion
     runs-on: ubuntu-latest
-    # Only run when labeled "council-review" or explicitly dispatched
+    # Run on explicit requests plus automated product-decision reviews.
     if: |
+      github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'workflow_call' ||
+      (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event != 'discussion') ||
       (github.event_name == 'issues' &&
        contains(github.event.issue.labels.*.name, 'council-review')) ||
       (github.event_name == 'pull_request' &&
@@ -100,6 +112,14 @@ jobs:
             TOPIC="${{ inputs.topic }}"
             CONTEXT="${{ inputs.context }}"
             REF_NUMBER="${{ inputs.issue_number }}"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            TOPIC="Product Decision Review — Product Owner run #${{ github.event.workflow_run.run_number }}"
+            CONTEXT="Triggered from Product Owner workflow completion (${{ github.event.workflow_run.html_url }})"
+            REF_NUMBER=""
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            TOPIC="Daily Product Decision Review"
+            CONTEXT="Scheduled council sweep of recent product-owner decisions and feature proposals."
+            REF_NUMBER=""
           elif [ "${{ github.event_name }}" = "issues" ]; then
             TOPIC="Issue #${{ github.event.issue.number }}: ${{ github.event.issue.title }}"
             CONTEXT="${{ github.event.issue.body }}"
@@ -117,6 +137,12 @@ jobs:
           # Gather repository context
           README=$(cat README.md 2>/dev/null | head -50 || echo "")
           OPEN_ISSUES_COUNT=$(gh issue list --state open --limit 1 --json number --jq '. | length' 2>/dev/null || echo "0")
+          PRODUCT_DECISIONS=$(gh issue list \
+            --state open \
+            --label "product-owner" \
+            --limit 10 \
+            --json number,title,createdAt,labels \
+            2>/dev/null || echo "[]")
           RECENT_COMMITS=$(git log --oneline --no-merges -10 2>/dev/null || echo "")
           CURRENT_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
@@ -142,6 +168,16 @@ jobs:
             echo "Open issues: $OPEN_ISSUES_COUNT"
             echo "Recent commits:"
             echo "$RECENT_COMMITS"
+            echo ""
+            echo "### Recent Product Owner Decisions"
+            echo "$PRODUCT_DECISIONS" | python3 -c "
+          import json, sys
+          items = json.load(sys.stdin)
+          if not items:
+              print('No recent product-owner issues found.')
+          for item in items:
+              print(f\"- #{item['number']}: {item['title']} ({item.get('createdAt','')[:10]})\")
+          " 2>/dev/null || echo "$PRODUCT_DECISIONS"
             echo "COUNCIL_CTX_EOF"
           } >> "$GITHUB_OUTPUT"
 
