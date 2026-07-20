@@ -24,6 +24,10 @@ safe-outputs:
     max: 1
     target: "*"
     github-token: ${{ secrets.GH_USER_PAT }}
+    custom-instructions: |
+      When you create a pull request for this issue, do not leave it as a
+      draft. Mark it ready for review before you finish, even if the PR was
+      initially created as draft.
     ignore-if-error: true
   noop:
 ---
