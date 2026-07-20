@@ -289,7 +289,10 @@ def main() -> None:
     args = parser.parse_args()
 
     now = datetime.now(timezone.utc)
-    period_days = int(os.environ.get("PERIOD_DAYS", "30"))
+    try:
+        period_days = int(os.environ.get("PERIOD_DAYS", "30"))
+    except ValueError:
+        period_days = 30
     since = now - timedelta(days=period_days)
     current_date = os.environ.get("CURRENT_DATE", now.strftime("%Y-%m-%d"))
     workflow_url = os.environ.get("WORKFLOW_URL", "")

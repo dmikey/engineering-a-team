@@ -464,7 +464,7 @@ jobs:
           CURRENT_DATE: ${{ steps.data.outputs.current_date }}
           PERIOD_DAYS: ${{ steps.data.outputs.metrics_period_days }}
           WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          SKILL_REMINDERS_OPT_IN: ${{ vars.SKILL_REMINDERS_OPT_IN || '' }}
+          SKILL_REMINDERS_OPT_IN: ${{ vars.SKILL_REMINDERS_OPT_IN || '{}' }}
         run: |
           if ! gh api "repos/${{ github.repository }}/actions/runs?per_page=100" > /tmp/agent-runs.json; then
             echo "❌ Failed to fetch workflow runs data for skill development report."
