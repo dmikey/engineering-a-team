@@ -110,6 +110,12 @@ Settings → Secrets and variables → Variables → New repository variable
 | `REFERENCE_APP_BASE_URL` | _(empty)_ | Optional live URL for the Get Milk app |
 | `COPILOT_ASSIGNEE` | `@copilot` | Assignee login used for native GitHub Copilot handoff when supported |
 
+### Task Assignment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TA_MODEL` | `gpt-4o-mini` | Override model for the Task Assignment System (falls back to `PM_MODEL` then `AGENT_MODEL`) |
+
 ### Council Variables
 
 | Variable | Default | Description |
@@ -142,6 +148,7 @@ Default schedules (UTC):
 | Agent | Default | Override |
 |-------|---------|---------|
 | Project Manager | Every weekday 09:00 | Edit `cron` in `project-manager.yml` |
+| Task Assignment | Every weekday 11:00 | Edit `cron` in `task-assignment.yml` |
 | Product Owner | Every weekday 13:00 | Edit `cron` in `product-owner.yml` |
 | Self-Improvement Loop | Every weekday 17:00 | Edit `cron` in `self-improvement-loop.yml` |
 
@@ -158,10 +165,10 @@ All agent workflows support `workflow_dispatch`, so they can be started from
 the GitHub Actions UI.
 
 For a single entrypoint, use **Manual Agent Runner** from the Actions tab. It
-dispatches to the underlying QA, Project Manager, Product Owner, Council, or
-Self-Improvement workflow and forwards the relevant inputs. For Product Owner
-feature suggestion runs, use `feature_prompt` to steer the generated GitHub
-issues.
+dispatches to the underlying QA, Project Manager, Product Owner, Council,
+Self-Improvement, or Task Assignment workflow and forwards the relevant inputs.
+For Product Owner feature suggestion runs, use `feature_prompt` to steer the
+generated GitHub issues.
 
 ---
 

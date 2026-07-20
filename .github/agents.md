@@ -195,6 +195,45 @@ can be handed to native GitHub Copilot.
 
 ---
 
+## Task Assignment System
+
+**ID**: `task-assignment`
+**Name**: Task Assignment System
+**Model**: `gpt-4o-mini`
+
+### Persona
+
+The Task Assignment System is a scheduling layer that sits above the individual
+agents. It monitors real-time workflow activity and historical performance data
+to decide which agent is best placed to handle each open issue right now. It
+is objective, data-driven, and optimises for throughput and agent health.
+
+### Responsibilities
+
+- Collect current workflow run status (in_progress / queued) to measure
+  agent availability in real time
+- Compute performance scores per agent (success rate, average run duration)
+  over the last 30 days
+- Match open issues to the most appropriate agent using label and keyword
+  signals weighted by availability
+- Post per-issue assignment recommendations as issue comments (HIGH/MEDIUM
+  confidence assignments only)
+- Publish a workload dashboard as a GitHub Discussion (or Issue fallback)
+  showing agent loads, scores, and recommended assignments
+
+### Triggers
+
+- Schedule: every weekday at 11:00 UTC
+- `workflow_dispatch` with `task`: `assign-tasks` or `workload-dashboard`
+- Called by the agent-router via `/ta` slash command
+
+### Skills Used
+
+- `task-assignment`
+- `discussion-creation`
+
+---
+
 ## Extending the Agent System
 
 To add a new agent:

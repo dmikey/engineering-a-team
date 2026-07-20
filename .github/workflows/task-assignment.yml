@@ -1,0 +1,331 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Task Assignment Workflow
+#
+# Analyses real-time agent availability and historical performance metrics to
+# produce dynamic task assignment recommendations for open issues.
+#
+# Triggers:  schedule (every weekday 11:00 UTC)
+#            workflow_dispatch
+#            workflow_call (from agent-router with /ta command)
+#
+# Skills:    task-assignment · discussion-creation
+#
+# Posts a dashboard (Discussion or Issue fallback) with agent workloads and
+# per-issue assignment recommendations.
+# ──────────────────────────────────────────────────────────────────────────────
+name: Task Assignment
+
+on:
+  schedule:
+    # Every weekday at 11:00 UTC (between PM grooming at 09:00 and PO at 13:00)
+    - cron: '0 11 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Task to perform'
+        type: choice
+        options:
+          - assign-tasks
+          - workload-dashboard
+        default: assign-tasks
+      extra_context:
+        description: 'Additional context'
+        required: false
+        default: ''
+  workflow_call:
+    inputs:
+      task:
+        type: string
+        description: 'assign-tasks | workload-dashboard'
+        default: assign-tasks
+      extra_context:
+        type: string
+        required: false
+        default: ''
+    secrets:
+      MODELS_TOKEN:
+        required: false
+      GH_USER_PAT:
+        required: false
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  discussions: write
+  models: read
+
+env:
+  TA_MODEL: ${{ vars.TA_MODEL || vars.PM_MODEL || 'gpt-4o-mini' }}
+  AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
+  AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
+
+jobs:
+  task-assignment:
+    name: Task Assignment System
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Gather agent workload and issue data ─────────────────────────────
+      - name: Gather data
+        id: data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TASK="${{ inputs.task || 'assign-tasks' }}"
+          echo "task=$TASK" >> "$GITHUB_OUTPUT"
+          CURRENT_DATE=$(date -u +"%Y-%m-%d")
+          echo "current_date=$CURRENT_DATE" >> "$GITHUB_OUTPUT"
+
+          # Fetch recent workflow runs (up to 200 to cover 30-day perf window)
+          gh api "repos/${{ github.repository }}/actions/runs?per_page=100" \
+            > /tmp/ta-runs-page1.json
+          gh api "repos/${{ github.repository }}/actions/runs?per_page=100&page=2" \
+            > /tmp/ta-runs-page2.json
+
+          # Merge the two pages
+          python3 - <<'PYEOF'
+          import json
+
+          def load(path):
+              try:
+                  with open(path) as f:
+                      return json.load(f).get("workflow_runs", [])
+              except Exception:
+                  return []
+
+          combined = load("/tmp/ta-runs-page1.json") + load("/tmp/ta-runs-page2.json")
+          with open("/tmp/ta-runs.json", "w") as f:
+              json.dump({"workflow_runs": combined}, f)
+          PYEOF
+
+          # Also include currently in-progress / queued runs
+          gh api "repos/${{ github.repository }}/actions/runs?status=in_progress&per_page=50" \
+            > /tmp/ta-active.json
+          python3 - <<'PYEOF'
+          import json
+
+          with open("/tmp/ta-runs.json") as f:
+              existing = json.load(f).get("workflow_runs", [])
+
+          try:
+              with open("/tmp/ta-active.json") as f:
+                  active = json.load(f).get("workflow_runs", [])
+          except Exception:
+              active = []
+
+          seen_ids = {r["id"] for r in existing}
+          for r in active:
+              if r.get("id") not in seen_ids:
+                  existing.append(r)
+
+          with open("/tmp/ta-runs.json", "w") as f:
+              json.dump({"workflow_runs": existing}, f)
+          PYEOF
+
+          # Fetch open issues (up to 100)
+          gh issue list \
+            --state open \
+            --limit 100 \
+            --json number,title,labels,assignees,body,state \
+            2>/dev/null > /tmp/ta-issues.json || echo "[]" > /tmp/ta-issues.json
+
+          ISSUE_COUNT=$(python3 -c "import json,sys; print(len(json.load(open('/tmp/ta-issues.json'))))" 2>/dev/null || echo "0")
+          echo "issue_count=$ISSUE_COUNT" >> "$GITHUB_OUTPUT"
+
+      # ── Run task assignment script ────────────────────────────────────────
+      - name: Compute assignment recommendations
+        id: assign
+        env:
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 .github/scripts/task_assignment.py \
+            --runs /tmp/ta-runs.json \
+            --issues /tmp/ta-issues.json \
+            --output dashboard \
+            > /tmp/ta-dashboard.md
+
+          python3 .github/scripts/task_assignment.py \
+            --runs /tmp/ta-runs.json \
+            --issues /tmp/ta-issues.json \
+            --output recommendations \
+            > /tmp/ta-recommendations.json
+
+          # Expose dashboard content as step output (truncated for env safety)
+          {
+            echo "dashboard<<TA_DASH_EOF"
+            cat /tmp/ta-dashboard.md
+            echo "TA_DASH_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "recommendations<<TA_REC_EOF"
+            cat /tmp/ta-recommendations.json
+            echo "TA_REC_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── AI synthesis of assignment decisions ─────────────────────────────
+      - name: AI synthesis — assignment analysis
+        id: ai-analysis
+        if: steps.data.outputs.task == 'assign-tasks'
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.TA_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are the Task Assignment System for an autonomous AI engineering team.
+            Your role is to review agent workloads and assignment recommendations,
+            then provide a brief, actionable narrative that helps the team understand
+            who should work on what and why.
+
+            Guidelines:
+            - Be concise (3–5 sentences).
+            - Highlight any agents that appear overloaded or underutilised.
+            - Suggest if any issues are particularly urgent based on their titles.
+            - If all agents are available, say so positively.
+            - Do NOT repeat the full table — just add the narrative insight.
+          user-prompt: |
+            Here is the current task assignment dashboard:
+
+            ${{ steps.assign.outputs.dashboard }}
+
+            Additional context:
+            ${{ inputs.extra_context }}
+
+      # ── Post assignment comments on issues ────────────────────────────────
+      - name: Post assignment recommendations on issues
+        if: steps.data.outputs.task == 'assign-tasks' && steps.data.outputs.issue_count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RECOMMENDATIONS: ${{ steps.assign.outputs.recommendations }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PYEOF'
+          import json
+          import os
+          import subprocess
+
+          raw = os.environ.get("RECOMMENDATIONS", "[]")
+          try:
+              recs = json.loads(raw)
+          except json.JSONDecodeError:
+              recs = []
+
+          workflow_url = os.environ.get("WORKFLOW_URL", "")
+
+          for r in recs:
+              issue_num = r.get("issue_number")
+              agent = r.get("recommended_agent", "")
+              score = r.get("availability_score", 0)
+              confidence = r.get("confidence", "LOW")
+              cmd = r.get("slash_command", "")
+
+              if not issue_num or confidence == "LOW":
+                  continue
+
+              body = (
+                  f"🎯 **Task Assignment Recommendation** (confidence: {confidence})\n\n"
+                  f"Based on real-time availability and performance metrics, "
+                  f"**{agent}** (score: {score:.0f}/100) is recommended for this issue.\n\n"
+                  f"To dispatch: `{cmd}`\n\n"
+                  f"*[Task Assignment System]({workflow_url})*"
+              )
+
+              result = subprocess.run(
+                  ["gh", "issue", "comment", str(issue_num), "--body", body],
+                  capture_output=True,
+                  text=True,
+              )
+              if result.returncode == 0:
+                  print(f"✅ Commented on issue #{issue_num} → {agent}")
+              else:
+                  print(f"⚠️ Could not comment on issue #{issue_num}: {result.stderr.strip()}")
+          PYEOF
+
+      # ── Compose final dashboard ───────────────────────────────────────────
+      - name: Compose final dashboard
+        id: compose
+        env:
+          BASE_DASHBOARD: ${{ steps.assign.outputs.dashboard }}
+          AI_NARRATIVE: ${{ steps.ai-analysis.outputs.response }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+        run: |
+          NARRATIVE="$AI_NARRATIVE"
+          if [ -z "$NARRATIVE" ]; then
+            NARRATIVE="_AI narrative not available for this run._"
+          fi
+
+          FULL_REPORT="$BASE_DASHBOARD
+
+          ---
+
+          ## 🤖 AI Analysis
+
+          $NARRATIVE"
+
+          {
+            echo "report<<TA_REPORT_EOF"
+            echo "$FULL_REPORT"
+            echo "TA_REPORT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── Post dashboard as Discussion or Issue ─────────────────────────────
+      - name: Post dashboard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT: ${{ steps.compose.outputs.report }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+        run: |
+          OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
+          REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          TITLE="🎯 Task Assignment Dashboard — $CURRENT_DATE"
+
+          REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
+          DISCUSSION_CREATED=false
+
+          if [ -n "$REPO_ID" ]; then
+            CATEGORY_ID=$(gh api graphql \
+              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:20){nodes{id name}}}}' \
+              -f o="$OWNER" -f r="$REPO" \
+              --jq '.data.repository.discussionCategories.nodes[] | select(.name == "General") | .id' \
+              2>/dev/null || echo "")
+
+            if [ -z "$CATEGORY_ID" ]; then
+              CATEGORY_ID=$(gh api graphql \
+                -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+                -f o="$OWNER" -f r="$REPO" \
+                --jq '.data.repository.discussionCategories.nodes[0].id' \
+                2>/dev/null || echo "")
+            fi
+
+            if [ -n "$CATEGORY_ID" ]; then
+              DISCUSSION_URL=$(gh api graphql \
+                -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
+                -f ri="$REPO_ID" -f ci="$CATEGORY_ID" \
+                -f t="$TITLE" -f b="$REPORT" \
+                --jq '.data.createDiscussion.discussion.url' \
+                2>/dev/null || echo "")
+
+              if [ -n "$DISCUSSION_URL" ]; then
+                echo "✅ Task assignment dashboard posted as Discussion: $DISCUSSION_URL"
+                DISCUSSION_CREATED=true
+              fi
+            fi
+          fi
+
+          if [ "$DISCUSSION_CREATED" = "false" ]; then
+            gh issue create \
+              --title "$TITLE" \
+              --body "$REPORT" \
+              2>/dev/null || \
+            gh issue create \
+              --title "$TITLE" \
+              --body "$REPORT"
+            echo "✅ Task assignment dashboard posted as Issue (Discussion fallback)"
+          fi

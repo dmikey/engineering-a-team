@@ -202,6 +202,24 @@ in-flight, and what is missing.
 
 ---
 
+## task-assignment
+
+**Description**: Analyse real-time agent availability (in-progress workflow
+runs) and historical performance metrics (success rate, average duration) to
+produce dynamic assignment recommendations for open issues, then post a
+workload dashboard.
+
+**Inputs**: Workflow runs JSON (recent + active), open issues list  
+**Outputs**: Per-issue assignment recommendations (agent name, confidence,
+slash command); markdown dashboard posted as a Discussion or Issue  
+**GitHub APIs**: `GET /repos/{owner}/{repo}/actions/runs`,
+`GET /repos/{owner}/{repo}/issues`,
+`POST /repos/{owner}/{repo}/issues/{number}/comments`,
+GraphQL `createDiscussion`  
+**Used by**: Task Assignment System
+
+---
+
 ## Adding a New Skill
 
 1. Add an entry to this file with the required fields:

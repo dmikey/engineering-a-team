@@ -12,9 +12,10 @@ on:
           - po
           - council
           - self-improvement
+          - task-assignment
         default: pm
       task:
-        description: 'Task or focus for PM, PO, or self-improvement workflows (PM also supports agent-performance-dashboard)'
+        description: 'Task or focus for PM, PO, self-improvement, or task-assignment workflows (PM also supports agent-performance-dashboard; task-assignment supports assign-tasks or workload-dashboard)'
         required: false
         default: ''
       pr_number:
@@ -95,5 +96,13 @@ jobs:
       focus: ${{ inputs.task != '' && inputs.task || 'full-loop' }}
       reference_repo: ${{ inputs.reference_repo }}
       reference_base_url: ${{ inputs.base_url }}
+      extra_context: ${{ inputs.extra_context }}
+    secrets: inherit
+
+  run-task-assignment:
+    if: ${{ inputs.agent == 'task-assignment' }}
+    uses: ./.github/workflows/task-assignment.yml
+    with:
+      task: ${{ inputs.task != '' && inputs.task || 'assign-tasks' }}
       extra_context: ${{ inputs.extra_context }}
     secrets: inherit
