@@ -79,6 +79,17 @@ class CollectMetricsTests(unittest.TestCase):
             self.assertEqual(data["active_runs"], 0)
             self.assertEqual(data["recent_runs"], 0)
 
+    def test_empty_runs_all_zeros(self):
+        """collect_agent_metrics with no runs returns zero counts for every agent."""
+        metrics = MODULE.collect_agent_metrics([])
+        for name, data in metrics.items():
+            self.assertEqual(data["active_runs"], 0, name)
+            self.assertEqual(data["recent_runs"], 0, name)
+            self.assertEqual(data["perf_runs"], 0, name)
+            self.assertEqual(data["perf_failures"], 0, name)
+            self.assertEqual(data["durations"], [], name)
+            self.assertIsNone(data["last_run"], name)
+
 
 class BuildScoresTests(unittest.TestCase):
     def test_idle_agent_scores_high(self):
@@ -108,6 +119,111 @@ class BuildScoresTests(unittest.TestCase):
         scores_busy = MODULE.build_agent_scores({"A": base})
         scores_idle = MODULE.build_agent_scores({"A": idle})
         self.assertLess(scores_busy["A"], scores_idle["A"])
+
+    def test_zero_perf_runs_no_crash(self):
+        """build_agent_scores must not raise ZeroDivisionError when no perf data."""
+        metrics = {
+            "Quinn (QA Engineer)": {
+                "active_runs": 0,
+                "recent_runs": 0,
+                "perf_runs": 0,
+                "perf_failures": 0,
+                "durations": [],
+                "last_run": None,
+            },
+        }
+        scores = MODULE.build_agent_scores(metrics)
+        # Success rate defaults to 100 % → perf_score = 70, avail_score = 30 → 100.0
+        self.assertEqual(scores["Quinn (QA Engineer)"], 100.0)
+
+    def test_no_active_no_recent_runs_full_availability(self):
+        """Agent with no active or recent runs receives maximum availability score."""
+        metrics = {
+            "Morgan (Project Manager)": {
+                "active_runs": 0,
+                "recent_runs": 0,
+                "perf_runs": 5,
+                "perf_failures": 0,
+                "durations": [1.0] * 5,
+                "last_run": None,
+            },
+        }
+        scores = MODULE.build_agent_scores(metrics)
+        # 100% success rate → perf_score=70; zero penalties → avail_score=30 → 100.0
+        self.assertEqual(scores["Morgan (Project Manager)"], 100.0)
+
+
+class ScoreIssueAgentTests(unittest.TestCase):
+    """Tests for the _score_issue_agent helper function."""
+
+    def _quinn_cfg(self):
+        return MODULE.AGENTS["Quinn (QA Engineer)"]
+
+    def _alex_cfg(self):
+        return MODULE.AGENTS["Alex (Product Owner)"]
+
+    def test_no_match_returns_zero(self):
+        issue = {"number": 1, "title": "Unrelated topic", "body": "", "labels": []}
+        score = MODULE._score_issue_agent(issue, "Quinn (QA Engineer)", self._quinn_cfg())
+        self.assertEqual(score, 0)
+
+    def test_label_match_increases_score(self):
+        issue = {
+            "number": 2,
+            "title": "Something",
+            "body": "",
+            "labels": [{"name": "bug"}],
+        }
+        score = MODULE._score_issue_agent(issue, "Quinn (QA Engineer)", self._quinn_cfg())
+        self.assertGreater(score, 0)
+
+    def test_keyword_in_title_increases_score(self):
+        issue = {
+            "number": 3,
+            "title": "App crashes on startup",
+            "body": "",
+            "labels": [],
+        }
+        score = MODULE._score_issue_agent(issue, "Quinn (QA Engineer)", self._quinn_cfg())
+        self.assertGreater(score, 0)
+
+    def test_keyword_in_body_increases_score(self):
+        issue = {
+            "number": 4,
+            "title": "Reported problem",
+            "body": "There is a security vulnerability in the login flow.",
+            "labels": [],
+        }
+        score = MODULE._score_issue_agent(issue, "Quinn (QA Engineer)", self._quinn_cfg())
+        self.assertGreater(score, 0)
+
+    def test_multiple_labels_accumulate_score(self):
+        issue = {
+            "number": 5,
+            "title": "Review needed",
+            "body": "",
+            "labels": [{"name": "bug"}, {"name": "security"}],
+        }
+        single_label_issue = {
+            "number": 6,
+            "title": "Review needed",
+            "body": "",
+            "labels": [{"name": "bug"}],
+        }
+        score_multi = MODULE._score_issue_agent(issue, "Quinn (QA Engineer)", self._quinn_cfg())
+        score_single = MODULE._score_issue_agent(single_label_issue, "Quinn (QA Engineer)", self._quinn_cfg())
+        self.assertGreater(score_multi, score_single)
+
+    def test_feature_label_scores_higher_for_alex_than_quinn(self):
+        issue = {
+            "number": 7,
+            "title": "New feature request",
+            "body": "User story: As a user...",
+            "labels": [{"name": "feature"}],
+        }
+        score_alex = MODULE._score_issue_agent(issue, "Alex (Product Owner)", self._alex_cfg())
+        score_quinn = MODULE._score_issue_agent(issue, "Quinn (QA Engineer)", self._quinn_cfg())
+        self.assertGreater(score_alex, score_quinn)
 
 
 class AssignIssuesTests(unittest.TestCase):
