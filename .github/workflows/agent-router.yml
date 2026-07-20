@@ -150,7 +150,7 @@ jobs:
           | Command | Description |
           |---------|-------------|
           | \`/qa [context]\` | Trigger QA Engineer (Quinn) to review this PR or issue |
-          | \`/pm [task]\` | Trigger Project Manager (Morgan) — tasks: \`groom-backlog\`, \`check-milestones\`, \`full-sprint-report\`, \`agent-performance-dashboard\`, \`roadmap-collaboration\` |
+          | \`/pm [task]\` | Trigger Project Manager (Morgan) — tasks: \`groom-backlog\`, \`check-milestones\`, \`full-sprint-report\`, \`agent-performance-dashboard\`, \`skill-development-suggestions\`, \`roadmap-collaboration\` |
           | \`/po [task]\` | Trigger Product Owner (Alex) — tasks: \`product-health-report\`, \`suggest-features\`, \`run-playwright\` |
           | \`/council [topic]\` | Convene the full council for a discussion on this topic |
           | \`/ta [task]\` | Run the Task Assignment System — tasks: \`assign-tasks\` (default), \`workload-dashboard\` |
@@ -345,6 +345,7 @@ jobs:
             check-milestones*)  TASK="check-milestones" ;;
             full-sprint-report*) TASK="full-sprint-report" ;;
             agent-performance-dashboard*) TASK="agent-performance-dashboard" ;;
+            skill-development-suggestions*) TASK="skill-development-suggestions" ;;
             roadmap-collaboration*) TASK="roadmap-collaboration" ;;
           esac
 

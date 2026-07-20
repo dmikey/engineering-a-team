@@ -112,6 +112,7 @@ clearly, always grounding decisions in milestone dates and team capacity.
 - `milestone-management`
 - `discussion-creation`
 - `issue-labeling`
+- `skill-development-analysis`
 
 ---
 

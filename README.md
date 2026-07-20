@@ -80,7 +80,7 @@ Open **Actions → Manual Agent Runner → Run workflow** and choose which agent
 to execute:
 
 - `qa`: optional `pr_number` and `extra_context`
-- `pm`: `task` such as `groom-backlog`, `check-milestones`, `full-sprint-report`, or `agent-performance-dashboard` (optional `extra_context`: `period=<days> sort=<success-rate|runs|failures|avg-duration|last-run>`)
+- `pm`: `task` such as `groom-backlog`, `check-milestones`, `full-sprint-report`, `agent-performance-dashboard`, or `skill-development-suggestions` (optional `extra_context`: `period=<days> sort=<success-rate|runs|failures|avg-duration|last-run>`)
 - `po`: `task` such as `product-health-report`, `suggest-features`, or `run-playwright`, plus optional `feature_prompt`, `base_url`, and `extra_context`
 - `council`: `topic`, optional `issue_number`, and `extra_context`
 - `roadmap`: set `task` to a roadmap horizon (for example `30/60/90 days`), optional `topic` as focus, and optional `extra_context`
@@ -103,6 +103,7 @@ Post any of these in an issue or PR comment (write access required):
 | `/pm check-milestones` | Trigger Morgan to check milestone health |
 | `/pm full-sprint-report` | Trigger Morgan for a full sprint report |
 | `/pm agent-performance-dashboard [period=<days> sort=<metric>]` | Trigger Morgan to publish an agent KPI dashboard |
+| `/pm skill-development-suggestions` | Trigger Morgan to generate cross-agent skill development suggestions |
 | `/pm roadmap-collaboration [focus]` | Trigger the shared Alex + Morgan roadmap workflow |
 | `/po suggest-features` | Trigger Alex to suggest features |
 | `/po product-health-report` | Trigger Alex for a product health report |
