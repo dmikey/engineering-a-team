@@ -85,7 +85,7 @@ Settings → Secrets and variables → Variables → New repository variable
 |----------|---------|-------------|
 | `QA_MODEL` | `gpt-4o-mini` | Override model for QA Engineer |
 | `QA_SEVERITY_THRESHOLD` | `HIGH` | Minimum severity to open a tracking issue. Options: `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` |
-| `QA_COLLAB_REPOSITORIES` | _(empty)_ | Optional comma-separated `owner/repo` list used for cross-repo issue context and mirrored serious QA findings. Example: `octo-org/frontend,octo-org/backend` |
+| `QA_COLLAB_REPOSITORIES` | _(empty)_ | Optional comma-separated `owner/repo` list used for cross-repo issue context and mirrored serious QA findings. The workflow uses up to the first 3 valid external repositories. Example: `octo-org/frontend,octo-org/backend` |
 
 ### Project Manager Variables
 

@@ -57,6 +57,7 @@ qa_engineer:
 
   # Optional comma-separated owner/repo list used to pull issue context
   # and mirror serious QA findings across repositories.
+  # The workflow processes up to the first 3 valid external repositories.
   # Repository variable: QA_COLLAB_REPOSITORIES
   # Example: "octo-org/frontend,octo-org/backend"
   collaboration_repositories: ""

@@ -120,7 +120,7 @@ jobs:
             for RAW_REPO in "${RAW_REPOS[@]}"; do
               TARGET_REPO=$(echo "$RAW_REPO" | xargs)
               [ -z "$TARGET_REPO" ] && continue
-              [[ "$TARGET_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || continue
+              [[ "$TARGET_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_-]+$ ]] || continue
               [ "$TARGET_REPO" = "${{ github.repository }}" ] && continue
               REPO_COUNT=$((REPO_COUNT + 1))
               # Cap cross-repo queries to keep latency and prompt size bounded.
@@ -131,15 +131,23 @@ jobs:
                 VALID_COLLAB_REPOS="${TARGET_REPO}"
               fi
 
-              OPEN_ISSUES=$(gh issue list \
+              OPEN_ISSUES_OUTPUT=$(gh issue list \
                 --repo "$TARGET_REPO" \
                 --state open \
                 --limit 5 \
                 --json number,title,url \
-                --jq '.[] | "- #\(.number) \(.title) (\(.url))"' 2>/dev/null || true)
+                --jq '.[] | "- #\(.number) \(.title) (\(.url))"' 2>&1)
+              OPEN_ISSUES_STATUS=$?
 
-              if [ -z "$OPEN_ISSUES" ]; then
-                OPEN_ISSUES="- Unable to access open issues or no open issues found."
+              if [ "$OPEN_ISSUES_STATUS" -eq 0 ]; then
+                if [ -z "$OPEN_ISSUES_OUTPUT" ]; then
+                  OPEN_ISSUES="- No open issues found."
+                else
+                  OPEN_ISSUES="$OPEN_ISSUES_OUTPUT"
+                fi
+              else
+                OPEN_ISSUES_ERROR=$(echo "$OPEN_ISSUES_OUTPUT" | head -1)
+                OPEN_ISSUES="- Unable to access open issues: $OPEN_ISSUES_ERROR"
               fi
 
               CROSS_REPO_CONTEXT="${CROSS_REPO_CONTEXT}
@@ -337,11 +345,14 @@ jobs:
                 --label "bug,qa-review" \
                 2>/dev/null
               then
-                gh issue create \
+                if ! gh issue create \
                   --repo "$TARGET_REPO" \
                   --title "🐛 QA: Issues detected in PR #$PR_NUMBER — $PR_TITLE" \
                   --body "$CROSS_REPO_BODY" \
-                  2>/dev/null || true
+                  2>/dev/null
+                then
+                  echo "Warning: Unable to mirror QA issue to $TARGET_REPO" >&2
+                fi
               fi
             done
           fi
