@@ -55,6 +55,12 @@ qa_engineer:
   # Repository variable: QA_SEVERITY_THRESHOLD (LOW/MEDIUM/HIGH/CRITICAL)
   severity_threshold: HIGH
 
+  # Optional comma-separated owner/repo list used to pull issue context
+  # and mirror serious QA findings across repositories.
+  # Repository variable: QA_COLLAB_REPOSITORIES
+  # Example: "octo-org/frontend,octo-org/backend"
+  collaboration_repositories: ""
+
   # Labels that must exist in the repository for QA to apply them.
   # Create them under Settings → Labels before first run.
   labels:

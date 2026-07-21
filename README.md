@@ -155,6 +155,7 @@ Override defaults using GitHub repository variables
 | `AGENT_COMMUNICATION_PREFERENCES` | `{}` | JSON map of per-user communication preferences, e.g. `{\"octocat\":\"discussion\"}` |
 | `AGENT_ROUTER_DISCUSSION_CATEGORY` | `General` | Discussion category used when router notifications are posted as discussions |
 | `QA_SEVERITY_THRESHOLD` | `HIGH` | Minimum severity to open an issue |
+| `QA_COLLAB_REPOSITORIES` | _(empty)_ | Optional comma-separated `owner/repo` list for cross-repo QA issue context and mirrored serious QA issues |
 | `PM_MILESTONE_LOOKAHEAD_DAYS` | `30` | Days ahead for milestone drift detection |
 | `PO_RUN_PLAYWRIGHT` | `true` | Run Playwright tests when config is found |
 | `REFERENCE_APP_REPO` | current repository | Optional override for the `owner/repo` used for the Get Milk benchmark app |
