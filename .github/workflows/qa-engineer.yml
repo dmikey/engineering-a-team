@@ -296,14 +296,17 @@ jobs:
 
           $QA_RESPONSE"
 
-          gh issue create \
+          # Try preferred labels first; retry without labels when unavailable.
+          if ! gh issue create \
             --title "🐛 QA: Issues detected in PR #$PR_NUMBER — $PR_TITLE" \
             --body "$ISSUE_BODY" \
             --label "bug,qa-review" \
-            2>/dev/null || \
-          gh issue create \
-            --title "🐛 QA: Issues detected in PR #$PR_NUMBER — $PR_TITLE" \
-            --body "$ISSUE_BODY"
+            2>/dev/null
+          then
+            gh issue create \
+              --title "🐛 QA: Issues detected in PR #$PR_NUMBER — $PR_TITLE" \
+              --body "$ISSUE_BODY"
+          fi
 
           if [ -n "$QA_COLLAB_REPOSITORIES" ]; then
             IFS=',' read -ra RAW_REPOS <<< "$QA_COLLAB_REPOSITORIES"
@@ -317,17 +320,20 @@ jobs:
               ---
               Source repository: ${{ github.repository }}"
 
-              gh issue create \
+              # Target repositories may not have matching labels configured.
+              if ! gh issue create \
                 --repo "$TARGET_REPO" \
                 --title "🐛 QA: Issues detected in PR #$PR_NUMBER — $PR_TITLE" \
                 --body "$CROSS_REPO_BODY" \
                 --label "bug,qa-review" \
-                2>/dev/null || \
-              gh issue create \
-                --repo "$TARGET_REPO" \
-                --title "🐛 QA: Issues detected in PR #$PR_NUMBER — $PR_TITLE" \
-                --body "$CROSS_REPO_BODY" \
-                2>/dev/null || true
+                2>/dev/null
+              then
+                gh issue create \
+                  --repo "$TARGET_REPO" \
+                  --title "🐛 QA: Issues detected in PR #$PR_NUMBER — $PR_TITLE" \
+                  --body "$CROSS_REPO_BODY" \
+                  2>/dev/null || true
+              fi
             done
           fi
 
