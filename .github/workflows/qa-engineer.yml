@@ -119,6 +119,8 @@ jobs:
             for RAW_REPO in "${RAW_REPOS[@]}"; do
               TARGET_REPO=$(echo "$RAW_REPO" | xargs)
               [ -z "$TARGET_REPO" ] && continue
+              [[ "$TARGET_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || continue
+              [ "$TARGET_REPO" = "${{ github.repository }}" ] && continue
               REPO_COUNT=$((REPO_COUNT + 1))
               [ "$REPO_COUNT" -gt 3 ] && break
 
@@ -313,6 +315,7 @@ jobs:
             for RAW_REPO in "${RAW_REPOS[@]}"; do
               TARGET_REPO=$(echo "$RAW_REPO" | xargs)
               [ -z "$TARGET_REPO" ] && continue
+              [[ "$TARGET_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || continue
               [ "$TARGET_REPO" = "${{ github.repository }}" ] && continue
 
               CROSS_REPO_BODY="$ISSUE_BODY
