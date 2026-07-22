@@ -183,6 +183,9 @@ skill_development:
   # JSON map of agent names to boolean opt-in flags for reminder
   # notifications. Agents set to true receive a reminder badge in the
   # report and can be targeted by future scheduled reminder issues.
+  # The value must be a JSON object keyed by the known agent names above
+  # with true/false boolean values; invalid keys or non-boolean values
+  # are ignored.
   # Repository variable: SKILL_REMINDERS_OPT_IN
   # Example: {"Quinn (QA Engineer)": true, "Morgan (Project Manager)": false}
   skill_reminders_opt_in: "{}"

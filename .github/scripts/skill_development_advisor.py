@@ -68,6 +68,11 @@ FEW_RUNS_WARN = 3          # fewer than this → underutilisation suggestion
 
 # ── Metrics collection ────────────────────────────────────────────────────────
 
+def calculate_success_rate(total: int, failures: int) -> float:
+    """Return success rate percentage while safely handling zero runs."""
+    return ((total - failures) / total * 100.0) if total else 100.0
+
+
 def parse_ts(raw: str) -> datetime:
     return datetime.fromisoformat(raw.replace("Z", "+00:00"))
 
@@ -134,7 +139,7 @@ def generate_suggestions(
     failures = data["failures"]
     durations = data["durations"]
     avg_dur = mean(durations) if durations else 0.0
-    success_rate = ((total - failures) / total * 100.0) if total else 100.0
+    success_rate = calculate_success_rate(total, failures)
 
     if total == 0:
         suggestions.append(
@@ -205,9 +210,15 @@ def load_reminders_opt_in(raw: str) -> dict[str, bool]:
         return {}
     try:
         data = json.loads(raw)
-        return {k: bool(v) for k, v in data.items()}
-    except Exception:
+    except json.JSONDecodeError:
         return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        agent: enabled
+        for agent, enabled in data.items()
+        if agent in AGENT_SKILLS and isinstance(enabled, bool)
+    }
 
 
 # ── Markdown rendering ────────────────────────────────────────────────────────
@@ -238,7 +249,7 @@ def render_markdown(
 
         total = data["runs"]
         failures = data["failures"]
-        success_rate = ((total - failures) / total * 100.0) if total else 100.0
+        success_rate = calculate_success_rate(total, failures)
         avg_dur = mean(data["durations"]) if data["durations"] else 0.0
 
         lines += [

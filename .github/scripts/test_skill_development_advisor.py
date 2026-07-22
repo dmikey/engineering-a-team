@@ -118,6 +118,9 @@ class GenerateSuggestionsTests(unittest.TestCase):
         self.assertEqual(len(suggestions), 1)
         self.assertIn("No runs recorded", suggestions[0])
 
+    def test_zero_runs_success_rate_defaults_to_full_score(self):
+        self.assertEqual(MODULE.calculate_success_rate(0, 0), 100.0)
+
     def test_few_runs_suggests_utilisation(self):
         data = self._data(runs=2, failures=0, durations=[2.0, 2.0])
         suggestions = MODULE.generate_suggestions(
@@ -183,6 +186,20 @@ class LoadRemindersOptInTests(unittest.TestCase):
 
     def test_invalid_json_returns_empty_dict(self):
         result = MODULE.load_reminders_opt_in("not-valid-json")
+        self.assertEqual(result, {})
+
+    def test_non_object_json_returns_empty_dict(self):
+        result = MODULE.load_reminders_opt_in('["Quinn (QA Engineer)"]')
+        self.assertEqual(result, {})
+
+    def test_unknown_agents_are_ignored(self):
+        raw = json.dumps({"Unknown Agent": True, "Quinn (QA Engineer)": True})
+        result = MODULE.load_reminders_opt_in(raw)
+        self.assertEqual(result, {"Quinn (QA Engineer)": True})
+
+    def test_non_boolean_values_are_ignored(self):
+        raw = json.dumps({"Quinn (QA Engineer)": "false"})
+        result = MODULE.load_reminders_opt_in(raw)
         self.assertEqual(result, {})
 
 
