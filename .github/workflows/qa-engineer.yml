@@ -51,6 +51,7 @@ env:
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
   QA_SEVERITY_THRESHOLD: ${{ vars.QA_SEVERITY_THRESHOLD || 'HIGH' }}
+  QA_COLLAB_REPOSITORIES: ${{ vars.QA_COLLAB_REPOSITORIES || '' }}
 
 jobs:
   qa-review:
@@ -75,6 +76,7 @@ jobs:
         id: ctx
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          QA_COLLAB_REPOSITORIES: ${{ env.QA_COLLAB_REPOSITORIES }}
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             PR_NUMBER="${{ github.event.pull_request.number }}"
@@ -109,10 +111,61 @@ jobs:
             DIFF_CONTENT="N/A"
           fi
 
+          CROSS_REPO_CONTEXT="No cross-repository issue sources configured."
+          VALID_COLLAB_REPOS=""
+          if [ -n "$QA_COLLAB_REPOSITORIES" ]; then
+            CROSS_REPO_CONTEXT=""
+            REPO_COUNT=0
+            IFS=',' read -ra RAW_REPOS <<< "$QA_COLLAB_REPOSITORIES"
+            for RAW_REPO in "${RAW_REPOS[@]}"; do
+              TARGET_REPO=$(echo "$RAW_REPO" | xargs)
+              [ -z "$TARGET_REPO" ] && continue
+              [[ "$TARGET_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_-]+$ ]] || continue
+              [ "$TARGET_REPO" = "${{ github.repository }}" ] && continue
+              REPO_COUNT=$((REPO_COUNT + 1))
+              # Cap cross-repo queries to keep latency and prompt size bounded.
+              [ "$REPO_COUNT" -gt 3 ] && break
+              if [ -n "$VALID_COLLAB_REPOS" ]; then
+                VALID_COLLAB_REPOS="${VALID_COLLAB_REPOS},${TARGET_REPO}"
+              else
+                VALID_COLLAB_REPOS="${TARGET_REPO}"
+              fi
+
+              OPEN_ISSUES_OUTPUT=$(gh issue list \
+                --repo "$TARGET_REPO" \
+                --state open \
+                --limit 5 \
+                --json number,title,url \
+                --jq '.[] | "- #\(.number) \(.title) (\(.url))"' 2>&1)
+              OPEN_ISSUES_STATUS=$?
+
+              if [ "$OPEN_ISSUES_STATUS" -eq 0 ]; then
+                if [ -z "$OPEN_ISSUES_OUTPUT" ]; then
+                  OPEN_ISSUES="- No open issues found."
+                else
+                  OPEN_ISSUES="$OPEN_ISSUES_OUTPUT"
+                fi
+              else
+                OPEN_ISSUES_ERROR=$(echo "$OPEN_ISSUES_OUTPUT" | head -1)
+                OPEN_ISSUES="- Unable to access open issues: $OPEN_ISSUES_ERROR"
+              fi
+
+              CROSS_REPO_CONTEXT="${CROSS_REPO_CONTEXT}
+              Repository: ${TARGET_REPO}
+              ${OPEN_ISSUES}
+              "
+            done
+
+            if [ -z "$CROSS_REPO_CONTEXT" ]; then
+              CROSS_REPO_CONTEXT="No valid repositories provided in QA_COLLAB_REPOSITORIES."
+            fi
+          fi
+
           {
             echo "pr_number=$PR_NUMBER"
             echo "pr_title=$PR_TITLE"
             echo "pr_author=$PR_AUTHOR"
+            echo "collab_repos=$VALID_COLLAB_REPOS"
             echo "context<<QA_CTX_EOF"
             echo "## PR Information"
             echo "- Number: $PR_NUMBER"
@@ -131,6 +184,9 @@ jobs:
             echo ""
             echo "## Additional Context"
             echo "${{ inputs.extra_context }}"
+            echo ""
+            echo "## Cross-Repository Issue Context"
+            echo "$CROSS_REPO_CONTEXT"
             echo "QA_CTX_EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -245,6 +301,7 @@ jobs:
           QA_RESPONSE: ${{ steps.qa.outputs.response }}
           PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
           PR_TITLE: ${{ steps.ctx.outputs.pr_title }}
+          QA_COLLAB_REPOSITORIES: ${{ steps.ctx.outputs.collab_repos }}
         run: |
           ISSUE_BODY="## 🔍 QA Finding
 
@@ -257,14 +314,48 @@ jobs:
 
           $QA_RESPONSE"
 
-          gh issue create \
+          # Try preferred labels first; retry without labels when unavailable.
+          if ! gh issue create \
             --title "🐛 QA: Issues detected in PR #$PR_NUMBER — $PR_TITLE" \
             --body "$ISSUE_BODY" \
             --label "bug,qa-review" \
-            2>/dev/null || \
-          gh issue create \
-            --title "🐛 QA: Issues detected in PR #$PR_NUMBER — $PR_TITLE" \
-            --body "$ISSUE_BODY"
+            2>/dev/null
+          then
+            gh issue create \
+              --title "🐛 QA: Issues detected in PR #$PR_NUMBER — $PR_TITLE" \
+              --body "$ISSUE_BODY"
+          fi
+
+          if [ -n "$QA_COLLAB_REPOSITORIES" ]; then
+            IFS=',' read -ra RAW_REPOS <<< "$QA_COLLAB_REPOSITORIES"
+            for RAW_REPO in "${RAW_REPOS[@]}"; do
+              TARGET_REPO=$(echo "$RAW_REPO" | xargs)
+              [ -z "$TARGET_REPO" ] && continue
+
+              CROSS_REPO_BODY="$ISSUE_BODY
+
+              ---
+              Source repository: ${{ github.repository }}"
+
+              # Target repositories may not have matching labels configured.
+              if ! gh issue create \
+                --repo "$TARGET_REPO" \
+                --title "🐛 QA: Issues detected in PR #$PR_NUMBER — $PR_TITLE" \
+                --body "$CROSS_REPO_BODY" \
+                --label "bug,qa-review" \
+                2>/dev/null
+              then
+                if ! gh issue create \
+                  --repo "$TARGET_REPO" \
+                  --title "🐛 QA: Issues detected in PR #$PR_NUMBER — $PR_TITLE" \
+                  --body "$CROSS_REPO_BODY" \
+                  2>/dev/null
+                then
+                  echo "Warning: Unable to mirror QA issue to $TARGET_REPO" >&2
+                fi
+              fi
+            done
+          fi
 
       # ── Post issue comment for needs-qa trigger ──────────────────────────
       - name: Post comment on needs-qa issue
