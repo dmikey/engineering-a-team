@@ -119,6 +119,14 @@ def collect_metrics(
             continue
 
         data = metrics[matched_agent]
+
+        # Skip runs where every job was skipped (e.g. the workflow fired on an
+        # `issues: labeled` event but the label was not `needs-qa`).  These are
+        # expected no-ops, not agent failures, and must not inflate the failure
+        # count or distort duration averages.
+        if conclusion == "skipped":
+            continue
+
         data["runs"] += 1
         if data["last_run"] is None or created_at > data["last_run"]:
             data["last_run"] = created_at

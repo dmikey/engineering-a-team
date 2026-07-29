@@ -69,6 +69,49 @@ class CollectMetricsTests(unittest.TestCase):
         self.assertEqual(morgan["runs"], 1)
         self.assertEqual(morgan["failures"], 1)
 
+    def test_skipped_runs_are_not_counted_as_failures(self):
+        # Skipped runs arise when the workflow fires (e.g. issues: labeled) but
+        # the job condition is not met (label is not "needs-qa").  They must not
+        # inflate the failure count or the total run count.
+        runs = [
+            _make_run(
+                ".github/workflows/qa-engineer.yml",
+                "2026-07-11T10:00:00Z",
+                "2026-07-11T10:00:05Z",
+                conclusion="skipped",
+            ),
+        ]
+        metrics = MODULE.collect_metrics(runs, self.since)
+        quinn = metrics["Quinn (QA Engineer)"]
+        self.assertEqual(quinn["runs"], 0)
+        self.assertEqual(quinn["failures"], 0)
+        self.assertEqual(len(quinn["durations"]), 0)
+
+    def test_skipped_runs_do_not_affect_success_rate(self):
+        # 1 successful run + 9 skipped runs → 100% success rate, not 10%.
+        runs = [
+            _make_run(
+                ".github/workflows/qa-engineer.yml",
+                "2026-07-11T10:00:00Z",
+                "2026-07-11T10:03:00Z",
+                conclusion="success",
+            ),
+        ] + [
+            _make_run(
+                ".github/workflows/qa-engineer.yml",
+                f"2026-07-{12 + i:02d}T10:00:00Z",
+                f"2026-07-{12 + i:02d}T10:00:05Z",
+                conclusion="skipped",
+            )
+            for i in range(9)
+        ]
+        metrics = MODULE.collect_metrics(runs, self.since)
+        quinn = metrics["Quinn (QA Engineer)"]
+        self.assertEqual(quinn["runs"], 1)
+        self.assertEqual(quinn["failures"], 0)
+        success_rate = MODULE.calculate_success_rate(quinn["runs"], quinn["failures"])
+        self.assertAlmostEqual(success_rate, 100.0)
+
     def test_ignores_unknown_workflow(self):
         runs = [
             _make_run(
