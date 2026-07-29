@@ -161,6 +161,7 @@ Override defaults using GitHub repository variables
 | `REFERENCE_APP_BASE_URL` | _(empty)_ | Optional live URL for the Get Milk benchmark app |
 | `SELF_IMPROVEMENT_MODEL` | `gpt-4o-mini` | Model for self-improvement evaluation |
 | `TA_MODEL` | `gpt-4o-mini` | Model for the Task Assignment System (falls back to `PM_MODEL` then `AGENT_MODEL`) |
+| `SKILL_REMINDERS_OPT_IN` | `{}` | JSON object mapping known agent names to `true`/`false` reminder opt-ins |
 | `COPILOT_ASSIGNEE` | _(empty)_ | Optional native Copilot assignee identity |
 | `COUNCIL_DISCUSSION_CATEGORY` | `Team Decisions` | GitHub Discussion category |
 
@@ -168,6 +169,22 @@ Shared agent interaction rules are defined in
 [`/.github/collaboration-rules.md`](./.github/collaboration-rules.md). The file
 is loaded dynamically on every model call, and changes are logged by the
 **Collaboration Rules Audit** workflow.
+
+### `SKILL_REMINDERS_OPT_IN` format
+
+Set `SKILL_REMINDERS_OPT_IN` in **Settings → Secrets and variables → Variables**
+as a JSON object whose keys are agent names and whose values are booleans:
+
+```json
+{
+  "Quinn (QA Engineer)": true,
+  "Morgan (Project Manager)": false,
+  "Alex (Product Owner)": true,
+  "Casey (Council Moderator)": false
+}
+```
+
+Invalid JSON, unknown agent names, and non-boolean values are ignored.
 
 Default automation cadence is tuned for active development:
 
