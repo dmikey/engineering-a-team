@@ -2,7 +2,9 @@
 
 Analyses agent performance metrics and generates personalized skill
 development suggestions for each agent. Called by the project-manager
-workflow when the ``skill-development-suggestions`` task is selected.
+workflow when the ``skill-development-suggestions`` task is selected,
+and automatically by the skill-development-tracking workflow after each
+agent run completes.
 
 Opt-in reminders are controlled by the ``SKILL_REMINDERS_OPT_IN``
 repository variable, which holds a JSON object mapping agent names to
@@ -11,6 +13,12 @@ repository variable, which holds a JSON object mapping agent names to
     {"Quinn (QA Engineer)": true, "Morgan (Project Manager)": false}
 
 Set the variable in **Settings → Secrets and variables → Variables**.
+
+Output formats (``--output-format``):
+  report       Full Markdown skill development report (default).
+  alerts-json  JSON array of agent alert objects for agents falling below
+               performance thresholds; used by the tracking workflow to
+               create targeted Project Manager issues.
 """
 
 from __future__ import annotations
@@ -202,6 +210,117 @@ def generate_suggestions(
     return suggestions
 
 
+# ── Trend analysis ────────────────────────────────────────────────────────────
+
+def collect_trend(
+    current_metrics: dict[str, dict],
+    prior_metrics: dict[str, dict],
+) -> dict[str, dict]:
+    """Compare current and prior period metrics and return per-agent trend data.
+
+    Each entry in the returned dict contains:
+      current_rate   Success rate (%) for the current period.
+      prior_rate     Success rate (%) for the prior period.
+      delta          Difference (current − prior).
+      current_runs   Number of runs in the current period.
+      prior_runs     Number of runs in the prior period.
+      direction      ``"up"`` / ``"down"`` / ``"stable"`` based on delta.
+    """
+    trend: dict[str, dict] = {}
+    for agent in current_metrics:
+        cur = current_metrics[agent]
+        pri = prior_metrics.get(agent, {"runs": 0, "failures": 0, "durations": [], "last_run": None})
+
+        cur_rate = calculate_success_rate(cur["runs"], cur["failures"])
+        pri_rate = calculate_success_rate(pri["runs"], pri["failures"])
+        delta = cur_rate - pri_rate
+
+        if delta > 1.0:
+            direction = "up"
+        elif delta < -1.0:
+            direction = "down"
+        else:
+            direction = "stable"
+
+        trend[agent] = {
+            "current_rate": cur_rate,
+            "prior_rate": pri_rate,
+            "delta": delta,
+            "current_runs": cur["runs"],
+            "prior_runs": pri["runs"],
+            "direction": direction,
+        }
+    return trend
+
+
+# ── Alert generation ──────────────────────────────────────────────────────────
+
+def generate_alerts(
+    metrics: dict[str, dict],
+    period_days: int,
+) -> list[dict]:
+    """Return a list of alert dicts for agents with concerning performance.
+
+    Severity levels:
+      critical  Success rate below ``SUCCESS_RATE_CRIT``.
+      warning   Success rate below ``SUCCESS_RATE_WARN`` or zero runs.
+
+    Each dict in the returned list contains:
+      agent        Agent display name.
+      severity     ``"critical"`` or ``"warning"``.
+      reason       Human-readable description of the issue.
+      success_rate Current success rate (%).
+      runs         Total run count in the analysis period.
+      failures     Failure count.
+      suggestions  List of skill development suggestion strings.
+    """
+    alerts: list[dict] = []
+    for agent, data in metrics.items():
+        skills = AGENT_SKILLS.get(agent, [])
+        total = data["runs"]
+        failures = data["failures"]
+        success_rate = calculate_success_rate(total, failures)
+
+        severity: str | None = None
+        reason: str | None = None
+
+        if total == 0:
+            severity = "warning"
+            reason = (
+                f"No workflow runs recorded for **{agent}** in the last "
+                f"{period_days} days. Review trigger configuration and ensure "
+                "the agent is active."
+            )
+        elif success_rate < SUCCESS_RATE_CRIT:
+            severity = "critical"
+            reason = (
+                f"**{agent}** success rate is critically low "
+                f"({success_rate:.1f}%) — below the {SUCCESS_RATE_CRIT:.0f}% "
+                "critical threshold."
+            )
+        elif success_rate < SUCCESS_RATE_WARN:
+            severity = "warning"
+            reason = (
+                f"**{agent}** success rate ({success_rate:.1f}%) is below the "
+                f"recommended {SUCCESS_RATE_WARN:.0f}% threshold."
+            )
+
+        if severity:
+            alerts.append(
+                {
+                    "agent": agent,
+                    "severity": severity,
+                    "reason": reason,
+                    "success_rate": round(success_rate, 1),
+                    "runs": total,
+                    "failures": failures,
+                    "suggestions": generate_suggestions(agent, data, skills),
+                }
+            )
+
+    return alerts
+
+
 # ── Opt-in reminders ──────────────────────────────────────────────────────────
 
 def load_reminders_opt_in(raw: str) -> dict[str, bool]:
@@ -229,6 +348,7 @@ def render_markdown(
     current_date: str,
     period_days: int,
     workflow_url: str,
+    trend: dict[str, dict] | None = None,
 ) -> str:
     lines = [
         f"# 🎓 Cross-Agent Skill Development Report — {current_date}",
@@ -252,12 +372,25 @@ def render_markdown(
         success_rate = calculate_success_rate(total, failures)
         avg_dur = mean(data["durations"]) if data["durations"] else 0.0
 
+        # Build trend indicator when prior-period data is available
+        trend_badge = ""
+        if trend and agent in trend:
+            t = trend[agent]
+            direction = t["direction"]
+            delta = t["delta"]
+            if direction == "up":
+                trend_badge = f" | 📈 Trend: +{delta:.1f}pp vs prior period"
+            elif direction == "down":
+                trend_badge = f" | 📉 Trend: {delta:.1f}pp vs prior period"
+            else:
+                trend_badge = " | ➡️ Trend: stable vs prior period"
+
         lines += [
             f"## {agent}",
             "",
             f"**Skills**: {', '.join(f'`{s}`' for s in skills)}  ",
             f"**Runs**: {total} | **Success Rate**: {success_rate:.1f}% | "
-            f"**Avg Duration**: {avg_dur:.1f} min | {reminder_badge}",
+            f"**Avg Duration**: {avg_dur:.1f} min | {reminder_badge}{trend_badge}",
             "",
             "### Skill Development Suggestions",
             "",
@@ -295,7 +428,21 @@ def main() -> None:
     parser.add_argument(
         "--input",
         default="/tmp/agent-runs.json",
-        help="Path to workflow runs JSON payload",
+        help="Path to workflow runs JSON payload (current period)",
+    )
+    parser.add_argument(
+        "--prior-input",
+        default="",
+        help="Path to workflow runs JSON payload for the prior period (optional). "
+             "When provided, trend data is included in the report.",
+    )
+    parser.add_argument(
+        "--output-format",
+        choices=["report", "alerts-json"],
+        default="report",
+        help="Output format: 'report' prints a full Markdown report; "
+             "'alerts-json' prints a JSON array of alert objects for agents "
+             "falling below performance thresholds.",
     )
     args = parser.parse_args()
 
@@ -314,9 +461,26 @@ def main() -> None:
 
     runs = payload.get("workflow_runs", [])
     metrics = collect_metrics(runs, since)
-    reminders = load_reminders_opt_in(reminders_raw)
 
-    print(render_markdown(metrics, reminders, current_date, period_days, workflow_url))
+    # Load optional prior-period data for trend comparison
+    trend: dict[str, dict] | None = None
+    if args.prior_input:
+        try:
+            prior_since = since - timedelta(days=period_days)
+            with open(args.prior_input, encoding="utf-8") as fh:
+                prior_payload = json.load(fh)
+            prior_runs = prior_payload.get("workflow_runs", [])
+            prior_metrics = collect_metrics(prior_runs, prior_since)
+            trend = collect_trend(metrics, prior_metrics)
+        except (OSError, json.JSONDecodeError):
+            trend = None
+
+    if args.output_format == "alerts-json":
+        alerts = generate_alerts(metrics, period_days)
+        print(json.dumps(alerts, indent=2))
+    else:
+        reminders = load_reminders_opt_in(reminders_raw)
+        print(render_markdown(metrics, reminders, current_date, period_days, workflow_url, trend))
 
 
 if __name__ == "__main__":
