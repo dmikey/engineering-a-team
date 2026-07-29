@@ -255,6 +255,154 @@ class RenderMarkdownTests(unittest.TestCase):
         for agent in MODULE.AGENT_WORKFLOWS:
             self.assertIn(agent, output)
 
+    def test_trend_up_badge_shown(self):
+        metrics = self._minimal_metrics()
+        trend = {agent: {"direction": "up", "delta": 5.0} for agent in metrics}
+        output = MODULE.render_markdown(
+            metrics, {}, "2026-07-20", 30, "", trend=trend
+        )
+        self.assertIn("📈 Trend", output)
+
+    def test_trend_down_badge_shown(self):
+        metrics = self._minimal_metrics()
+        trend = {agent: {"direction": "down", "delta": -5.0} for agent in metrics}
+        output = MODULE.render_markdown(
+            metrics, {}, "2026-07-20", 30, "", trend=trend
+        )
+        self.assertIn("📉 Trend", output)
+
+    def test_trend_stable_badge_shown(self):
+        metrics = self._minimal_metrics()
+        trend = {agent: {"direction": "stable", "delta": 0.0} for agent in metrics}
+        output = MODULE.render_markdown(
+            metrics, {}, "2026-07-20", 30, "", trend=trend
+        )
+        self.assertIn("➡️ Trend", output)
+
+    def test_no_trend_badge_when_trend_none(self):
+        metrics = self._minimal_metrics()
+        output = MODULE.render_markdown(
+            metrics, {}, "2026-07-20", 30, "", trend=None
+        )
+        self.assertNotIn("📈 Trend", output)
+        self.assertNotIn("📉 Trend", output)
+        self.assertNotIn("➡️ Trend", output)
+
+
+class CollectTrendTests(unittest.TestCase):
+    def _make_metrics(self, runs, failures, durations=None):
+        return {
+            "runs": runs,
+            "failures": failures,
+            "durations": durations if durations is not None else [2.0] * runs,
+            "last_run": None,
+        }
+
+    def test_improvement_shows_up(self):
+        current = {"Quinn (QA Engineer)": self._make_metrics(10, 0)}  # 100%
+        prior = {"Quinn (QA Engineer)": self._make_metrics(10, 3)}    # 70%
+        trend = MODULE.collect_trend(current, prior)
+        self.assertEqual(trend["Quinn (QA Engineer)"]["direction"], "up")
+        self.assertGreater(trend["Quinn (QA Engineer)"]["delta"], 0)
+
+    def test_regression_shows_down(self):
+        current = {"Quinn (QA Engineer)": self._make_metrics(10, 3)}  # 70%
+        prior = {"Quinn (QA Engineer)": self._make_metrics(10, 0)}    # 100%
+        trend = MODULE.collect_trend(current, prior)
+        self.assertEqual(trend["Quinn (QA Engineer)"]["direction"], "down")
+        self.assertLess(trend["Quinn (QA Engineer)"]["delta"], 0)
+
+    def test_no_change_shows_stable(self):
+        current = {"Quinn (QA Engineer)": self._make_metrics(10, 1)}  # 90%
+        prior = {"Quinn (QA Engineer)": self._make_metrics(10, 1)}    # 90%
+        trend = MODULE.collect_trend(current, prior)
+        self.assertEqual(trend["Quinn (QA Engineer)"]["direction"], "stable")
+        self.assertAlmostEqual(trend["Quinn (QA Engineer)"]["delta"], 0.0)
+
+    def test_missing_prior_agent_treated_as_zero_runs(self):
+        current = {"Quinn (QA Engineer)": self._make_metrics(10, 0)}
+        prior = {}
+        trend = MODULE.collect_trend(current, prior)
+        # prior rate defaults to 100% (0 runs → 100%), so delta ≈ 0
+        self.assertIn("Quinn (QA Engineer)", trend)
+        self.assertAlmostEqual(trend["Quinn (QA Engineer)"]["prior_rate"], 100.0)
+
+    def test_run_counts_preserved(self):
+        current = {"Quinn (QA Engineer)": self._make_metrics(8, 0)}
+        prior = {"Quinn (QA Engineer)": self._make_metrics(5, 1)}
+        trend = MODULE.collect_trend(current, prior)
+        self.assertEqual(trend["Quinn (QA Engineer)"]["current_runs"], 8)
+        self.assertEqual(trend["Quinn (QA Engineer)"]["prior_runs"], 5)
+
+
+class GenerateAlertsTests(unittest.TestCase):
+    def _data(self, runs=10, failures=0, durations=None):
+        return {
+            "runs": runs,
+            "failures": failures,
+            "durations": durations if durations is not None else [2.0] * runs,
+            "last_run": None,
+        }
+
+    def _metrics(self, **overrides):
+        metrics = {
+            agent: self._data()
+            for agent in MODULE.AGENT_WORKFLOWS
+        }
+        metrics.update(overrides)
+        return metrics
+
+    def test_healthy_agents_produce_no_alerts(self):
+        metrics = self._metrics()
+        alerts = MODULE.generate_alerts(metrics, 30)
+        self.assertEqual(alerts, [])
+
+    def test_zero_runs_produces_warning_alert(self):
+        metrics = self._metrics(**{"Quinn (QA Engineer)": self._data(runs=0)})
+        alerts = MODULE.generate_alerts(metrics, 30)
+        quinn_alerts = [a for a in alerts if a["agent"] == "Quinn (QA Engineer)"]
+        self.assertEqual(len(quinn_alerts), 1)
+        self.assertEqual(quinn_alerts[0]["severity"], "warning")
+
+    def test_critically_low_success_rate_produces_critical_alert(self):
+        # 5 failures / 10 runs = 50% → below CRIT threshold
+        metrics = self._metrics(**{"Morgan (Project Manager)": self._data(runs=10, failures=5)})
+        alerts = MODULE.generate_alerts(metrics, 30)
+        morgan_alerts = [a for a in alerts if a["agent"] == "Morgan (Project Manager)"]
+        self.assertEqual(len(morgan_alerts), 1)
+        self.assertEqual(morgan_alerts[0]["severity"], "critical")
+
+    def test_warn_success_rate_produces_warning_alert(self):
+        # 2 failures / 10 runs = 80% → below WARN (85%) but above CRIT (70%)
+        metrics = self._metrics(**{"Alex (Product Owner)": self._data(runs=10, failures=2)})
+        alerts = MODULE.generate_alerts(metrics, 30)
+        alex_alerts = [a for a in alerts if a["agent"] == "Alex (Product Owner)"]
+        self.assertEqual(len(alex_alerts), 1)
+        self.assertEqual(alex_alerts[0]["severity"], "warning")
+
+    def test_alert_contains_required_fields(self):
+        metrics = self._metrics(**{"Quinn (QA Engineer)": self._data(runs=10, failures=5)})
+        alerts = MODULE.generate_alerts(metrics, 30)
+        self.assertEqual(len(alerts), 1)
+        alert = alerts[0]
+        for field in ("agent", "severity", "reason", "success_rate", "runs", "failures", "suggestions"):
+            self.assertIn(field, alert)
+
+    def test_alert_suggestions_are_non_empty(self):
+        metrics = self._metrics(**{"Quinn (QA Engineer)": self._data(runs=10, failures=5)})
+        alerts = MODULE.generate_alerts(metrics, 30)
+        self.assertTrue(len(alerts[0]["suggestions"]) > 0)
+
+    def test_multiple_underperforming_agents_produce_multiple_alerts(self):
+        metrics = self._metrics(
+            **{
+                "Quinn (QA Engineer)": self._data(runs=10, failures=5),
+                "Alex (Product Owner)": self._data(runs=0),
+            }
+        )
+        alerts = MODULE.generate_alerts(metrics, 30)
+        self.assertEqual(len(alerts), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

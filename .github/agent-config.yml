@@ -197,6 +197,34 @@ skill_development:
   # Example: {"Quinn (QA Engineer)": true, "Morgan (Project Manager)": false}
   skill_reminders_opt_in: "{}"
 
+# ─── Skill Development Tracking ──────────────────────────────────────────────
+
+skill_development_tracking:
+  # Automated tracking workflow that runs after every agent workflow completes
+  # and on a weekly Friday schedule. Generates trend reports and creates
+  # priority issues for agents falling below performance thresholds.
+  # Defined in .github/workflows/skill-development-tracking.yml.
+  enabled: true
+
+  # Cron schedule for the weekly skill development summary (UTC).
+  schedule: "0 15 * * 5"   # Every Friday at 15:00 UTC
+
+  # Workflows monitored for post-completion skill tracking triggers.
+  # Each workflow_run event from these workflows fires the tracker.
+  trigger_workflows:
+    - "QA Engineer Agent"
+    - "Project Manager Agent"
+    - "Product Owner Agent"
+    - "Council Discussion"
+    - "Task Assignment"
+
+  # Success-rate thresholds (%) used to classify alert severity.
+  # Agents below warn_threshold but above crit_threshold → WARNING alert.
+  # Agents below crit_threshold → CRITICAL alert.
+  # Mirror of the constants in skill_development_advisor.py.
+  warn_threshold: 85
+  crit_threshold: 70
+
 # ─── Council ─────────────────────────────────────────────────────────────────
 
 council:

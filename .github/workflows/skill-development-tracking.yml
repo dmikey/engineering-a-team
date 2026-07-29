@@ -1,0 +1,306 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Skill Development Tracking Workflow
+#
+# Automatically logs skill development progress after each agent workflow
+# completes, and generates periodic trend reports with alerts for agents
+# who are falling behind performance thresholds.
+#
+# Triggers:  workflow_run — fires when any of the main agent workflows finish
+#            schedule     — every Friday at 15:00 UTC for the weekly summary
+#            workflow_dispatch — manual execution
+#
+# Skills:    skill-development-analysis · discussion-creation · issue-creation
+#
+# Posts:
+#   • Full Markdown skill development report with trend data as a Discussion
+#     (or Issue fallback).
+#   • A labelled GitHub Issue (priority: high) for every agent whose success
+#     rate falls below the warning or critical thresholds, addressed to the
+#     Project Manager for follow-up.
+# ──────────────────────────────────────────────────────────────────────────────
+name: Skill Development Tracking
+
+on:
+  workflow_run:
+    workflows:
+      - "QA Engineer Agent"
+      - "Project Manager Agent"
+      - "Product Owner Agent"
+      - "Council Discussion"
+      - "Task Assignment"
+    types: [completed]
+  schedule:
+    # Every Friday at 15:00 UTC — weekly skill development summary
+    - cron: '0 15 * * 5'
+  workflow_dispatch:
+    inputs:
+      period_days:
+        description: 'Analysis window in days'
+        required: false
+        default: '30'
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  discussions: write
+  models: read
+
+env:
+  SD_MODEL: ${{ vars.PM_MODEL || 'gpt-4o-mini' }}
+  AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
+  AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
+
+jobs:
+  skill-development-tracking:
+    name: Morgan · Skill Development Tracking
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Gather current and prior-period workflow run data ─────────────────
+      - name: Gather workflow run data
+        id: data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PERIOD_DAYS="${{ inputs.period_days || '30' }}"
+          # Validate period input
+          if [[ ! "$PERIOD_DAYS" =~ ^[0-9]+$ ]] || [ "$PERIOD_DAYS" -lt 1 ] || [ "$PERIOD_DAYS" -gt 365 ]; then
+            PERIOD_DAYS=30
+          fi
+          echo "period_days=$PERIOD_DAYS" >> "$GITHUB_OUTPUT"
+
+          CURRENT_DATE=$(date -u +"%Y-%m-%d")
+          echo "current_date=$CURRENT_DATE" >> "$GITHUB_OUTPUT"
+
+          # Fetch up to 200 recent runs to cover current + prior periods
+          gh api "repos/${{ github.repository }}/actions/runs?per_page=100" \
+            > /tmp/sd-runs-page1.json
+          gh api "repos/${{ github.repository }}/actions/runs?per_page=100&page=2" \
+            > /tmp/sd-runs-page2.json
+          gh api "repos/${{ github.repository }}/actions/runs?per_page=100&page=3" \
+            > /tmp/sd-runs-page3.json
+
+          # Merge all pages into one runs file
+          python3 - <<'PYEOF'
+          import json
+
+          def load(path):
+              try:
+                  with open(path) as f:
+                      return json.load(f).get("workflow_runs", [])
+              except Exception:
+                  return []
+
+          combined = (
+              load("/tmp/sd-runs-page1.json")
+              + load("/tmp/sd-runs-page2.json")
+              + load("/tmp/sd-runs-page3.json")
+          )
+          with open("/tmp/sd-runs-all.json", "w") as f:
+              json.dump({"workflow_runs": combined}, f)
+          PYEOF
+
+          echo "Fetched $(python3 -c "import json; print(len(json.load(open('/tmp/sd-runs-all.json')).get('workflow_runs', [])))" 2>/dev/null || echo '?') runs"
+
+      # ── Generate skill development report with trend data ─────────────────
+      - name: Generate skill development report
+        id: report
+        env:
+          PERIOD_DAYS: ${{ steps.data.outputs.period_days }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SKILL_REMINDERS_OPT_IN: ${{ vars.SKILL_REMINDERS_OPT_IN || '{}' }}
+        run: |
+          # Generate full report with trend badges
+          # The script computes current and prior period internally when both
+          # runs files are the same (it uses PERIOD_DAYS to split the window).
+          # We pass the same merged file as --prior-input so the script can
+          # compute metrics for the prior window from the combined history.
+          python3 .github/scripts/skill_development_advisor.py \
+            --input /tmp/sd-runs-all.json \
+            --prior-input /tmp/sd-runs-all.json \
+            > /tmp/sd-report.md
+
+          {
+            echo "report<<SD_REPORT_EOF"
+            cat /tmp/sd-report.md
+            echo "SD_REPORT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── Generate alerts JSON for underperforming agents ───────────────────
+      - name: Generate skill development alerts
+        id: alerts
+        env:
+          PERIOD_DAYS: ${{ steps.data.outputs.period_days }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 .github/scripts/skill_development_advisor.py \
+            --input /tmp/sd-runs-all.json \
+            --output-format alerts-json \
+            > /tmp/sd-alerts.json
+
+          ALERT_COUNT=$(python3 -c "
+          import json
+          alerts = json.load(open('/tmp/sd-alerts.json'))
+          print(len(alerts))
+          " 2>/dev/null || echo "0")
+          echo "alert_count=$ALERT_COUNT" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "alerts_json<<SD_ALERTS_EOF"
+            cat /tmp/sd-alerts.json
+            echo "SD_ALERTS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── Post full skill development report ────────────────────────────────
+      - name: Post skill development report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT: ${{ steps.report.outputs.report }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+        run: |
+          OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
+          REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          TITLE="🎓 Skill Development Report — $CURRENT_DATE"
+
+          REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
+          DISCUSSION_CREATED=false
+
+          if [ -n "$REPO_ID" ]; then
+            CATEGORY_ID=$(gh api graphql \
+              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:20){nodes{id name}}}}' \
+              -f o="$OWNER" -f r="$REPO" \
+              --jq '.data.repository.discussionCategories.nodes[] | select(.name == "General") | .id' \
+              2>/dev/null || echo "")
+
+            if [ -z "$CATEGORY_ID" ]; then
+              CATEGORY_ID=$(gh api graphql \
+                -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+                -f o="$OWNER" -f r="$REPO" \
+                --jq '.data.repository.discussionCategories.nodes[0].id' \
+                2>/dev/null || echo "")
+            fi
+
+            if [ -n "$CATEGORY_ID" ]; then
+              DISCUSSION_URL=$(gh api graphql \
+                -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
+                -f ri="$REPO_ID" -f ci="$CATEGORY_ID" \
+                -f t="$TITLE" -f b="$REPORT" \
+                --jq '.data.createDiscussion.discussion.url' \
+                2>/dev/null || echo "")
+
+              if [ -n "$DISCUSSION_URL" ]; then
+                echo "✅ Skill development report posted as Discussion: $DISCUSSION_URL"
+                DISCUSSION_CREATED=true
+              fi
+            fi
+          fi
+
+          if [ "$DISCUSSION_CREATED" = "false" ]; then
+            gh issue create \
+              --title "$TITLE" \
+              --body "$REPORT" \
+              2>/dev/null || \
+            gh issue create \
+              --title "$TITLE" \
+              --body "$REPORT"
+            echo "✅ Skill development report posted as Issue (Discussion fallback)"
+          fi
+
+      # ── Create PM alert issues for underperforming agents ─────────────────
+      - name: Create PM alert issues for underperforming agents
+        if: steps.alerts.outputs.alert_count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ALERTS_JSON: ${{ steps.alerts.outputs.alerts_json }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+          PERIOD_DAYS: ${{ steps.data.outputs.period_days }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Ensure required labels exist before creating issues
+          gh label create "skill-development" --color "0e8a16" --force 2>/dev/null || true
+          gh label create "priority: high" --color "e4e669" --force 2>/dev/null || true
+          gh label create "priority: critical" --color "d73a4a" --force 2>/dev/null || true
+
+          python3 - <<'PYEOF'
+          import json
+          import os
+          import subprocess
+
+          raw = os.environ.get("ALERTS_JSON", "[]")
+          try:
+              alerts = json.loads(raw)
+          except json.JSONDecodeError:
+              alerts = []
+
+          current_date = os.environ.get("CURRENT_DATE", "")
+          period_days = os.environ.get("PERIOD_DAYS", "30")
+          workflow_url = os.environ.get("WORKFLOW_URL", "")
+
+          for alert in alerts:
+              agent = alert.get("agent", "Unknown")
+              severity = alert.get("severity", "warning")
+              reason = alert.get("reason", "")
+              success_rate = alert.get("success_rate", 0)
+              runs = alert.get("runs", 0)
+              failures = alert.get("failures", 0)
+              suggestions = alert.get("suggestions", [])
+
+              severity_emoji = "🚨" if severity == "critical" else "⚠️"
+              priority_label = "priority: critical" if severity == "critical" else "priority: high"
+
+              suggestions_md = "\n".join(f"{i}. {s}" for i, s in enumerate(suggestions, 1))
+
+              body = f"""{severity_emoji} **Skill Development Alert — {agent}**
+
+          > **Reported by**: Skill Development Tracking  
+          > **Date**: {current_date}  
+          > **Analysis Period**: Last {period_days} days
+
+          ## Summary
+
+          {reason}
+
+          | Metric | Value |
+          |--------|-------|
+          | Runs (last {period_days}d) | {runs} |
+          | Failures | {failures} |
+          | Success Rate | {success_rate:.1f}% |
+          | Severity | {severity.upper()} |
+
+          ## Recommended Actions
+
+          {suggestions_md}
+
+          ## Next Steps for Morgan (Project Manager)
+
+          1. Review the agent's recent workflow run logs for root-cause analysis.
+          2. Discuss skill improvement priorities with the team.
+          3. Track remediation progress in a follow-up comment on this issue.
+          4. Close this issue once the agent's success rate returns above threshold.
+
+          ---
+          *🤖 Automated alert by Skill Development Tracking · [Workflow run]({workflow_url})*"""
+
+              title = f"{severity_emoji} Skill Development Alert: {agent} — {current_date}"
+
+              labels = ["skill-development", priority_label]
+              label_args = []
+              for label in labels:
+                  label_args += ["--label", label]
+
+              result = subprocess.run(
+                  ["gh", "issue", "create", "--title", title, "--body", body] + label_args,
+                  capture_output=True,
+                  text=True,
+              )
+              if result.returncode == 0:
+                  print(f"✅ Created {severity} alert issue for {agent}: {result.stdout.strip()}")
+              else:
+                  print(f"⚠️ Could not create alert issue for {agent}: {result.stderr.strip()}")
+          PYEOF
