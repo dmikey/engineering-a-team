@@ -34,10 +34,13 @@ TAIL_LINES="${TAIL_LINES:-80}"
 
 SEQUENCE=(
   "pm:full-sprint-report"
-  "pm:groom-backlog"
-  "pm:check-milestones"
   "task-assignment:assign-tasks"
+  "pm:groom-backlog"
+  "council:"
+  "pm:check-milestones"
 )
+AUTO_MERGE_PRS="${AUTO_MERGE_PRS:-true}"
+MERGE_METHOD="${MERGE_METHOD:-squash}"
 
 usage() {
   cat <<'EOF'
@@ -63,6 +66,7 @@ Options:
   --event-pr-window-min <m>      React to PR updates newer than m minutes (default: 20)
   --waiting-run-min <m>          Treat queued/waiting runs older than m minutes as stalled (default: 15)
   --auto-ready-draft-prs <bool>  Auto-mark recent non-WIP draft PRs ready for review (true/false)
+  --auto-merge-prs <bool>        Auto-merge approved, passing PRs (default: true)
   --follow                       After start, stream daemon log in current terminal
   --tail-lines <n>               Number of log lines to show before follow (default: 80)
 
@@ -150,7 +154,7 @@ active_runner_count() {
     --workflow "$WORKFLOW_FILE" \
     --limit 30 \
     --json status \
-    --jq '[.[] | select(.status == "in_progress" or .status == "queued" or .status == "waiting")] | length' \
+    --jq '[.[] | select(.status == "in_progress")] | length' \
     2>/dev/null || echo "0"
 }
 
@@ -191,12 +195,15 @@ collect_supervisor_signals() {
   STALE_ISSUE_COUNT=0
   FAILED_ACTION_COUNT=0
   PM_RUNS_LAST_24H=0
+  COUNCIL_RUNS_LAST_24H=0
   RECENT_PR_EVENT_COUNT=0
   RECENT_PR_NUMBER=""
   RECENT_PR_IS_DRAFT=0
   RECENT_PR_TITLE=""
   WAITING_RUN_COUNT=0
   OLDEST_WAITING_MIN=0
+  UNREVIEWED_PR_NUMBER=""
+  UNREVIEWED_PR_COUNT=0
 
   pr_json="$(gh pr list --state open --limit 50 --json number,title,updatedAt,isDraft,reviewDecision 2>/dev/null || echo '[]')"
   IFS='|' read -r STALE_PR_COUNT STALE_PR_NUMBER STALE_PR_AGE_HOURS STALE_PR_TITLE <<<"$(
@@ -356,7 +363,7 @@ count = 0
 for run in runs:
     if (run.get("status") or "") != "completed":
         continue
-    if (run.get("conclusion") or "") != "failure":
+    if (run.get("conclusion") or "") not in ("failure", "startup_failure", "timed_out"):
         continue
     try:
         updated = datetime.fromisoformat(run.get("updatedAt", "").replace("Z", "+00:00"))
@@ -418,6 +425,38 @@ for run in runs:
   name = (run.get("workflowName") or "").lower()
   if "project manager" not in name:
     continue
+  if (run.get("conclusion") or "") in ("failure", "startup_failure", "timed_out", "cancelled"):
+    continue
+  try:
+    updated = datetime.fromisoformat(run.get("updatedAt", "").replace("Z", "+00:00"))
+  except Exception:
+    continue
+  age_hours = int((now - updated).total_seconds() // 3600)
+  if age_hours <= 24:
+    count += 1
+print(count)
+PYEOF
+  )"
+
+  COUNCIL_RUNS_LAST_24H="$(
+  python3 - <<'PYEOF' "$run_json"
+import json, sys
+from datetime import datetime, timezone
+
+now = datetime.now(timezone.utc)
+
+try:
+  runs = json.loads(sys.argv[1])
+except Exception:
+  runs = []
+
+count = 0
+for run in runs:
+  name = (run.get("workflowName") or "").lower()
+  if "council" not in name:
+    continue
+  if (run.get("conclusion") or "") in ("failure", "startup_failure", "timed_out", "cancelled"):
+    continue
   try:
     updated = datetime.fromisoformat(run.get("updatedAt", "").replace("Z", "+00:00"))
   except Exception:
@@ -436,6 +475,8 @@ PYEOF
   STALE_ISSUE_COUNT="$(to_int_or_zero "$STALE_ISSUE_COUNT")"
   FAILED_ACTION_COUNT="$(to_int_or_zero "$FAILED_ACTION_COUNT")"
   PM_RUNS_LAST_24H="$(to_int_or_zero "$PM_RUNS_LAST_24H")"
+  COUNCIL_RUNS_LAST_24H="$(to_int_or_zero "$COUNCIL_RUNS_LAST_24H")"
+  UNREVIEWED_PR_COUNT="$(to_int_or_zero "$UNREVIEWED_PR_COUNT")"
   RECENT_PR_EVENT_COUNT="$(to_int_or_zero "$RECENT_PR_EVENT_COUNT")"
   RECENT_PR_IS_DRAFT="$(to_int_or_zero "$RECENT_PR_IS_DRAFT")"
   WAITING_RUN_COUNT="$(to_int_or_zero "$WAITING_RUN_COUNT")"
@@ -471,6 +512,106 @@ auto_ready_recent_pr_if_needed() {
   fi
 }
 
+# Completes the PR loop on behalf of the user: reads Quinn's QA verdict from
+# PR comments, submits the formal approval, merges approved PRs, and flags
+# PRs whose QA verdict is missing or older than the latest commit.
+process_open_prs() {
+  MERGE_ACTIONS="none"
+  UNREVIEWED_PR_NUMBER=""
+  UNREVIEWED_PR_COUNT=0
+
+  local merged=()
+  local numbers
+  numbers="$(gh pr list --state open --limit 30 --json number,isDraft --jq '.[] | select(.isDraft | not) | .number' 2>/dev/null || true)"
+  [[ -z "$numbers" ]] && return 0
+
+  local pr_num pr_info verdict now_ts
+  now_ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  for pr_num in $numbers; do
+    pr_info="$(gh pr view "$pr_num" --json reviewDecision,comments,commits 2>/dev/null || echo '{}')"
+    verdict="$(
+      python3 - <<'PYEOF' "$pr_info"
+import json, re, sys
+from datetime import datetime
+
+def parse_ts(value):
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+try:
+    pr = json.loads(sys.argv[1])
+except Exception:
+    pr = {}
+
+decision = (pr.get("reviewDecision") or "").upper()
+if decision == "APPROVED":
+    print("merge")
+    raise SystemExit
+
+last_commit_ts = None
+for commit in pr.get("commits") or []:
+    ts = parse_ts(commit.get("committedDate"))
+    if ts and (last_commit_ts is None or ts > last_commit_ts):
+        last_commit_ts = ts
+
+qa_verdict = None
+qa_ts = None
+for comment in pr.get("comments") or []:
+    body = comment.get("body") or ""
+    if "QA Engineer Agent" not in body and "QA Review — PR" not in body:
+        continue
+    ts = parse_ts(comment.get("createdAt"))
+    match = re.search(r"\*\*Recommendation\*\*:\s*\[(.*?)\]", body)
+    if match and (qa_ts is None or (ts and ts > qa_ts)):
+        qa_verdict = match.group(1).upper()
+        qa_ts = ts
+
+if qa_verdict is None or (last_commit_ts and qa_ts and qa_ts < last_commit_ts):
+    print("needs_qa")
+elif "REQUEST CHANGES" in qa_verdict or "BLOCK" in qa_verdict:
+    print("wait")
+elif "APPROVE" in qa_verdict:
+    print("approve_and_merge")
+else:
+    print("needs_qa")
+PYEOF
+    )"
+
+    case "$verdict" in
+      merge|approve_and_merge)
+        if [[ "$AUTO_MERGE_PRS" != "true" ]]; then
+          continue
+        fi
+        if [[ "$verdict" == "approve_and_merge" ]]; then
+          gh pr review "$pr_num" --approve \
+            --body "Approving on behalf of the supervisor based on Quinn's QA verdict (autonomous heartbeat)." \
+            >/dev/null 2>&1 \
+            || echo "[$now_ts] Could not submit formal approval for PR #$pr_num (continuing to merge attempt)" | tee -a "$LOG_FILE"
+        fi
+        if gh pr merge "$pr_num" "--$MERGE_METHOD" --auto >/dev/null 2>&1 ||
+           gh pr merge "$pr_num" "--$MERGE_METHOD" >/dev/null 2>&1; then
+          merged+=("#$pr_num")
+          echo "[$now_ts] Auto-merge queued/completed for PR #$pr_num" | tee -a "$LOG_FILE"
+        else
+          echo "[$now_ts] Auto-merge failed for PR #$pr_num (checks or conflicts)" | tee -a "$LOG_FILE"
+        fi
+        ;;
+      needs_qa)
+        UNREVIEWED_PR_COUNT=$((UNREVIEWED_PR_COUNT + 1))
+        [[ -z "$UNREVIEWED_PR_NUMBER" ]] && UNREVIEWED_PR_NUMBER="$pr_num"
+        ;;
+      wait)
+        ;;
+    esac
+  done
+
+  if [[ ${#merged[@]} -gt 0 ]]; then
+    MERGE_ACTIONS="${merged[*]}"
+  fi
+}
+
 choose_dispatch() {
   local slot="$1"
 
@@ -479,6 +620,28 @@ choose_dispatch() {
   DISPATCH_TOPIC=""
   DISPATCH_PR_NUMBER=""
   DISPATCH_REASON=""
+
+  # 24h cadence guarantees come first so PR churn can never starve PM/council.
+  if [[ "$PM_RUNS_LAST_24H" -eq 0 ]]; then
+    DISPATCH_AGENT="pm"
+    DISPATCH_TASK="full-sprint-report"
+    DISPATCH_REASON="pm-heartbeat-missing-last24h"
+    return 0
+  fi
+
+  if [[ "$COUNCIL_RUNS_LAST_24H" -eq 0 ]]; then
+    DISPATCH_AGENT="council"
+    DISPATCH_TOPIC="Autonomous council cycle: review recent decisions, backlog priorities, and unblock in-flight work"
+    DISPATCH_REASON="council-heartbeat-missing-last24h"
+    return 0
+  fi
+
+  if [[ "$UNREVIEWED_PR_COUNT" -gt 0 ]] && [[ -n "$UNREVIEWED_PR_NUMBER" ]]; then
+    DISPATCH_AGENT="qa"
+    DISPATCH_PR_NUMBER="$UNREVIEWED_PR_NUMBER"
+    DISPATCH_REASON="unreviewed_pr=#${UNREVIEWED_PR_NUMBER} pending_reviews=${UNREVIEWED_PR_COUNT}"
+    return 0
+  fi
 
   if [[ "$RECENT_PR_EVENT_COUNT" -gt 0 ]] && [[ -n "$RECENT_PR_NUMBER" ]]; then
     DISPATCH_AGENT="qa"
@@ -498,13 +661,6 @@ choose_dispatch() {
     DISPATCH_AGENT="pm"
     DISPATCH_TASK="agent-performance-dashboard"
     DISPATCH_REASON="failed_actions=${FAILED_ACTION_COUNT} window=${ACTION_FAILURE_WINDOW_HOURS}h"
-    return 0
-  fi
-
-  if [[ "$PM_RUNS_LAST_24H" -eq 0 ]]; then
-    DISPATCH_AGENT="pm"
-    DISPATCH_TASK="full-sprint-report"
-    DISPATCH_REASON="pm-heartbeat-missing-last24h"
     return 0
   fi
 
@@ -532,6 +688,10 @@ choose_dispatch() {
   local spec="${SEQUENCE[$slot]}"
   DISPATCH_AGENT="${spec%%:*}"
   DISPATCH_TASK="${spec#*:}"
+  if [[ "$DISPATCH_AGENT" == "council" ]]; then
+    DISPATCH_TASK=""
+    DISPATCH_TOPIC="Autonomous council cycle: review product decisions and keep delivery moving"
+  fi
   DISPATCH_REASON="scheduled-rotation"
 }
 
@@ -563,6 +723,9 @@ write_heartbeat() {
     "waiting_run_count": $WAITING_RUN_COUNT,
     "oldest_waiting_min": $OLDEST_WAITING_MIN,
     "auto_ready_action": "${AUTO_READY_ACTION}",
+    "merge_actions": "${MERGE_ACTIONS:-none}",
+    "unreviewed_pr_count": $UNREVIEWED_PR_COUNT,
+    "council_runs_last_24h": $COUNCIL_RUNS_LAST_24H,
     "pm_runs_last_24h": $PM_RUNS_LAST_24H,
     "stale_pr_count": $STALE_PR_COUNT,
     "stale_pr_number": "${STALE_PR_NUMBER}",
@@ -583,6 +746,7 @@ dispatch_slot() {
 
   collect_supervisor_signals
   auto_ready_recent_pr_if_needed
+  process_open_prs
   choose_dispatch "$slot"
 
   local agent="$DISPATCH_AGENT"
@@ -680,6 +844,7 @@ start_daemon() {
     --event-pr-window-min "$event_pr_window_min" \
     --waiting-run-min "$waiting_run_min" \
     --auto-ready-draft-prs "$auto_ready_draft_prs" \
+    --auto-merge-prs "$AUTO_MERGE_PRS" \
     >> "$LOG_FILE" 2>&1 &
   local pid=$!
   echo "$pid" > "$PID_FILE"
@@ -794,6 +959,7 @@ parse_common_flags() {
   EVENT_PR_WINDOW_MIN_ARG="$EVENT_PR_WINDOW_MIN"
   WAITING_RUN_MIN_ARG="$WAITING_RUN_MIN"
   AUTO_READY_DRAFT_PRS_ARG="$AUTO_READY_DRAFT_PRS"
+  AUTO_MERGE_PRS_ARG="$AUTO_MERGE_PRS"
   FOLLOW_LOG="false"
   TAIL_LINES_ARG="$TAIL_LINES"
 
@@ -837,6 +1003,10 @@ parse_common_flags() {
         ;;
       --auto-ready-draft-prs)
         AUTO_READY_DRAFT_PRS_ARG="${2:-}"
+        shift 2
+        ;;
+      --auto-merge-prs)
+        AUTO_MERGE_PRS_ARG="${2:-}"
         shift 2
         ;;
       --follow)
@@ -907,6 +1077,14 @@ parse_common_flags() {
       ;;
   esac
 
+  case "$AUTO_MERGE_PRS_ARG" in
+    true|false) ;;
+    *)
+      echo "Error: --auto-merge-prs must be 'true' or 'false'." >&2
+      exit 1
+      ;;
+  esac
+
   if [[ ! "$TAIL_LINES_ARG" =~ ^[0-9]+$ ]] || [[ "$TAIL_LINES_ARG" -lt 1 ]]; then
     echo "Error: --tail-lines must be an integer >= 1." >&2
     exit 1
@@ -919,6 +1097,7 @@ parse_common_flags() {
   EVENT_PR_WINDOW_MIN="$EVENT_PR_WINDOW_MIN_ARG"
   WAITING_RUN_MIN="$WAITING_RUN_MIN_ARG"
   AUTO_READY_DRAFT_PRS="$AUTO_READY_DRAFT_PRS_ARG"
+  AUTO_MERGE_PRS="$AUTO_MERGE_PRS_ARG"
   TAIL_LINES="$TAIL_LINES_ARG"
 }
 

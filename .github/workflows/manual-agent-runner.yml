@@ -58,6 +58,8 @@ permissions:
   issues: write
   pull-requests: write
   discussions: write
+  models: read
+  actions: write
 
 jobs:
   run-qa:

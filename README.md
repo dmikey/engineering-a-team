@@ -148,30 +148,40 @@ Supervisor behavior per heartbeat cycle (event + time):
 2. Detects whether `MODELS_TOKEN` secret exists (falls back to `GITHUB_TOKEN` mode when absent)
 3. Checks recent PR update events (short rolling window)
 4. Optionally marks eligible draft PRs as ready for review
-5. Checks waiting/queued workflow runs
-6. Checks recent failed Actions runs
-7. Checks stale open PRs
-8. Checks stale open Discussions with no comments
-9. Checks stale open Issues
-10. Dispatches the highest-priority agent action based on those signals
+5. Auto-merges approved PRs (`--auto-merge-prs true` by default; queues auto-merge when checks are pending)
+6. Checks waiting/queued workflow runs
+7. Checks recent failed Actions runs
+8. Checks stale open PRs, Discussions, and Issues
+9. Dispatches the highest-priority agent action based on those signals
 
 Priority order:
 
-1. Recent PR event found: run `qa` for that PR
-2. Waiting/queued runs older than threshold: run `task-assignment` task `assign-tasks`
-3. Failed Actions found: run `pm` task `agent-performance-dashboard`
-4. No recent PM execution (last 24h): run `pm` task `full-sprint-report`
-5. Stale PR found: run `qa` against the oldest stale PR
-6. Stale Discussion found: run `pm` task `full-sprint-report` to drive discussion follow-through
-7. Stale Issues found: run `pm` task `groom-backlog`
-8. If nothing is stale/failing: use normal rotation schedule
+1. No PM execution in last 24h: run `pm` task `full-sprint-report` (cadence guarantee)
+2. No council execution in last 24h: run `council` with an autonomous cycle topic (cadence guarantee)
+3. PR needs QA (no verdict, or verdict older than latest commit): run `qa` for that PR
+4. Recent PR event found: run `qa` for that PR
+5. Waiting/queued runs older than threshold: run `task-assignment` task `assign-tasks`
+6. Failed Actions found: run `pm` task `agent-performance-dashboard`
+7. Stale PR found: run `qa` against the oldest stale PR
+8. Stale Discussion found: run `pm` task `full-sprint-report` to drive discussion follow-through
+9. Stale Issues found: run `pm` task `groom-backlog`
+10. If nothing is stale/failing: use normal rotation schedule
 
-Default rotation:
+Default rotation (keeps PM assigning and council cycling with no user):
 
 1. `pm` → `full-sprint-report`
-2. `pm` → `groom-backlog`
-3. `pm` → `check-milestones`
-4. `task-assignment` → `assign-tasks`
+2. `task-assignment` → `assign-tasks`
+3. `pm` → `groom-backlog`
+4. `council` → autonomous council cycle
+5. `pm` → `check-milestones`
+
+Loop-completion guarantees (the process acts on the user's behalf):
+
+- Every non-draft open PR with no QA verdict (or a verdict older than the latest commit) gets a QA dispatch
+- When Quinn's QA comment recommends APPROVE, the supervisor submits the formal PR approval and merges (squash; `--auto-merge-prs false` to disable)
+- PRs where Quinn requested changes or blocked are left open and re-QA'd after new commits
+- PM and council each run at least once every 24 hours, plus their rotation slots
+- `task-assignment` keeps issues assigned every rotation and whenever runs stall
 
 The daemon skips dispatch when `manual-agent-runner.yml` already has an active
 run, so it avoids overlapping/flooding runs.
@@ -187,7 +197,8 @@ scripts/autonomous-heartbeat.sh \
   --failure-window-hours 24 \
   --event-pr-window-min 20 \
   --waiting-run-min 15 \
-  --auto-ready-draft-prs true
+  --auto-ready-draft-prs true \
+  --auto-merge-prs true
 ```
 
 ```bash
