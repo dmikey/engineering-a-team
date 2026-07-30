@@ -73,6 +73,13 @@ SUCCESS_RATE_CRIT = 70.0   # below this → critical reliability suggestions
 SLOW_DURATION_WARN = 5.0   # above this (minutes) → efficiency suggestion
 FEW_RUNS_WARN = 3          # fewer than this → underutilisation suggestion
 
+FAILURE_CONCLUSIONS = {
+    "cancelled",
+    "failure",
+    "startup_failure",
+    "timed_out",
+}
+
 
 # ── Metrics collection ────────────────────────────────────────────────────────
 
@@ -122,7 +129,8 @@ def collect_metrics(
         data["runs"] += 1
         if data["last_run"] is None or created_at > data["last_run"]:
             data["last_run"] = created_at
-        if status == "completed" and conclusion and conclusion != "success":
+        normalized_conclusion = (conclusion or "").strip().lower()
+        if status == "completed" and normalized_conclusion in FAILURE_CONCLUSIONS:
             data["failures"] += 1
         if status == "completed" and updated_raw:
             updated_at = parse_ts(updated_raw)
