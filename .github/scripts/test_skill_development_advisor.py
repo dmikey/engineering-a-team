@@ -112,6 +112,20 @@ class CollectMetricsTests(unittest.TestCase):
         success_rate = MODULE.calculate_success_rate(quinn["runs"], quinn["failures"])
         self.assertAlmostEqual(success_rate, 100.0)
 
+    def test_action_required_run_not_counted_as_failure(self):
+        runs = [
+            _make_run(
+                ".github/workflows/qa-engineer.yml",
+                "2026-07-11T10:00:00Z",
+                "2026-07-11T10:01:00Z",
+                conclusion="action_required",
+            ),
+        ]
+        metrics = MODULE.collect_metrics(runs, self.since)
+        quinn = metrics["Quinn (QA Engineer)"]
+        self.assertEqual(quinn["runs"], 1)
+        self.assertEqual(quinn["failures"], 0)
+
     def test_ignores_unknown_workflow(self):
         runs = [
             _make_run(
