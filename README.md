@@ -91,6 +91,127 @@ to execute:
 You can still run the individual workflows directly from the Actions tab if
 you want the workflow-specific form.
 
+### 7. Run agents from your local CLI with `gh`
+
+Use the local wrapper script to dispatch `manual-agent-runner.yml` directly
+from your machine. This is useful when you need a local operator loop for
+tasks that are awkward to trigger only from cloud UI flows.
+
+Prerequisites:
+
+- `gh` installed and authenticated (`gh auth login`)
+- Execute permission on the script (already set in this repository):
+
+```bash
+chmod +x scripts/agent-cli.sh
+```
+
+Examples:
+
+```bash
+# QA review for a specific PR
+scripts/agent-cli.sh run --agent qa --pr-number 236 --extra-context "Focus on auth regressions"
+
+# PM sprint report
+scripts/agent-cli.sh run --agent pm --task full-sprint-report
+
+# Product Owner Playwright run against a live URL and wait for completion
+scripts/agent-cli.sh run --agent po --task run-playwright --base-url https://example.app --wait
+
+# Self-improvement loop against a reference repo
+scripts/agent-cli.sh run --agent self-improvement --task full-loop --reference-repo owner/get-milk
+```
+
+To see all options:
+
+```bash
+scripts/agent-cli.sh --help
+```
+
+### 8. Run local autonomous heartbeat process
+
+If you want this repo to run autonomously from your machine, start the local
+heartbeat daemon. It runs as a Scrum Master supervisor on behalf of the user,
+dispatches agent workflows, and keeps a heartbeat status file.
+
+Simplest mode (single process in your terminal):
+
+```bash
+scripts/autonomous-heartbeat.sh --interval 600
+```
+
+That one command runs continuously and heartbeats every 10 minutes.
+
+Supervisor behavior per heartbeat cycle (event + time):
+
+1. Verifies GH Models pipeline signals (`call-github-model` usage + `models: read` permission)
+2. Detects whether `MODELS_TOKEN` secret exists (falls back to `GITHUB_TOKEN` mode when absent)
+3. Checks recent PR update events (short rolling window)
+4. Optionally marks eligible draft PRs as ready for review
+5. Checks waiting/queued workflow runs
+6. Checks recent failed Actions runs
+7. Checks stale open PRs
+8. Checks stale open Discussions with no comments
+9. Checks stale open Issues
+10. Dispatches the highest-priority agent action based on those signals
+
+Priority order:
+
+1. Recent PR event found: run `qa` for that PR
+2. Waiting/queued runs older than threshold: run `task-assignment` task `assign-tasks`
+3. Failed Actions found: run `pm` task `agent-performance-dashboard`
+4. No recent PM execution (last 24h): run `pm` task `full-sprint-report`
+5. Stale PR found: run `qa` against the oldest stale PR
+6. Stale Discussion found: run `pm` task `full-sprint-report` to drive discussion follow-through
+7. Stale Issues found: run `pm` task `groom-backlog`
+8. If nothing is stale/failing: use normal rotation schedule
+
+Default rotation:
+
+1. `pm` → `full-sprint-report`
+2. `pm` → `groom-backlog`
+3. `pm` → `check-milestones`
+4. `task-assignment` → `assign-tasks`
+
+The daemon skips dispatch when `manual-agent-runner.yml` already has an active
+run, so it avoids overlapping/flooding runs.
+
+You can tune supervisor thresholds:
+
+```bash
+scripts/autonomous-heartbeat.sh \
+  --interval 600 \
+  --stale-pr-hours 24 \
+  --stale-discussion-hours 24 \
+  --stale-issue-hours 48 \
+  --failure-window-hours 24 \
+  --event-pr-window-min 20 \
+  --waiting-run-min 15 \
+  --auto-ready-draft-prs true
+```
+
+```bash
+# Start daemon in background (10-minute heartbeat)
+scripts/autonomous-heartbeat.sh start --interval 600
+
+# Check daemon state and latest heartbeat JSON
+scripts/autonomous-heartbeat.sh status
+
+# Stop daemon
+scripts/autonomous-heartbeat.sh stop
+
+# Run one immediate heartbeat cycle in foreground
+scripts/autonomous-heartbeat.sh once
+```
+
+Artifacts written locally:
+
+- PID file: `.autonomous/heartbeat.pid`
+- Log file: `.autonomous/heartbeat.log`
+- Heartbeat status: `.autonomous/heartbeat.json`
+
+Use `scripts/autonomous-heartbeat.sh --help` for all options.
+
 ---
 
 ## Slash Commands
