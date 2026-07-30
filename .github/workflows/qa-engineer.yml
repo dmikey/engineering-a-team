@@ -228,8 +228,15 @@ jobs:
             If no issues found, write "No issues found."
 
             ### Security Assessment
-            Evaluate for: injection, secret exposure, insecure deps, auth bypass,
-            OWASP Top 10. State "No security concerns" if clean.
+            Evaluate for each of the OWASP Top 10 categories relevant to these
+            changes: A01 Broken Access Control, A02 Cryptographic Failures,
+            A03 Injection (SQL/command/LDAP/XSS), A04 Insecure Design,
+            A05 Security Misconfiguration, A06 Vulnerable & Outdated Components,
+            A07 Identification & Authentication Failures, A08 Software &
+            Data Integrity Failures, A09 Security Logging & Monitoring Failures,
+            A10 Server-Side Request Forgery. Also check for: secret/token
+            exposure in code or logs, insecure dependency versions, and
+            auth bypass patterns. State "No security concerns" if clean.
 
             ### Test Coverage Gaps
             List specific missing tests with their purpose. State "Coverage looks
@@ -241,6 +248,23 @@ jobs:
             Please review the following pull request:
 
             ${{ steps.ctx.outputs.context }}
+
+      # ── Validate model response ───────────────────────────────────────────
+      - name: Validate model response
+        id: validate
+        env:
+          QA_RESPONSE: ${{ steps.qa.outputs.response }}
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          response = os.environ.get("QA_RESPONSE", "")
+          if response.startswith("⚠️"):
+              print(f"ERROR: Model call failed — {response}", file=sys.stderr)
+              sys.exit(1)
+          if not response.strip():
+              print("ERROR: Empty response received from model.", file=sys.stderr)
+              sys.exit(1)
+          PY
 
       # ── Post PR comment ──────────────────────────────────────────────────
       - name: Post review comment on PR
@@ -288,7 +312,9 @@ jobs:
           ---
           *🤖 Automated review by Quinn (QA Engineer Agent) · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
 
-          gh pr comment "$PR_NUMBER" --body "$COMMENT"
+          gh pr comment "$PR_NUMBER" --body "$COMMENT" || {
+            echo "Warning: Failed to post PR comment for PR #$PR_NUMBER — check permissions and PR state." >&2
+          }
 
       # ── Open issue for HIGH/CRITICAL findings ───────────────────────────
       - name: Open issue for serious findings
