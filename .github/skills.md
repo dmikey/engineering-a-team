@@ -49,12 +49,19 @@ REQUEST_CHANGES)
 
 ## security-scan
 
-**Description**: Evaluate code changes for common security vulnerabilities:
-injection, secrets exposure, insecure dependencies, OWASP Top 10 patterns.
+**Description**: Evaluate code changes for common security vulnerabilities
+using the full OWASP Top 10 checklist (A01–A10): Broken Access Control,
+Cryptographic Failures, Injection (SQL/command/LDAP/XSS/template),
+Insecure Design, Security Misconfiguration, Vulnerable & Outdated
+Components, Identification & Authentication Failures, Software & Data
+Integrity Failures, Security Logging & Monitoring Failures, and
+Server-Side Request Forgery. Also detects hardcoded credentials, insecure
+randomness, overly broad GitHub Actions permissions, and unsafe
+deserialisation patterns.
 
 **Inputs**: PR diff, file list  
 **Outputs**: Findings list (CRITICAL / HIGH / MEDIUM / LOW) included in
-the QA review  
+the QA review, with per-category OWASP verdict or "Not applicable"  
 **GitHub APIs**: Issues (for tracking), Code Scanning alerts API  
 **Used by**: QA Engineer
 
