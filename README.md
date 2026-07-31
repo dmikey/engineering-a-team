@@ -394,6 +394,63 @@ Default automation cadence is tuned for active development:
 See [CONFIGURATION.md](./CONFIGURATION.md) for schedule details and how to
 change them.
 
+### Clear Mergeable PRs From Linux
+
+When you want to clear the current PR backlog from a Linux shell, use the
+local runner in [scripts/auto-merge-prs.sh](./scripts/auto-merge-prs.sh):
+
+```bash
+./scripts/auto-merge-prs.sh --base main --dry-run
+./scripts/auto-merge-prs.sh --base main
+```
+
+The script uses `gh pr merge --auto --delete-branch` for every eligible,
+non-draft PR. GitHub merges immediately when allowed and enables auto-merge
+when checks are still pending. Pull requests with merge conflicts, failing
+checks, or blocking review decisions are skipped.
+
+### Run The Long-Lived Heartbeat Orchestrator
+
+If you want a local process that keeps scanning the repo, builds a decision
+queue, merges safe PRs, sends blocked PRs back to Copilot, and dispatches the
+pending agent workflows, run [scripts/heartbeat_runner.py](./scripts/heartbeat_runner.py).
+
+Start with a single dry-run heartbeat:
+
+```bash
+python3 ./scripts/heartbeat_runner.py --once --dry-run
+```
+
+Run it continuously every 5 minutes:
+
+```bash
+python3 ./scripts/heartbeat_runner.py --interval 300
+```
+
+The runner prints an in-depth overview each cycle and also writes the latest
+report plus local dedupe state under `.git/heartbeat-runner/`.
+
+For GitHub Models-backed decision inference, export a token that has the
+`models:read` scope before starting it:
+
+```bash
+export MODELS_TOKEN=YOUR_TOKEN_WITH_MODELS_READ
+python3 ./scripts/heartbeat_runner.py --interval 300
+```
+
+If you also want the runner to dispatch workflows itself from local Linux,
+export a user token that has `actions:write` before starting it:
+
+```bash
+export GH_USER_PAT=YOUR_TOKEN_WITH_ACTIONS_WRITE
+python3 ./scripts/heartbeat_runner.py --interval 300
+```
+
+Without `MODELS_TOKEN` or `GH_MODELS_TOKEN`, the runner falls back to safe
+heuristics. It will still merge clearly safe PRs, dispatch QA on pending PRs,
+route feature and planning backlog to the existing workflows, and comment on
+blocked PRs with an `@copilot` handoff.
+
 ---
 
 ## Reference Project: Get Milk

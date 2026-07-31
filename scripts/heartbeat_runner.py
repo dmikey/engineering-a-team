@@ -1,0 +1,902 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+MODELS_URL = "https://models.inference.ai.azure.com/chat/completions"
+DEFAULT_MODEL = "gpt-4o-mini"
+FAILURE_CONCLUSIONS = {
+    "action_required",
+    "cancelled",
+    "failure",
+    "startup_failure",
+    "stale",
+    "timed_out",
+}
+BLOCKING_REVIEW_DECISIONS = {"CHANGES_REQUESTED", "REVIEW_REQUIRED"}
+ACTIVE_RUN_STATUSES = {"queued", "in_progress", "waiting", "requested", "pending"}
+RELEVANT_PR_WORKFLOWS = {
+    "QA Engineer Agent",
+    "PR Compliance Checks",
+    "Copilot cloud agent",
+}
+WORKFLOW_COOLDOWNS = {
+    "qa-engineer.yml": timedelta(hours=6),
+    "task-assignment.yml": timedelta(hours=6),
+    "project-manager.yml": timedelta(hours=12),
+    "product-owner.yml": timedelta(hours=12),
+}
+AUTH_FAILURE_COOLDOWN = timedelta(hours=6)
+
+GH_COMMAND_ENV: dict[str, str] | None = None
+GH_AUTH_SOURCE = "gh-auth"
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def isoformat(dt: datetime | None = None) -> str:
+    return (dt or now_utc()).replace(microsecond=0).isoformat()
+
+
+def parse_ts(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+
+
+def run_command(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(command, capture_output=True, text=True, env=GH_COMMAND_ENV)
+    if check and result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "command failed")
+    return result
+
+
+def gh_json(args: list[str], *, default: Any = None, check: bool = True) -> Any:
+    result = run_command(["gh", *args], check=check)
+    if result.returncode != 0:
+        return default
+    text = result.stdout.strip()
+    if not text:
+        return default
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        if check:
+            raise
+        return default
+
+
+def git_dir() -> Path:
+    result = run_command(["git", "rev-parse", "--git-dir"])
+    return Path(result.stdout.strip()).resolve()
+
+
+def resolve_repo(explicit_repo: str | None) -> dict[str, str]:
+    if explicit_repo:
+        owner, name = explicit_repo.split("/", 1)
+        default_branch = gh_json(
+            ["repo", "view", explicit_repo, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"],
+            default="main",
+            check=False,
+        )
+        return {"nameWithOwner": explicit_repo, "owner": owner, "name": name, "defaultBranch": default_branch or "main"}
+
+    info = gh_json(["repo", "view", "--json", "nameWithOwner,owner,name,defaultBranchRef"])
+    return {
+        "nameWithOwner": info["nameWithOwner"],
+        "owner": info["owner"]["login"],
+        "name": info["name"],
+        "defaultBranch": info["defaultBranchRef"]["name"],
+    }
+
+
+def resolve_models_token() -> tuple[str | None, str]:
+    for env_name in ("MODELS_TOKEN", "GH_MODELS_TOKEN"):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value, env_name
+    return None, "unconfigured"
+
+
+def resolve_gh_command_env() -> tuple[dict[str, str] | None, str]:
+    for env_name in ("HEARTBEAT_GH_TOKEN", "GH_USER_PAT"):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            env = os.environ.copy()
+            env["GH_TOKEN"] = value
+            return env, env_name
+    return None, "gh-auth"
+
+
+def state_paths() -> tuple[Path, Path]:
+    base = git_dir() / "heartbeat-runner"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / "state.json", base / "overview.md"
+
+
+def load_state(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"events": {}, "heartbeats": 0}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"events": {}, "heartbeats": 0}
+
+
+def save_state(path: Path, state: dict[str, Any]) -> None:
+    path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def read_collaboration_rules(repo_root: Path) -> str:
+    rules_file = repo_root / ".github" / "collaboration-rules.md"
+    if not rules_file.is_file():
+        return ""
+    try:
+        return rules_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def call_github_model(model: str, system_prompt: str, user_prompt: str, token: str) -> tuple[bool, str]:
+    payload = {
+        "model": model,
+        "temperature": 0,
+        "max_tokens": 1200,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    }
+    request = urllib.request.Request(
+        MODELS_URL,
+        method="POST",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        return False, f"HTTP {exc.code}: {body}"
+    except urllib.error.URLError as exc:
+        return False, f"Network error: {exc}"
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return False, f"Invalid JSON: {exc}"
+
+    choices = data.get("choices") or []
+    if choices:
+        return True, choices[0].get("message", {}).get("content", "")
+
+    error = data.get("error", {})
+    return False, error.get("message", "No model choices returned")
+
+
+def fetch_open_prs(repo: str, limit: int) -> list[dict[str, Any]]:
+    base = gh_json(
+        [
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            str(limit),
+            "--json",
+            "number,title,isDraft,baseRefName,headRefName,url",
+        ],
+        default=[],
+        check=False,
+    )
+    prs: list[dict[str, Any]] = []
+    for item in base:
+        if item.get("isDraft"):
+            prs.append(item)
+            continue
+
+        detailed = None
+        for _ in range(3):
+            detailed = gh_json(
+                [
+                    "pr",
+                    "view",
+                    str(item["number"]),
+                    "--repo",
+                    repo,
+                    "--json",
+                    "number,title,body,isDraft,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,baseRefName,headRefName,url,author,statusCheckRollup",
+                ],
+                default=None,
+                check=False,
+            )
+            if detailed and detailed.get("mergeable") != "UNKNOWN":
+                break
+        prs.append(detailed or item)
+    return prs
+
+
+def fetch_open_issues(repo: str, limit: int) -> list[dict[str, Any]]:
+    return gh_json(
+        [
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            str(limit),
+            "--json",
+            "number,title,labels,assignees,body,url,createdAt,updatedAt",
+        ],
+        default=[],
+        check=False,
+    )
+
+
+def fetch_runs(repo: str, limit: int) -> list[dict[str, Any]]:
+    return gh_json(
+        [
+            "run",
+            "list",
+            "--repo",
+            repo,
+            "--limit",
+            str(limit),
+            "--json",
+            "databaseId,workflowName,status,conclusion,event,displayTitle,createdAt,headBranch,url",
+        ],
+        default=[],
+        check=False,
+    )
+
+
+def label_names(issue: dict[str, Any]) -> list[str]:
+    return [label.get("name", "") for label in issue.get("labels", [])]
+
+
+def checks_summary(pr: dict[str, Any]) -> dict[str, int]:
+    pending = 0
+    failing = 0
+    for check in pr.get("statusCheckRollup") or []:
+        status = (check.get("status") or "").upper()
+        conclusion = (check.get("conclusion") or "").upper()
+        if status == "PENDING" or not conclusion:
+            pending += 1
+        if conclusion.lower() in FAILURE_CONCLUSIONS:
+            failing += 1
+    return {"pending": pending, "failing": failing}
+
+
+def relevant_runs_for_branch(runs: list[dict[str, Any]], branch: str) -> list[dict[str, Any]]:
+    filtered = [run for run in runs if run.get("headBranch") == branch and run.get("workflowName") in RELEVANT_PR_WORKFLOWS]
+    filtered.sort(key=lambda run: run.get("createdAt", ""), reverse=True)
+    return filtered
+
+
+def workflow_failure_runs(branch_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [run for run in branch_runs if (run.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS]
+
+
+def has_recent_successful_qa(branch_runs: list[dict[str, Any]], horizon: timedelta) -> bool:
+    cutoff = now_utc() - horizon
+    for run in branch_runs:
+        if run.get("workflowName") != "QA Engineer Agent":
+            continue
+        created = parse_ts(run.get("createdAt"))
+        if created and created >= cutoff and run.get("conclusion") == "success":
+            return True
+    return False
+
+
+def fingerprint(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def state_event_recent(state: dict[str, Any], key: str, cooldown: timedelta) -> bool:
+    event = state.get("events", {}).get(key)
+    if not event:
+        return False
+    at = parse_ts(event.get("at"))
+    return bool(at and at >= now_utc() - cooldown)
+
+
+def record_event(state: dict[str, Any], key: str, payload: dict[str, Any] | None = None) -> None:
+    state.setdefault("events", {})[key] = {"at": isoformat(), "payload": payload or {}}
+
+
+def heuristic_repo_actions(snapshot: dict[str, Any], state: dict[str, Any]) -> list[dict[str, Any]]:
+    issues = snapshot["issues"]
+    runs = snapshot["runs"]
+    actions: list[dict[str, Any]] = []
+
+    unassigned = [issue for issue in issues if not issue.get("assignees")]
+    feature_issues = [issue for issue in issues if {"feature", "product-owner"}.intersection(label_names(issue))]
+    blocked_or_priority = [
+        issue
+        for issue in issues
+        if any(label.startswith("priority:") or label == "blocked" for label in label_names(issue))
+    ]
+
+    recent_runs_by_workflow: dict[str, datetime] = {}
+    for run in runs:
+        created = parse_ts(run.get("createdAt"))
+        workflow_name = run.get("workflowName") or ""
+        if created and workflow_name and workflow_name not in recent_runs_by_workflow:
+            recent_runs_by_workflow[workflow_name] = created
+
+    if unassigned and not state_event_recent(state, "dispatch:task-assignment.yml", WORKFLOW_COOLDOWNS["task-assignment.yml"]) and not state_event_recent(state, "dispatch-blocked:task-assignment.yml", AUTH_FAILURE_COOLDOWN):
+        actions.append(
+            {
+                "action": "dispatch_task_assignment",
+                "reason": f"{len(unassigned)} open issues are unassigned and need routing.",
+                "workflow": "task-assignment.yml",
+                "inputs": {
+                    "task": "assign-tasks",
+                    "extra_context": f"Heartbeat backlog routing for {len(unassigned)} unassigned issues.",
+                },
+            }
+        )
+
+    if blocked_or_priority and not state_event_recent(state, "dispatch:project-manager.yml", WORKFLOW_COOLDOWNS["project-manager.yml"]) and not state_event_recent(state, "dispatch-blocked:project-manager.yml", AUTH_FAILURE_COOLDOWN):
+        actions.append(
+            {
+                "action": "dispatch_project_manager",
+                "reason": f"{len(blocked_or_priority)} blocked or priority-tagged issues need planning attention.",
+                "workflow": "project-manager.yml",
+                "inputs": {
+                    "task": "full-sprint-report",
+                    "extra_context": f"Heartbeat escalation: {len(blocked_or_priority)} blocked/priority issues are open.",
+                },
+            }
+        )
+
+    if feature_issues and not state_event_recent(state, "dispatch:product-owner.yml", WORKFLOW_COOLDOWNS["product-owner.yml"]) and not state_event_recent(state, "dispatch-blocked:product-owner.yml", AUTH_FAILURE_COOLDOWN):
+        actions.append(
+            {
+                "action": "dispatch_product_owner",
+                "reason": f"{len(feature_issues)} feature issues are waiting for product guidance.",
+                "workflow": "product-owner.yml",
+                "inputs": {
+                    "task": "product-health-report",
+                    "extra_context": f"Heartbeat feature backlog review for {len(feature_issues)} open feature issues.",
+                },
+            }
+        )
+
+    return actions
+
+
+def heuristic_pr_decisions(snapshot: dict[str, Any], state: dict[str, Any]) -> list[dict[str, Any]]:
+    decisions: list[dict[str, Any]] = []
+    for pr in snapshot["prs"]:
+        branch_runs = relevant_runs_for_branch(snapshot["runs"], pr.get("headRefName", ""))
+        failures = workflow_failure_runs(branch_runs)
+        checks = checks_summary(pr)
+        review_decision = pr.get("reviewDecision") or ""
+        mergeable = pr.get("mergeable") or "UNKNOWN"
+        merge_state = pr.get("mergeStateStatus") or "UNKNOWN"
+
+        if pr.get("isDraft"):
+            decisions.append({"number": pr["number"], "action": "wait", "reason": "PR is still a draft."})
+            continue
+
+        if mergeable == "CONFLICTING" or merge_state == "DIRTY":
+            decisions.append({
+                "number": pr["number"],
+                "action": "send_back_to_copilot",
+                "reason": "PR has merge conflicts and must be rebased or resolved before merge.",
+            })
+            continue
+
+        if failures or checks["failing"] > 0:
+            decisions.append({
+                "number": pr["number"],
+                "action": "send_back_to_copilot",
+                "reason": "Recent QA/compliance runs or status checks are failing or require action.",
+            })
+            continue
+
+        if review_decision == "CHANGES_REQUESTED":
+            decisions.append({
+                "number": pr["number"],
+                "action": "send_back_to_copilot",
+                "reason": "A reviewer requested changes.",
+            })
+            continue
+
+        if review_decision == "REVIEW_REQUIRED":
+            decisions.append({
+                "number": pr["number"],
+                "action": "run_qa",
+                "reason": "The PR still needs review before it can merge.",
+            })
+            continue
+
+        if mergeable == "MERGEABLE" and checks["failing"] == 0:
+            decisions.append({
+                "number": pr["number"],
+                "action": "merge",
+                "reason": "PR is mergeable, non-draft, and has no blocking review or failing checks.",
+            })
+            continue
+
+        if not has_recent_successful_qa(branch_runs, timedelta(hours=6)):
+            decisions.append({
+                "number": pr["number"],
+                "action": "run_qa",
+                "reason": "No recent successful QA run was found for this branch.",
+            })
+            continue
+
+        decisions.append({
+            "number": pr["number"],
+            "action": "wait",
+            "reason": "Heartbeat could not safely advance this PR yet.",
+        })
+    return decisions
+
+
+def mergeable_guard(pr: dict[str, Any], runs: list[dict[str, Any]]) -> tuple[bool, str]:
+    branch_runs = relevant_runs_for_branch(runs, pr.get("headRefName", ""))
+    checks = checks_summary(pr)
+    if pr.get("isDraft"):
+        return False, "draft"
+    if (pr.get("mergeable") or "") != "MERGEABLE":
+        return False, f"mergeable={pr.get('mergeable', 'UNKNOWN')}"
+    if (pr.get("mergeStateStatus") or "") == "DIRTY":
+        return False, "mergeStateStatus=DIRTY"
+    if (pr.get("reviewDecision") or "") in BLOCKING_REVIEW_DECISIONS:
+        return False, f"reviewDecision={pr.get('reviewDecision')}"
+    if checks["failing"] > 0:
+        return False, f"failingChecks={checks['failing']}"
+    if workflow_failure_runs(branch_runs):
+        return False, "workflow failures present"
+    return True, "ready"
+
+
+def model_prompt(snapshot: dict[str, Any], heuristic: dict[str, Any], rules: str) -> tuple[str, str]:
+    system_prompt = "\n".join(
+        part for part in [
+            "You are Casey, the local heartbeat orchestrator for an autonomous GitHub engineering team.",
+            "You must choose only safe actions and return JSON only.",
+            "Allowed PR actions: merge, send_back_to_copilot, run_qa, wait.",
+            "Allowed repo actions: dispatch_task_assignment, dispatch_project_manager, dispatch_product_owner, wait.",
+            "Prefer merge only for non-draft PRs that are MERGEABLE, have no failing checks, and no blocking review.",
+            "Use send_back_to_copilot for merge conflicts, failing compliance, or requested changes.",
+            "Use run_qa when review is missing or stale.",
+            rules and f"Follow these collaboration rules:\n\n{rules}",
+        ] if part
+    )
+
+    condensed_prs = []
+    for pr in snapshot["prs"]:
+        branch_runs = relevant_runs_for_branch(snapshot["runs"], pr.get("headRefName", ""))[:3]
+        condensed_prs.append(
+            {
+                "number": pr.get("number"),
+                "title": pr.get("title"),
+                "isDraft": pr.get("isDraft"),
+                "mergeable": pr.get("mergeable"),
+                "mergeStateStatus": pr.get("mergeStateStatus"),
+                "reviewDecision": pr.get("reviewDecision"),
+                "checks": checks_summary(pr),
+                "recentRuns": [
+                    {
+                        "workflow": run.get("workflowName"),
+                        "status": run.get("status"),
+                        "conclusion": run.get("conclusion"),
+                    }
+                    for run in branch_runs
+                ],
+            }
+        )
+
+    condensed_issues = []
+    for issue in snapshot["issues"][:10]:
+        condensed_issues.append(
+            {
+                "number": issue.get("number"),
+                "title": issue.get("title"),
+                "labels": label_names(issue),
+                "assignees": [assignee.get("login") for assignee in issue.get("assignees", [])],
+            }
+        )
+
+    active_runs = [
+        {
+            "workflow": run.get("workflowName"),
+            "status": run.get("status"),
+            "branch": run.get("headBranch"),
+        }
+        for run in snapshot["runs"]
+        if (run.get("status") or "").lower() in ACTIVE_RUN_STATUSES
+    ][:10]
+
+    user_prompt = json.dumps(
+        {
+            "summary": {
+                "repo": snapshot["repo"]["nameWithOwner"],
+                "openPrCount": len(snapshot["prs"]),
+                "openIssueCount": len(snapshot["issues"]),
+                "activeRunCount": len(active_runs),
+            },
+            "pullRequests": condensed_prs,
+            "issues": condensed_issues,
+            "activeRuns": active_runs,
+            "heuristicPlan": heuristic,
+            "responseShape": {
+                "pull_requests": [{"number": 123, "action": "merge", "reason": "..."}],
+                "repo_actions": [{"action": "dispatch_task_assignment", "reason": "..."}],
+            },
+        },
+        indent=2,
+    )
+    return system_prompt, user_prompt
+
+
+def sanitize_model_plan(raw_text: str, heuristic: dict[str, Any]) -> dict[str, Any]:
+    try:
+        start = raw_text.index("{")
+        end = raw_text.rindex("}") + 1
+        payload = json.loads(raw_text[start:end])
+    except (ValueError, json.JSONDecodeError):
+        return heuristic
+
+    valid_pr_actions = {"merge", "send_back_to_copilot", "run_qa", "wait"}
+    valid_repo_actions = {"dispatch_task_assignment", "dispatch_project_manager", "dispatch_product_owner", "wait"}
+
+    by_number = {entry["number"]: entry for entry in heuristic["pull_requests"]}
+    final_prs: list[dict[str, Any]] = []
+    for suggested in payload.get("pull_requests", []):
+        number = suggested.get("number")
+        action = suggested.get("action")
+        if number not in by_number or action not in valid_pr_actions:
+            continue
+        final_prs.append(
+            {
+                "number": number,
+                "action": action,
+                "reason": suggested.get("reason") or by_number[number]["reason"],
+            }
+        )
+
+    existing = {entry["number"] for entry in final_prs}
+    for fallback in heuristic["pull_requests"]:
+        if fallback["number"] not in existing:
+            final_prs.append(fallback)
+
+    final_repo: list[dict[str, Any]] = []
+    fallback_actions = {entry["action"]: entry for entry in heuristic["repo_actions"]}
+    for suggested in payload.get("repo_actions", []):
+        action = suggested.get("action")
+        if action not in valid_repo_actions or action == "wait":
+            continue
+        if action not in fallback_actions:
+            continue
+        merged = dict(fallback_actions[action])
+        merged["reason"] = suggested.get("reason") or merged["reason"]
+        final_repo.append(merged)
+
+    existing_repo = {entry["action"] for entry in final_repo}
+    for fallback in heuristic["repo_actions"]:
+        if fallback["action"] not in existing_repo:
+            final_repo.append(fallback)
+
+    return {"pull_requests": final_prs, "repo_actions": final_repo}
+
+
+def build_plan(snapshot: dict[str, Any], state: dict[str, Any], repo_root: Path, model: str, models_token: str | None) -> tuple[dict[str, Any], dict[str, str]]:
+    heuristic = {
+        "pull_requests": heuristic_pr_decisions(snapshot, state),
+        "repo_actions": heuristic_repo_actions(snapshot, state),
+    }
+    meta = {"decision_source": "heuristic", "models_status": "disabled"}
+
+    if not models_token:
+        meta["models_status"] = "disabled: MODELS_TOKEN or GH_MODELS_TOKEN not set"
+        return heuristic, meta
+
+    system_prompt, user_prompt = model_prompt(snapshot, heuristic, read_collaboration_rules(repo_root))
+    ok, response = call_github_model(model, system_prompt, user_prompt, models_token)
+    if not ok:
+        meta["models_status"] = f"degraded: {response}"
+        return heuristic, meta
+
+    meta["decision_source"] = f"github-models:{model}"
+    meta["models_status"] = "ready"
+    return sanitize_model_plan(response, heuristic), meta
+
+
+def dispatch_workflow(repo: str, workflow: str, inputs: dict[str, str], dry_run: bool) -> str:
+    command = ["gh", "workflow", "run", workflow, "--repo", repo]
+    for key, value in inputs.items():
+        command.extend(["-f", f"{key}={value}"])
+    if dry_run:
+        return "DRY RUN: " + " ".join(command)
+    result = run_command(command, check=False)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"failed to dispatch {workflow}"
+        if "Resource not accessible by integration" in detail:
+            detail += " | hint: export GH_USER_PAT or HEARTBEAT_GH_TOKEN with actions:write before starting the runner"
+        raise RuntimeError(detail)
+    return result.stdout.strip() or f"Dispatched {workflow}"
+
+
+def merge_pr(repo: str, pr_number: int, dry_run: bool) -> str:
+    command = ["gh", "pr", "merge", str(pr_number), "--repo", repo, "--squash", "--auto", "--delete-branch"]
+    if dry_run:
+        return "DRY RUN: " + " ".join(command)
+    result = run_command(command, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"failed to merge PR #{pr_number}")
+    return result.stdout.strip() or f"Merged or queued PR #{pr_number}"
+
+
+def send_back_to_copilot(repo: str, pr: dict[str, Any], reason: str, dry_run: bool) -> str:
+    body = (
+        "@copilot\n\n"
+        "Heartbeat decision: this pull request needs another implementation pass before merge.\n\n"
+        f"Reason: {reason}\n\n"
+        "Please update the branch, resolve the blocking issues, and rerun the relevant checks."
+    )
+    command = ["gh", "pr", "comment", str(pr["number"]), "--repo", repo, "--body", body]
+    if dry_run:
+        return "DRY RUN: " + " ".join(command)
+    result = run_command(command, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"failed to comment on PR #{pr['number']}")
+    return result.stdout.strip() or f"Commented on PR #{pr['number']}"
+
+
+def run_qa(repo: str, pr_number: int, dry_run: bool) -> str:
+    return dispatch_workflow(
+        repo,
+        "qa-engineer.yml",
+        {
+            "pr_number": str(pr_number),
+            "extra_context": "Heartbeat-triggered QA review for a pending PR decision.",
+        },
+        dry_run,
+    )
+
+
+def execute_plan(snapshot: dict[str, Any], plan: dict[str, Any], state: dict[str, Any], repo: str, dry_run: bool, max_actions: int) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    actions_taken = 0
+    pr_by_number = {pr["number"]: pr for pr in snapshot["prs"]}
+
+    for repo_action in plan["repo_actions"]:
+        if actions_taken >= max_actions:
+            break
+        workflow = repo_action.get("workflow")
+        if not workflow:
+            continue
+        try:
+            output = dispatch_workflow(repo, workflow, repo_action.get("inputs", {}), dry_run)
+            if not dry_run:
+                record_event(state, f"dispatch:{workflow}", {"reason": repo_action.get("reason", "")})
+            results.append({"target": workflow, "action": repo_action["action"], "status": "ok", "detail": output})
+            actions_taken += 1
+        except RuntimeError as exc:
+            if "Resource not accessible by integration" in str(exc) and not dry_run:
+                record_event(state, f"dispatch-blocked:{workflow}", {"reason": str(exc)})
+            results.append({"target": workflow, "action": repo_action["action"], "status": "error", "detail": str(exc)})
+
+    for decision in plan["pull_requests"]:
+        if actions_taken >= max_actions:
+            break
+        pr = pr_by_number.get(decision["number"])
+        if not pr:
+            continue
+
+        action = decision["action"]
+        reason = decision.get("reason", "")
+
+        if action == "wait":
+            results.append({"target": f"pr#{pr['number']}", "action": action, "status": "skipped", "detail": reason})
+            continue
+
+        if action == "merge":
+            allowed, detail = mergeable_guard(pr, snapshot["runs"])
+            if not allowed:
+                results.append({"target": f"pr#{pr['number']}", "action": action, "status": "skipped", "detail": f"guard blocked merge: {detail}"})
+                continue
+            try:
+                output = merge_pr(repo, pr["number"], dry_run)
+                results.append({"target": f"pr#{pr['number']}", "action": action, "status": "ok", "detail": output})
+                actions_taken += 1
+            except RuntimeError as exc:
+                results.append({"target": f"pr#{pr['number']}", "action": action, "status": "error", "detail": str(exc)})
+            continue
+
+        if action == "run_qa":
+            event_key = f"dispatch:qa:{pr['number']}"
+            if state_event_recent(state, event_key, WORKFLOW_COOLDOWNS["qa-engineer.yml"]):
+                results.append({"target": f"pr#{pr['number']}", "action": action, "status": "skipped", "detail": "QA dispatch is still within cooldown."})
+                continue
+            try:
+                output = run_qa(repo, pr["number"], dry_run)
+                if not dry_run:
+                    record_event(state, event_key, {"reason": reason})
+                results.append({"target": f"pr#{pr['number']}", "action": action, "status": "ok", "detail": output})
+                actions_taken += 1
+            except RuntimeError as exc:
+                results.append({"target": f"pr#{pr['number']}", "action": action, "status": "error", "detail": str(exc)})
+            continue
+
+        if action == "send_back_to_copilot":
+            message_hash = fingerprint(reason)
+            event_key = f"comment:pr:{pr['number']}:{message_hash}"
+            if state_event_recent(state, event_key, timedelta(hours=12)):
+                results.append({"target": f"pr#{pr['number']}", "action": action, "status": "skipped", "detail": "Equivalent Copilot handoff was already sent recently."})
+                continue
+            try:
+                output = send_back_to_copilot(repo, pr, reason, dry_run)
+                if not dry_run:
+                    record_event(state, event_key, {"reason": reason})
+                results.append({"target": f"pr#{pr['number']}", "action": action, "status": "ok", "detail": output})
+                actions_taken += 1
+            except RuntimeError as exc:
+                results.append({"target": f"pr#{pr['number']}", "action": action, "status": "error", "detail": str(exc)})
+            continue
+
+    return results
+
+
+def render_overview(snapshot: dict[str, Any], plan: dict[str, Any], results: list[dict[str, Any]], meta: dict[str, str], interval: int, dry_run: bool) -> str:
+    prs = snapshot["prs"]
+    issues = snapshot["issues"]
+    runs = snapshot["runs"]
+    active_runs = [run for run in runs if (run.get("status") or "").lower() in ACTIVE_RUN_STATUSES]
+    action_required_runs = [run for run in runs if (run.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS]
+    non_draft = [pr for pr in prs if not pr.get("isDraft")]
+    mergeable = [pr for pr in non_draft if pr.get("mergeable") == "MERGEABLE"]
+    conflicting = [pr for pr in non_draft if pr.get("mergeable") == "CONFLICTING" or pr.get("mergeStateStatus") == "DIRTY"]
+    unassigned = [issue for issue in issues if not issue.get("assignees")]
+
+    lines = [
+        "# Heartbeat Overview",
+        "",
+        f"- Timestamp: {isoformat()}",
+        f"- Repository: {snapshot['repo']['nameWithOwner']}",
+        f"- Default branch: {snapshot['repo']['defaultBranch']}",
+        f"- Mode: {'dry-run' if dry_run else 'active'}",
+        f"- Interval seconds: {interval}",
+        f"- Decision source: {meta['decision_source']}",
+        f"- Models status: {meta['models_status']}",
+        f"- GH command auth: {meta['gh_auth_source']}",
+        "",
+        "## Queue Summary",
+        "",
+        f"- Open pull requests: {len(prs)} total, {len(non_draft)} non-draft, {len(mergeable)} mergeable, {len(conflicting)} conflicting",
+        f"- Open issues: {len(issues)} total, {len(unassigned)} unassigned",
+        f"- Workflow runs: {len(active_runs)} active, {len(action_required_runs)} recent failing/action-required",
+        "",
+        "## Pending Workflow Dispatches",
+        "",
+    ]
+
+    if plan["repo_actions"]:
+        for entry in plan["repo_actions"]:
+            lines.append(f"- {entry['action']}: {entry['reason']}")
+    else:
+        lines.append("- None")
+
+    lines.extend(["", "## Pull Request Decision Queue", ""])
+    if plan["pull_requests"]:
+        for decision in plan["pull_requests"]:
+            pr = next((candidate for candidate in prs if candidate.get("number") == decision["number"]), None)
+            if not pr:
+                continue
+            checks = checks_summary(pr)
+            lines.append(
+                f"- PR #{pr['number']} {pr.get('title', '')} | action={decision['action']} | mergeable={pr.get('mergeable', 'UNKNOWN')} | review={pr.get('reviewDecision', '') or 'none'} | checks(pending={checks['pending']}, failing={checks['failing']})"
+            )
+            lines.append(f"  reason: {decision['reason']}")
+    else:
+        lines.append("- None")
+
+    lines.extend(["", "## Active Workflow Pressure", ""])
+    if active_runs:
+        for run in active_runs[:10]:
+            lines.append(f"- {run.get('workflowName')} | {run.get('status')} | branch={run.get('headBranch')} | {run.get('url')}")
+    else:
+        lines.append("- No queued or in-progress workflow runs.")
+
+    lines.extend(["", "## Actions This Heartbeat", ""])
+    if results:
+        for result in results:
+            lines.append(f"- {result['target']} | {result['action']} | {result['status']} | {result['detail']}")
+    else:
+        lines.append("- No actions executed.")
+
+    return "\n".join(lines) + "\n"
+
+
+def heartbeat(repo_root: Path, repo_info: dict[str, str], args: argparse.Namespace, state: dict[str, Any], state_file: Path, overview_file: Path) -> int:
+    snapshot = {
+        "repo": repo_info,
+        "prs": fetch_open_prs(repo_info["nameWithOwner"], args.pr_limit),
+        "issues": fetch_open_issues(repo_info["nameWithOwner"], args.issue_limit),
+        "runs": fetch_runs(repo_info["nameWithOwner"], args.run_limit),
+    }
+    models_token, token_source = resolve_models_token()
+    plan, meta = build_plan(snapshot, state, repo_root, args.model, models_token)
+    if meta["models_status"] == "ready":
+        meta["models_status"] = f"ready via {token_source}"
+    meta["gh_auth_source"] = GH_AUTH_SOURCE
+    results = execute_plan(snapshot, plan, state, repo_info["nameWithOwner"], args.dry_run, args.max_actions)
+    state["heartbeats"] = int(state.get("heartbeats", 0)) + 1
+    state["last_heartbeat_at"] = isoformat()
+    save_state(state_file, state)
+
+    overview = render_overview(snapshot, plan, results, meta, args.interval, args.dry_run)
+    overview_file.write_text(overview, encoding="utf-8")
+    print(overview, end="")
+    return sum(1 for result in results if result["status"] == "error")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Long-running GitHub heartbeat runner for PR decisions and workflow dispatch.")
+    parser.add_argument("--repo", help="Target repository in owner/repo format. Defaults to the current gh repo.")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"GitHub Models identifier. Default: {DEFAULT_MODEL}")
+    parser.add_argument("--interval", type=int, default=300, help="Heartbeat interval in seconds. Default: 300")
+    parser.add_argument("--pr-limit", type=int, default=30, help="Number of open PRs to inspect per heartbeat. Default: 30")
+    parser.add_argument("--issue-limit", type=int, default=50, help="Number of open issues to inspect per heartbeat. Default: 50")
+    parser.add_argument("--run-limit", type=int, default=100, help="Number of recent workflow runs to inspect per heartbeat. Default: 100")
+    parser.add_argument("--max-actions", type=int, default=25, help="Maximum actions to execute per heartbeat. Default: 25")
+    parser.add_argument("--dry-run", action="store_true", help="Compute and print the queue without mutating GitHub state.")
+    parser.add_argument("--once", action="store_true", help="Run a single heartbeat instead of looping forever.")
+    return parser.parse_args()
+
+
+def main() -> int:
+    global GH_AUTH_SOURCE, GH_COMMAND_ENV
+
+    args = parse_args()
+    repo_root = Path.cwd()
+    state_file, overview_file = state_paths()
+    state = load_state(state_file)
+    repo_info = resolve_repo(args.repo)
+    GH_COMMAND_ENV, GH_AUTH_SOURCE = resolve_gh_command_env()
+
+    try:
+        if args.once:
+            return heartbeat(repo_root, repo_info, args, state, state_file, overview_file)
+
+        while True:
+            errors = heartbeat(repo_root, repo_info, args, state, state_file, overview_file)
+            if errors:
+                print(f"Heartbeat completed with {errors} action errors. Sleeping until next interval.", file=sys.stderr)
+            time.sleep(max(args.interval, 5))
+    except KeyboardInterrupt:
+        print("\nHeartbeat runner stopped.")
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
