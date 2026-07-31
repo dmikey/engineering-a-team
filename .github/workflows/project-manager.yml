@@ -49,6 +49,16 @@ on:
           - avg-duration
           - last-run
         default: success-rate
+      filter_agent:
+        description: 'Filter dashboard to a specific agent (used by agent-performance-dashboard)'
+        type: choice
+        options:
+          - all
+          - Quinn (QA Engineer)
+          - Morgan (Project Manager)
+          - Alex (Product Owner)
+          - Casey (Council Moderator)
+        default: all
   workflow_call:
     inputs:
       task:
@@ -65,6 +75,11 @@ on:
         description: 'Dashboard sort metric'
         required: false
         default: success-rate
+      filter_agent:
+        type: string
+        description: 'Filter dashboard to a specific agent (empty or "all" = no filter)'
+        required: false
+        default: 'all'
       extra_context:
         type: string
         description: 'Additional context for the PM'
@@ -130,6 +145,12 @@ jobs:
           echo "task=$TASK" >> "$GITHUB_OUTPUT"
           echo "metrics_period_days=$PERIOD_INPUT" >> "$GITHUB_OUTPUT"
           echo "metrics_sort_by=$SORT_INPUT" >> "$GITHUB_OUTPUT"
+
+          FILTER_AGENT_INPUT="${{ inputs.filter_agent || '' }}"
+          if [ -z "$FILTER_AGENT_INPUT" ] || [ "$FILTER_AGENT_INPUT" = "all" ]; then
+            FILTER_AGENT_INPUT=$(echo "$EXTRA_CONTEXT" | sed -nE 's/.*filter=([^[:space:]]+).*/\1/p' | head -n1)
+          fi
+          echo "filter_agent=$FILTER_AGENT_INPUT" >> "$GITHUB_OUTPUT"
 
           # Open issues (up to 100, sorted by created date)
           ISSUES=$(gh issue list \
@@ -450,14 +471,16 @@ jobs:
                   print(dispatch.stdout.strip())
           PYEOF
 
-      # ── Post agent performance dashboard ──────────────────────────────────
-      - name: Compose and post agent performance dashboard
+      # ── Collect agent performance metrics ────────────────────────────────
+      - name: Collect agent performance metrics
+        id: perf-metrics
         if: steps.data.outputs.task == 'agent-performance-dashboard'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CURRENT_DATE: ${{ steps.data.outputs.current_date }}
           PERIOD_DAYS: ${{ steps.data.outputs.metrics_period_days }}
           SORT_BY: ${{ steps.data.outputs.metrics_sort_by }}
+          FILTER_AGENT: ${{ steps.data.outputs.filter_agent }}
           WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if ! gh api "repos/${{ github.repository }}/actions/runs?per_page=100" > /tmp/agent-runs.json; then
@@ -467,7 +490,72 @@ jobs:
 
           python3 .github/scripts/agent_performance_dashboard.py --input /tmp/agent-runs.json > /tmp/agent-dashboard.md
 
-          REPORT=$(cat /tmp/agent-dashboard.md)
+          {
+            echo "metrics_table<<PERF_METRICS_EOF"
+            cat /tmp/agent-dashboard.md
+            echo "PERF_METRICS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── AI insights on performance data ───────────────────────────────────
+      - name: Morgan — performance insights and recommendations
+        id: perf-insights
+        if: steps.data.outputs.task == 'agent-performance-dashboard'
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.PM_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Morgan, an experienced engineering Project Manager analysing
+            agent performance metrics for an autonomous AI engineering team.
+
+            Your job is to provide PERFORMANCE INSIGHTS AND RECOMMENDATIONS:
+            - Identify agents with high failure rates and recommend specific improvements
+            - Identify agents with low activity and assess whether to increase or decrease usage
+            - Spot positive trends and call them out with concrete praise
+            - Provide actionable, prioritised recommendations
+
+            Format your response EXACTLY as:
+
+            ## 💡 Insights & Recommendations
+
+            ### Performance Summary
+            One paragraph summarising the overall agent team performance health.
+
+            ### Agent-Specific Insights
+            For each agent in the data, one bullet with their status and a brief note:
+            - [✅ HEALTHY | ⚠️ ATTENTION | 🔴 ACTION REQUIRED] **Agent Name**: insight
+
+            ### Recommendations
+            Up to 5 concrete, prioritised next steps (numbered list). Be specific
+            about which agent and what action to take.
+
+            ### Trend Analysis
+            One short paragraph on what is improving, what is declining, and what to watch.
+          user-prompt: |
+            Please analyse this agent performance data and provide insights and recommendations:
+
+            ${{ steps.perf-metrics.outputs.metrics_table }}
+
+      # ── Post combined performance dashboard ───────────────────────────────
+      - name: Post agent performance dashboard
+        if: steps.data.outputs.task == 'agent-performance-dashboard'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+          INSIGHTS: ${{ steps.perf-insights.outputs.response }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          METRICS=$(cat /tmp/agent-dashboard.md)
+          if [ -n "$INSIGHTS" ] && [[ "$INSIGHTS" != "⚠️"* ]]; then
+            REPORT="${METRICS}
+
+${INSIGHTS}"
+          else
+            REPORT="$METRICS"
+          fi
+
           OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
           REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
           REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
