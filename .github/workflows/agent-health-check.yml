@@ -1,0 +1,341 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Agent Health Check
+#
+# Monitors all registered agents by inspecting recent workflow run history,
+# computing per-agent health metrics, and posting a health dashboard.
+# Creates labelled alert issues for any agent that is DEGRADED, CRITICAL,
+# or INACTIVE so the team can act before problems escalate.
+#
+# Triggers:  schedule (every 6 hours)
+#            workflow_dispatch
+#            workflow_call
+#
+# Skills:    agent-health-monitoring · issue-creation · discussion-creation
+#
+# Posts:
+#   • Full Markdown health dashboard as a GitHub Discussion (or Issue fallback).
+#   • A labelled GitHub Issue for every non-healthy agent.
+# ──────────────────────────────────────────────────────────────────────────────
+name: Agent Health Check
+
+on:
+  schedule:
+    # Every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      period_hours:
+        description: 'Analysis window in hours (default: 24)'
+        required: false
+        default: '24'
+      warn_threshold:
+        description: 'Success-rate % below which an agent is DEGRADED (default: 85)'
+        required: false
+        default: '85'
+      crit_threshold:
+        description: 'Success-rate % below which an agent is CRITICAL (default: 70)'
+        required: false
+        default: '70'
+  workflow_call:
+    inputs:
+      period_hours:
+        type: string
+        description: 'Analysis window in hours'
+        default: '24'
+      warn_threshold:
+        type: string
+        description: 'Success-rate % DEGRADED threshold'
+        default: '85'
+      crit_threshold:
+        type: string
+        description: 'Success-rate % CRITICAL threshold'
+        default: '70'
+    secrets:
+      MODELS_TOKEN:
+        required: false
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  discussions: write
+  models: read
+
+env:
+  HEALTH_MODEL: ${{ vars.HEALTH_MODEL || vars.AGENT_MODEL || 'gpt-4o-mini' }}
+  AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
+  AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
+  HEALTH_WARN_THRESHOLD: ${{ inputs.warn_threshold || vars.HEALTH_WARN_THRESHOLD || '85' }}
+  HEALTH_CRIT_THRESHOLD: ${{ inputs.crit_threshold || vars.HEALTH_CRIT_THRESHOLD || '70' }}
+  HEALTH_INACTIVITY_HOURS: ${{ vars.HEALTH_INACTIVITY_HOURS || '48' }}
+
+jobs:
+  health-check:
+    name: Agent Health Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Gather recent workflow run data ───────────────────────────────────
+      - name: Gather workflow run data
+        id: data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PERIOD_HOURS="${{ inputs.period_hours || '24' }}"
+          # Validate and clamp input
+          if [[ ! "$PERIOD_HOURS" =~ ^[0-9]+$ ]] || [ "$PERIOD_HOURS" -lt 1 ] || [ "$PERIOD_HOURS" -gt 720 ]; then
+            PERIOD_HOURS=24
+          fi
+          echo "period_hours=$PERIOD_HOURS" >> "$GITHUB_OUTPUT"
+
+          CURRENT_DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
+          echo "current_date=$CURRENT_DATE" >> "$GITHUB_OUTPUT"
+
+          # Fetch recent runs — three pages to capture enough history
+          gh api "repos/${{ github.repository }}/actions/runs?per_page=100" \
+            > /tmp/health-runs-page1.json
+          gh api "repos/${{ github.repository }}/actions/runs?per_page=100&page=2" \
+            > /tmp/health-runs-page2.json
+          gh api "repos/${{ github.repository }}/actions/runs?per_page=100&page=3" \
+            > /tmp/health-runs-page3.json
+
+          # Merge pages
+          python3 - <<'PYEOF'
+          import json
+
+          def load(path):
+              try:
+                  with open(path) as f:
+                      return json.load(f).get("workflow_runs", [])
+              except Exception:
+                  return []
+
+          combined = (
+              load("/tmp/health-runs-page1.json")
+              + load("/tmp/health-runs-page2.json")
+              + load("/tmp/health-runs-page3.json")
+          )
+          with open("/tmp/health-runs-all.json", "w") as f:
+              json.dump({"workflow_runs": combined}, f)
+          PYEOF
+
+          RUN_COUNT=$(python3 -c "
+          import json
+          print(len(json.load(open('/tmp/health-runs-all.json')).get('workflow_runs', [])))
+          " 2>/dev/null || echo "?")
+          echo "Fetched ${RUN_COUNT} workflow runs for health analysis"
+
+      # ── Generate health dashboard ─────────────────────────────────────────
+      - name: Generate health dashboard
+        id: report
+        env:
+          PERIOD_HOURS: ${{ steps.data.outputs.period_hours }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+          HEALTH_WARN_THRESHOLD: ${{ env.HEALTH_WARN_THRESHOLD }}
+          HEALTH_CRIT_THRESHOLD: ${{ env.HEALTH_CRIT_THRESHOLD }}
+          HEALTH_INACTIVITY_HOURS: ${{ env.HEALTH_INACTIVITY_HOURS }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 .github/scripts/agent_health_check.py \
+            --input /tmp/health-runs-all.json \
+            --output-format report \
+            > /tmp/health-report.md
+
+          {
+            echo "report<<HEALTH_REPORT_EOF"
+            cat /tmp/health-report.md
+            echo "HEALTH_REPORT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── Generate alerts JSON ──────────────────────────────────────────────
+      - name: Generate health alerts
+        id: alerts
+        env:
+          PERIOD_HOURS: ${{ steps.data.outputs.period_hours }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+          HEALTH_WARN_THRESHOLD: ${{ env.HEALTH_WARN_THRESHOLD }}
+          HEALTH_CRIT_THRESHOLD: ${{ env.HEALTH_CRIT_THRESHOLD }}
+          HEALTH_INACTIVITY_HOURS: ${{ env.HEALTH_INACTIVITY_HOURS }}
+        run: |
+          python3 .github/scripts/agent_health_check.py \
+            --input /tmp/health-runs-all.json \
+            --output-format alerts-json \
+            > /tmp/health-alerts.json
+
+          ALERT_COUNT=$(python3 -c "
+          import json
+          print(len(json.load(open('/tmp/health-alerts.json'))))
+          " 2>/dev/null || echo "0")
+          echo "alert_count=$ALERT_COUNT" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "alerts_json<<HEALTH_ALERTS_EOF"
+            cat /tmp/health-alerts.json
+            echo "HEALTH_ALERTS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── Post health dashboard as Discussion (or Issue fallback) ───────────
+      - name: Post health dashboard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT: ${{ steps.report.outputs.report }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+        run: |
+          OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
+          REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          TITLE="🏥 Agent Health Check — $CURRENT_DATE"
+
+          REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
+          DISCUSSION_CREATED=false
+
+          if [ -n "$REPO_ID" ]; then
+            # Try "General" category first, fall back to first available
+            CATEGORY_ID=$(gh api graphql \
+              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:20){nodes{id name}}}}' \
+              -f o="$OWNER" -f r="$REPO" \
+              --jq '.data.repository.discussionCategories.nodes[] | select(.name == "General") | .id' \
+              2>/dev/null || echo "")
+
+            if [ -z "$CATEGORY_ID" ]; then
+              CATEGORY_ID=$(gh api graphql \
+                -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+                -f o="$OWNER" -f r="$REPO" \
+                --jq '.data.repository.discussionCategories.nodes[0].id' \
+                2>/dev/null || echo "")
+            fi
+
+            if [ -n "$CATEGORY_ID" ]; then
+              DISCUSSION_URL=$(gh api graphql \
+                -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
+                -f ri="$REPO_ID" -f ci="$CATEGORY_ID" \
+                -f t="$TITLE" -f b="$REPORT" \
+                --jq '.data.createDiscussion.discussion.url' \
+                2>/dev/null || echo "")
+
+              if [ -n "$DISCUSSION_URL" ]; then
+                echo "✅ Health dashboard posted as Discussion: $DISCUSSION_URL"
+                DISCUSSION_CREATED=true
+              fi
+            fi
+          fi
+
+          if [ "$DISCUSSION_CREATED" = "false" ]; then
+            gh label create "agent-health" --color "0075ca" --force 2>/dev/null || true
+            ISSUE_URL=$(gh issue create \
+              --title "$TITLE" \
+              --body "$REPORT" \
+              --label "agent-health" \
+              2>/dev/null || echo "")
+            if [ -n "$ISSUE_URL" ]; then
+              echo "✅ Health dashboard posted as Issue: $ISSUE_URL"
+            else
+              echo "⚠️ Could not post health dashboard"
+            fi
+          fi
+
+      # ── Open alert issues for non-healthy agents ──────────────────────────
+      - name: Open alert issues
+        if: steps.alerts.outputs.alert_count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ALERTS_JSON: ${{ steps.alerts.outputs.alerts_json }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create "agent-health" --color "0075ca" --force 2>/dev/null || true
+          gh label create "agent-alert" --color "e4e669" --force 2>/dev/null || true
+
+          python3 - <<'PYEOF'
+          import json, os, subprocess, sys
+
+          alerts_json = os.environ.get("ALERTS_JSON", "[]")
+          current_date = os.environ.get("CURRENT_DATE", "")
+          workflow_url = os.environ.get("WORKFLOW_URL", "")
+
+          try:
+              alerts = json.loads(alerts_json)
+          except json.JSONDecodeError:
+              print("⚠️ Could not parse alerts JSON — skipping alert issue creation")
+              sys.exit(0)
+
+          severity_label = {
+              "critical": "priority: critical",
+              "high":     "priority: high",
+              "medium":   "priority: medium",
+          }
+
+          for alert in alerts:
+              agent   = alert.get("agent", "Unknown Agent")
+              status  = alert.get("status", "UNKNOWN")
+              sev     = alert.get("severity", "medium")
+              title   = alert.get("title", f"Agent Health Alert: {agent}")
+              desc    = alert.get("description", "")
+              rate    = alert.get("success_rate", 0)
+              runs    = alert.get("runs", 0)
+              fails   = alert.get("failures", 0)
+              last    = alert.get("last_run", "Unknown")
+
+              body = "\n".join([
+                  f"## {title}",
+                  "",
+                  f"> **Status**: {status}  ",
+                  f"> **Detected**: {current_date}",
+                  "",
+                  "### Details",
+                  "",
+                  desc,
+                  "",
+                  "### Metrics",
+                  "",
+                  "| Metric | Value |",
+                  "|--------|-------|",
+                  f"| Agent | {agent} |",
+                  f"| Health Status | {status} |",
+                  f"| Success Rate | {rate}% |",
+                  f"| Total Runs | {runs} |",
+                  f"| Failures | {fails} |",
+                  f"| Last Run | {last} |",
+                  "",
+                  "### Recommended Actions",
+                  "",
+                  "1. Check the [workflow run logs]({}) for recent failures.".format(workflow_url),
+                  "2. Review agent configuration and trigger conditions.",
+                  "3. Verify `MODELS_TOKEN` and other required secrets are set.",
+                  "4. If the agent is INACTIVE, confirm its schedule trigger is correct.",
+                  "",
+                  "---",
+                  f"*🤖 Automated alert by Agent Health Check · [Workflow run]({workflow_url})*",
+              ])
+
+              labels = ["agent-health", "agent-alert"]
+              pri = severity_label.get(sev)
+              if pri:
+                  labels.append(pri)
+
+              label_args = []
+              for lbl in labels:
+                  label_args += ["--label", lbl]
+
+              result = subprocess.run(
+                  ["gh", "issue", "create", "--title", title, "--body", body] + label_args,
+                  capture_output=True, text=True
+              )
+              if result.returncode == 0:
+                  print(f"✅ Alert issue created for {agent}: {result.stdout.strip()}")
+              else:
+                  print(f"⚠️ Failed to create alert issue for {agent}: {result.stderr.strip()}")
+          PYEOF
+
+      # ── Summary ───────────────────────────────────────────────────────────
+      - name: Health check summary
+        env:
+          ALERT_COUNT: ${{ steps.alerts.outputs.alert_count }}
+        run: |
+          if [ "$ALERT_COUNT" = "0" ]; then
+            echo "✅ All agents are healthy — no alerts generated."
+          else
+            echo "⚠️ Health check complete — $ALERT_COUNT alert(s) generated and posted as issues."
+          fi

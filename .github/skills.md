@@ -249,6 +249,23 @@ GraphQL `createDiscussion`, `POST /repos/{owner}/{repo}/issues`
 
 ---
 
+## agent-health-monitoring
+
+**Description**: Collect recent workflow run history for every registered
+agent, compute health metrics (success rate, failure count, average duration,
+time since last run), and classify each agent as HEALTHY, DEGRADED, CRITICAL,
+or INACTIVE.  Publishes a full health dashboard and emits structured alert
+objects for downstream issue creation.
+
+**Inputs**: Workflow runs JSON (last N hours), configurable success-rate and
+inactivity thresholds  
+**Outputs**: Markdown health dashboard; JSON alert array; JSON status map  
+**GitHub APIs**: `GET /repos/{owner}/{repo}/actions/runs`,
+GraphQL `createDiscussion`, `POST /repos/{owner}/{repo}/issues`  
+**Used by**: Agent Health Monitor
+
+---
+
 ## Adding a New Skill
 
 1. Add an entry to this file with the required fields:
