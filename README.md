@@ -144,6 +144,13 @@ That one command runs continuously and heartbeats every 10 minutes. The local
 supervisor makes orchestration, prioritization, merge, and throttle decisions;
 GitHub Actions executes the selected agent workflow using GitHub Models.
 
+For 24/7 operation on macOS, install the user LaunchAgent instead. It starts at
+login and `launchd` restarts it if the process exits:
+
+```bash
+scripts/autonomous-heartbeat.sh install-service --interval 600
+```
+
 Supervisor behavior per heartbeat cycle (event + time):
 
 1. Verifies GH Models pipeline signals (`call-github-model` usage + `models: read` permission)
@@ -196,6 +203,7 @@ Local rate controls prevent an unchanged signal from producing unbounded runs:
 - 30-minute cooldown for identical agent/task/PR decisions
 - 60-minute cooldown between merge attempts for the same PR
 - Only one Manual Agent Runner may be in progress
+- When no delivery run or PR exists, one continuity action may exceed the general hourly budget; cooldown and concurrency limits still apply
 - Throttle state survives daemon restarts in `.autonomous/action-state.tsv`
 - Every selected, throttled, and merge decision is recorded in `.autonomous/decisions.tsv`
 
@@ -229,6 +237,9 @@ scripts/autonomous-heartbeat.sh status
 
 # Stop daemon
 scripts/autonomous-heartbeat.sh stop
+
+# Remove the persistent macOS service
+scripts/autonomous-heartbeat.sh uninstall-service
 
 # Run one immediate heartbeat cycle in foreground
 scripts/autonomous-heartbeat.sh once

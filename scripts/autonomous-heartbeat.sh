@@ -418,7 +418,7 @@ PYEOF
   )"
 
   run_json="$(gh run list --limit 80 --json workflowName,conclusion,updatedAt,status,createdAt 2>/dev/null || echo '[]')"
-  ACTIVE_WORK_RUN_COUNT="$(python3 -c 'import json,sys; names=("manual agent runner", "assign top priority agent"); print(sum(1 for r in json.loads(sys.argv[1]) if r.get("status") in ("in_progress", "queued", "waiting", "requested", "pending") and (r.get("workflowName") or "").lower() in names))' "$run_json" 2>/dev/null || echo 0)"
+  ACTIVE_WORK_RUN_COUNT="$(python3 -c 'import json,sys; names=("manual agent runner", "assign top priority agent", "copilot cloud agent"); print(sum(1 for r in json.loads(sys.argv[1]) if r.get("status") in ("in_progress", "queued", "waiting", "requested", "pending") and (r.get("workflowName") or "").lower() in names))' "$run_json" 2>/dev/null || echo 0)"
   FAILED_ACTION_COUNT="$(
     ACTION_FAILURE_WINDOW_HOURS="$ACTION_FAILURE_WINDOW_HOURS" python3 - <<'PYEOF' "$run_json"
 import json, os, sys
@@ -800,13 +800,16 @@ choose_dispatch() {
   DISPATCH_TOPIC=""
   DISPATCH_PR_NUMBER=""
   DISPATCH_REASON=""
+  DISPATCH_IS_CONTINUITY=0
 
   if [[ "$OPEN_ISSUE_COUNT" -gt 0 ]] &&
-     [[ "$ASSIGNED_ISSUE_COUNT" -eq 0 ]] &&
-      [[ "$OPEN_PR_COUNT" -eq 0 ]]; then
+     [[ "$UNASSIGNED_ISSUE_COUNT" -gt 0 ]] &&
+     [[ "$OPEN_PR_COUNT" -eq 0 ]] &&
+     [[ "$ACTIVE_WORK_RUN_COUNT" -eq 0 ]]; then
     DISPATCH_AGENT="pm"
     DISPATCH_TASK="groom-backlog"
-    DISPATCH_REASON="idle-team-assign-most-urgent open=${OPEN_ISSUE_COUNT} unassigned=${UNASSIGNED_ISSUE_COUNT}"
+    DISPATCH_REASON="idle-team-assign-most-urgent open=${OPEN_ISSUE_COUNT} assigned=${ASSIGNED_ISSUE_COUNT} unassigned=${UNASSIGNED_ISSUE_COUNT}"
+    DISPATCH_IS_CONTINUITY=1
     return 0
   fi
 
@@ -842,6 +845,7 @@ choose_dispatch() {
     DISPATCH_AGENT="qa"
     DISPATCH_PR_NUMBER="$UNREVIEWED_PR_NUMBER"
     DISPATCH_REASON="unreviewed_pr=#${UNREVIEWED_PR_NUMBER} pending_reviews=${UNREVIEWED_PR_COUNT}"
+    DISPATCH_IS_CONTINUITY=1
     return 0
   fi
 
@@ -973,7 +977,7 @@ dispatch_slot() {
     return 0
   fi
 
-  if dispatch_budget_exhausted; then
+  if dispatch_budget_exhausted && [[ "$DISPATCH_IS_CONTINUITY" -ne 1 ]]; then
     THROTTLE_STATUS="hourly-budget"
     record_local_action "decision" "$dispatch_key" "throttled" "hourly-budget ${DISPATCHES_LAST_HOUR}/${MAX_DISPATCHES_PER_HOUR}"
     echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Throttle cycle=$cycle reason=hourly-budget dispatches=${DISPATCHES_LAST_HOUR}/${MAX_DISPATCHES_PER_HOUR}" | tee -a "$LOG_FILE"
@@ -981,9 +985,20 @@ dispatch_slot() {
     return 0
   fi
 
+  if [[ "$DISPATCH_IS_CONTINUITY" -eq 1 ]] && [[ "$DISPATCHES_LAST_HOUR" -ge "$MAX_DISPATCHES_PER_HOUR" ]]; then
+    THROTTLE_STATUS="continuity-reserve"
+    echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Continuity reserve cycle=$cycle agent=$agent task=$task dispatches=${DISPATCHES_LAST_HOUR}/${MAX_DISPATCHES_PER_HOUR}" | tee -a "$LOG_FILE"
+  fi
+
   if action_on_cooldown "$dispatch_key" "$((ACTION_COOLDOWN_MIN * 60))" "dispatch"; then
     local blocked_reason="$reason"
-    if choose_available_rotation "$slot"; then
+    if [[ "$DISPATCH_IS_CONTINUITY" -eq 1 ]]; then
+      THROTTLE_STATUS="continuity-cooldown"
+      record_local_action "decision" "$dispatch_key" "throttled" "continuity-cooldown ${ACTION_COOLDOWN_MIN}m"
+      echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Throttle cycle=$cycle agent=$agent task=$task reason=continuity-cooldown" | tee -a "$LOG_FILE"
+      write_heartbeat "throttled" "$cycle" "$slot" "$agent" "$task" "continuity action cooling down | $reason"
+      return 0
+    elif choose_available_rotation "$slot"; then
       agent="$DISPATCH_AGENT"
       task="$DISPATCH_TASK"
       topic="$DISPATCH_TOPIC"
@@ -1168,6 +1183,13 @@ with open(os.environ["PLIST_PATH"], "wb") as handle:
 PYEOF
 
   launchctl bootout "gui/$UID/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1 || true
+  if is_running; then
+    local legacy_pid
+    legacy_pid="$(cat "$PID_FILE")"
+    kill "$legacy_pid" 2>/dev/null || true
+    rm -f "$PID_FILE"
+    echo "Stopped legacy supervisor process (PID $legacy_pid)."
+  fi
   launchctl bootstrap "gui/$UID" "$LAUNCH_AGENT_FILE"
   launchctl kickstart -k "gui/$UID/$LAUNCH_AGENT_LABEL"
 
