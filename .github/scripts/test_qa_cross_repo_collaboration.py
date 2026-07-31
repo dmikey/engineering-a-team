@@ -66,6 +66,10 @@ class QaRobustnessTests(unittest.TestCase):
                 f"OWASP category {category} not found in qa-engineer.yml security prompt",
             )
 
+    def test_security_assessment_includes_actions_supply_chain_patterns(self):
+        self.assertIn("pull_request_target", self.workflow_text)
+        self.assertIn("immutable SHAs", self.workflow_text)
+
     def test_validate_step_gives_actionable_error_on_empty_response(self):
         """Validate step must include guidance about token limits in the error message."""
         self.assertIn("AGENT_MAX_TOKENS", self.workflow_text)
@@ -98,6 +102,12 @@ class QaRobustnessTests(unittest.TestCase):
         )
         self.assertIn(
             "Warning: Failed to post comment on needs-qa issue",
+            self.workflow_text,
+        )
+
+    def test_primary_issue_creation_failure_is_logged(self):
+        self.assertIn(
+            "Warning: Unable to create QA tracking issue in",
             self.workflow_text,
         )
 

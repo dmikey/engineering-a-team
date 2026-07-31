@@ -136,14 +136,68 @@ runs:
           )
         fi
 
-        RAW=$(curl --silent --show-error --retry 3 --retry-all-errors \
+        CURL_EXIT=0
+        CURL_OUTPUT=$(curl --silent --show-error --retry 3 --retry-connrefused \
           --connect-timeout 15 --max-time 180 \
           -X POST \
           -H "Authorization: Bearer $API_TOKEN" \
           -H "Content-Type: application/json" \
           -H "Accept: application/json" \
+          -w "\n__GH_HTTP_STATUS:%{http_code}" \
           "https://models.github.ai/inference/chat/completions" \
-          -d "$PAYLOAD")
+          -d "$PAYLOAD") || CURL_EXIT=$?
+
+        HTTP_STATUS=$(printf '%s\n' "$CURL_OUTPUT" | awk -F: '/__GH_HTTP_STATUS:/{print $2}' | tail -1)
+        export HTTP_STATUS
+        RAW=$(printf '%s\n' "$CURL_OUTPUT" | sed '/__GH_HTTP_STATUS:/d')
+
+        if [ "$CURL_EXIT" -ne 0 ]; then
+          export CURL_EXIT
+          RAW=$(python3 - <<'PYEOF'
+        import json
+        import os
+        print(json.dumps({
+            "error": {
+                "message": "Network error while calling GitHub Models API",
+                "code": "curl_error",
+                "status": os.environ.get("CURL_EXIT", "1"),
+            }
+        }))
+        PYEOF
+          )
+        elif [ -z "$RAW" ]; then
+          RAW=$(python3 - <<'PYEOF'
+        import json
+        import os
+        print(json.dumps({
+            "error": {
+                "message": "Empty response body from GitHub Models API",
+                "code": "empty_response",
+                "status": os.environ.get("HTTP_STATUS", "unknown"),
+            }
+        }))
+        PYEOF
+          )
+        elif [ -n "$HTTP_STATUS" ] && [ "$HTTP_STATUS" -ge 400 ]; then
+          if ! echo "$RAW" | python3 -c "import json,sys; json.load(sys.stdin)" >/dev/null 2>&1; then
+            export HTTP_STATUS RAW
+            RAW=$(python3 - <<'PYEOF'
+        import json
+        import os
+        body = os.environ.get("RAW", "").strip()
+        if len(body) > 500:
+            body = body[:500] + "…"
+        print(json.dumps({
+            "error": {
+                "message": f"HTTP {os.environ.get('HTTP_STATUS', 'unknown')} returned non-JSON response: {body or 'empty body'}",
+                "code": "http_error",
+                "status": os.environ.get("HTTP_STATUS", "unknown"),
+            }
+        }))
+        PYEOF
+            )
+          fi
+        fi
 
         # Capture raw JSON
         {

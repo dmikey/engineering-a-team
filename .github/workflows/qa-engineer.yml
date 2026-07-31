@@ -255,7 +255,9 @@ jobs:
             - **A10 Server-Side Request Forgery (SSRF)**: user-controlled URLs
               passed to HTTP clients without validation
             Also check for: hardcoded credentials or API keys, insecure randomness,
-            and overly broad GitHub Actions permissions.
+            overly broad GitHub Actions permissions, `pull_request_target` workflows
+            that run untrusted code, and third-party actions that are not pinned to
+            immutable SHAs.
             State "No security concerns identified" if the changes are clean.
 
             ### Test Coverage Gaps
@@ -436,9 +438,13 @@ jobs:
             --label "bug,qa-review" \
             2>/dev/null
           then
-            gh issue create \
+            if ! gh issue create \
               --title "🐛 QA: Issues detected in PR #$PR_NUMBER — $PR_TITLE" \
-              --body "$ISSUE_BODY"
+              --body "$ISSUE_BODY" \
+              2>/dev/null
+            then
+              echo "Warning: Unable to create QA tracking issue in ${{ github.repository }}" >&2
+            fi
           fi
 
           if [ -n "$QA_COLLAB_REPOSITORIES" ]; then
