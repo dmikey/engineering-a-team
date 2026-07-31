@@ -88,6 +88,11 @@ to execute:
 - `self-improvement`: `task` as `full-loop`, `benchmark-only`, or `copilot-handoff`, plus optional `reference_repo`, `base_url`, and `extra_context`
 - `task-assignment`: `task` as `assign-tasks` (default) or `workload-dashboard`, plus optional `extra_context`
 
+The Project Manager's `skill-development-suggestions` task and the
+scheduled Skill Development Tracking workflow now publish a shared
+cross-agent feedback report after completed agent interactions, plus a
+weekly summary for team-wide review.
+
 You can still run the individual workflows directly from the Actions tab if
 you want the workflow-specific form.
 

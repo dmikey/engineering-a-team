@@ -233,14 +233,16 @@ GraphQL `createDiscussion`
 identify performance gaps and generate personalized skill development
 suggestions. Surfaces reliability, efficiency, and domain-specific
 improvement areas based on success rate, run frequency, and average
-duration. Respects per-agent opt-in preferences for reminder
+duration. Each completed agent interaction can be captured as a feedback
+submission, aggregated into a shared report, and rolled up into the
+weekly summary. Respects per-agent opt-in preferences for reminder
 notifications stored in the `SKILL_REMINDERS_OPT_IN` repository
 variable.
 
 **Inputs**: Workflow runs JSON (last N days), `SKILL_REMINDERS_OPT_IN`
 repository variable (JSON opt-in map)  
-**Outputs**: Markdown skill development report posted as a Discussion or
-Issue fallback  
+**Outputs**: Markdown cross-agent feedback and skill development report
+posted as a Discussion or Issue fallback  
 **GitHub APIs**: `GET /repos/{owner}/{repo}/actions/runs`,
 GraphQL `createDiscussion`, `POST /repos/{owner}/{repo}/issues`  
 **Used by**: Project Manager
