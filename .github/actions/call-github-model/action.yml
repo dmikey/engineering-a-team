@@ -22,6 +22,9 @@ inputs:
   token:
     description: 'GitHub token or Models API token (needs models:read scope)'
     required: true
+  fallback-token:
+    description: 'Optional fallback token used when the primary token is unauthorized'
+    required: false
 
 outputs:
   response:
@@ -44,6 +47,7 @@ runs:
         TEMPERATURE: ${{ inputs.temperature }}
         MAX_TOKENS: ${{ inputs.max-tokens }}
         API_TOKEN: ${{ inputs.token }}
+        FALLBACK_API_TOKEN: ${{ inputs.fallback-token }}
         RULES_FILE: ${{ github.workspace }}/.github/collaboration-rules.md
       run: |
         PROMPT_FILE=$(mktemp)
@@ -136,14 +140,39 @@ runs:
           )
         fi
 
-        RAW=$(curl --silent --show-error --retry 3 --retry-all-errors \
-          --connect-timeout 15 --max-time 180 \
-          -X POST \
-          -H "Authorization: Bearer $API_TOKEN" \
-          -H "Content-Type: application/json" \
-          -H "Accept: application/json" \
-          "https://models.github.ai/inference/chat/completions" \
-          -d "$PAYLOAD")
+        call_model() {
+          local token="$1"
+          curl --silent --show-error --retry 3 --retry-all-errors \
+            --connect-timeout 15 --max-time 180 \
+            -X POST \
+            -H "$(printf '%s: %s %s' 'Authorization' 'Bearer' "$token")" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            "https://models.github.ai/inference/chat/completions" \
+            -d "$PAYLOAD"
+        }
+
+        RAW=$(call_model "$API_TOKEN")
+
+        UNAUTHORIZED=$(echo "$RAW" | python3 -c "
+        import json, sys
+        try:
+            data = json.load(sys.stdin)
+        except json.JSONDecodeError:
+            print('false')
+            raise SystemExit(0)
+        err = data.get('error') or {}
+        code = str(err.get('code', '')).strip().lower()
+        status = str(err.get('status', '')).strip().lower()
+        message = str(err.get('message', '')).strip().lower()
+        is_unauthorized = code == 'unauthorized' or status in {'401', 'unauthorized'} or 'unauthorized' in message
+        print('true' if is_unauthorized else 'false')
+        ")
+
+        if [ "$UNAUTHORIZED" = "true" ] && [ -n "$FALLBACK_API_TOKEN" ] && [ "$FALLBACK_API_TOKEN" != "$API_TOKEN" ]; then
+          echo "Primary model token unauthorized; retrying with fallback token." >&2
+          RAW=$(call_model "$FALLBACK_API_TOKEN")
+        fi
 
         # Capture raw JSON
         {
