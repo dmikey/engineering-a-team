@@ -249,6 +249,11 @@ collect_supervisor_signals() {
   STALE_DISCUSSION_AGE_HOURS=0
   STALE_DISCUSSION_TITLE=""
   STALE_ISSUE_COUNT=0
+  OPEN_ISSUE_COUNT=0
+  ASSIGNED_ISSUE_COUNT=0
+  UNASSIGNED_ISSUE_COUNT=0
+  OPEN_PR_COUNT=0
+  ACTIVE_WORK_RUN_COUNT=0
   FAILED_ACTION_COUNT=0
   PM_RUNS_LAST_24H=0
   COUNCIL_RUNS_LAST_24H=0
@@ -264,6 +269,7 @@ collect_supervisor_signals() {
   UNREVIEWED_PR_COUNT=0
 
   pr_json="$(gh pr list --state open --limit 50 --json number,title,updatedAt,isDraft,reviewDecision 2>/dev/null || echo '[]')"
+  OPEN_PR_COUNT="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$pr_json" 2>/dev/null || echo 0)"
   IFS='|' read -r STALE_PR_COUNT STALE_PR_NUMBER STALE_PR_AGE_HOURS STALE_PR_TITLE <<<"$(
     STALE_PR_HOURS="$STALE_PR_HOURS" python3 - <<'PYEOF' "$pr_json"
 import json, os, sys
@@ -376,8 +382,8 @@ else:
 PYEOF
   )"
 
-  issue_json="$(gh issue list --state open --limit 100 --json number,updatedAt,title 2>/dev/null || echo '[]')"
-  STALE_ISSUE_COUNT="$(
+  issue_json="$(gh issue list --state open --limit 100 --json number,updatedAt,title,assignees 2>/dev/null || echo '[]')"
+  IFS='|' read -r STALE_ISSUE_COUNT OPEN_ISSUE_COUNT ASSIGNED_ISSUE_COUNT UNASSIGNED_ISSUE_COUNT <<<"$(
     STALE_ISSUE_HOURS="$STALE_ISSUE_HOURS" python3 - <<'PYEOF' "$issue_json"
 import json, os, sys
 from datetime import datetime, timezone
@@ -391,7 +397,10 @@ except Exception:
     issues = []
 
 count = 0
+assigned = 0
 for issue in issues:
+  if issue.get("assignees"):
+    assigned += 1
     try:
         updated = datetime.fromisoformat(issue.get("updatedAt", "").replace("Z", "+00:00"))
     except Exception:
@@ -399,11 +408,12 @@ for issue in issues:
     age_hours = int((now - updated).total_seconds() // 3600)
     if age_hours >= threshold:
         count += 1
-print(count)
+print(f"{count}|{len(issues)}|{assigned}|{len(issues) - assigned}")
 PYEOF
   )"
 
   run_json="$(gh run list --limit 80 --json workflowName,conclusion,updatedAt,status,createdAt 2>/dev/null || echo '[]')"
+  ACTIVE_WORK_RUN_COUNT="$(python3 -c 'import json,sys; print(sum(1 for r in json.loads(sys.argv[1]) if r.get("status") in ("in_progress", "queued", "waiting", "requested", "pending")))' "$run_json" 2>/dev/null || echo 0)"
   FAILED_ACTION_COUNT="$(
     ACTION_FAILURE_WINDOW_HOURS="$ACTION_FAILURE_WINDOW_HOURS" python3 - <<'PYEOF' "$run_json"
 import json, os, sys
@@ -585,6 +595,11 @@ PYEOF
   STALE_DISCUSSION_COUNT="$(to_int_or_zero "$STALE_DISCUSSION_COUNT")"
   STALE_DISCUSSION_AGE_HOURS="$(to_int_or_zero "$STALE_DISCUSSION_AGE_HOURS")"
   STALE_ISSUE_COUNT="$(to_int_or_zero "$STALE_ISSUE_COUNT")"
+  OPEN_ISSUE_COUNT="$(to_int_or_zero "$OPEN_ISSUE_COUNT")"
+  ASSIGNED_ISSUE_COUNT="$(to_int_or_zero "$ASSIGNED_ISSUE_COUNT")"
+  UNASSIGNED_ISSUE_COUNT="$(to_int_or_zero "$UNASSIGNED_ISSUE_COUNT")"
+  OPEN_PR_COUNT="$(to_int_or_zero "$OPEN_PR_COUNT")"
+  ACTIVE_WORK_RUN_COUNT="$(to_int_or_zero "$ACTIVE_WORK_RUN_COUNT")"
   FAILED_ACTION_COUNT="$(to_int_or_zero "$FAILED_ACTION_COUNT")"
   PM_RUNS_LAST_24H="$(to_int_or_zero "$PM_RUNS_LAST_24H")"
   COUNCIL_RUNS_LAST_24H="$(to_int_or_zero "$COUNCIL_RUNS_LAST_24H")"
@@ -781,6 +796,16 @@ choose_dispatch() {
   DISPATCH_PR_NUMBER=""
   DISPATCH_REASON=""
 
+  if [[ "$OPEN_ISSUE_COUNT" -gt 0 ]] &&
+     [[ "$ASSIGNED_ISSUE_COUNT" -eq 0 ]] &&
+     [[ "$OPEN_PR_COUNT" -eq 0 ]] &&
+     [[ "$ACTIVE_WORK_RUN_COUNT" -eq 0 ]]; then
+    DISPATCH_AGENT="pm"
+    DISPATCH_TASK="groom-backlog"
+    DISPATCH_REASON="idle-team-assign-most-urgent open=${OPEN_ISSUE_COUNT} unassigned=${UNASSIGNED_ISSUE_COUNT}"
+    return 0
+  fi
+
   if [[ "$TASK_ASSIGNMENT_RUNS_LAST_4H" -eq 0 ]]; then
     DISPATCH_AGENT="task-assignment"
     DISPATCH_TASK="assign-tasks"
@@ -895,6 +920,11 @@ write_heartbeat() {
     "auto_ready_action": "${AUTO_READY_ACTION}",
     "merge_actions": "${MERGE_ACTIONS:-none}",
     "unreviewed_pr_count": $UNREVIEWED_PR_COUNT,
+    "open_issue_count": $OPEN_ISSUE_COUNT,
+    "assigned_issue_count": $ASSIGNED_ISSUE_COUNT,
+    "unassigned_issue_count": $UNASSIGNED_ISSUE_COUNT,
+    "open_pr_count": $OPEN_PR_COUNT,
+    "active_work_run_count": $ACTIVE_WORK_RUN_COUNT,
     "task_assignment_runs_last_4h": $TASK_ASSIGNMENT_RUNS_LAST_4H,
     "product_owner_runs_last_24h": $PO_RUNS_LAST_24H,
     "council_runs_last_24h": $COUNCIL_RUNS_LAST_24H,

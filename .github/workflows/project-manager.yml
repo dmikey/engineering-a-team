@@ -308,6 +308,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GROOMING_REPORT: ${{ steps.pm-groom.outputs.response }}
+          ASSIGNMENT_OWNER: ${{ github.actor }}
         run: |
           # Fail if the grooming report is a model error
           if echo "$GROOMING_REPORT" | grep -q '⚠️ Model call failed'; then
@@ -329,13 +330,17 @@ jobs:
           done
 
           # Parse priority assignments from the grooming report and apply labels
-          echo "$GROOMING_REPORT" | python3 - <<'PYEOF'
-          import re, os, subprocess, sys
+          python3 - <<'PYEOF'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
 
           report = os.environ.get('GROOMING_REPORT', '')
 
           # Find patterns like "#123 ... Priority: HIGH"
-          pattern = r'#(\d+)[^\n]*Priority:\s*(CRITICAL|HIGH|MEDIUM|LOW)'
+          pattern = r'#(\d+)[^\n]*Priority:\s*[\[\]*_`]*(CRITICAL|HIGH|MEDIUM|LOW)'
           matches = re.findall(pattern, report, re.IGNORECASE)
 
           label_map = {
@@ -368,27 +373,78 @@ jobs:
                   highest_issue_num = issue_num
                   highest_priority = priority_key
 
-          if highest_issue_num:
-                print(
-                  f'Dispatching assign-top-priority-agent workflow for issue #{highest_issue_num} '
-                  f'({highest_priority})'
-                )
-                dispatch = subprocess.run(
+          if highest_issue_num is None:
+              result = subprocess.run(
                   [
-                    'gh', 'workflow', 'run', 'assign-top-priority-agent.lock.yml',
-                    '-f', f'issue_number={highest_issue_num}',
-                    '-f', f'priority={highest_priority}',
+                      'gh', 'issue', 'list', '--state', 'open', '--limit', '100',
+                      '--json', 'number,labels,assignees,createdAt',
                   ],
                   capture_output=True,
                   text=True,
-                )
-                if dispatch.returncode != 0:
+              )
+              try:
+                  issues = json.loads(result.stdout) if result.returncode == 0 else []
+              except json.JSONDecodeError:
+                  issues = []
+
+              candidates = []
+              for issue in issues:
+                  if issue.get('assignees'):
+                      continue
+                  labels = {label.get('name', '').lower() for label in issue.get('labels', [])}
+                  priority = next(
+                      (
+                          value for value in ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW')
+                          if f'priority: {value.lower()}' in labels
+                      ),
+                      'MEDIUM',
+                  )
+                  candidates.append((priority_rank[priority], issue.get('createdAt', ''), issue['number'], priority))
+
+              if candidates:
+                  _, _, highest_issue_num, highest_priority = min(candidates)
+                  highest_issue_num = str(highest_issue_num)
                   print(
-                    'Copilot assignment workflow dispatch failed: '
-                    f'{dispatch.stderr.strip()}'
+                      f'Model report had no parseable priority; selected issue #{highest_issue_num} '
+                      f'using deterministic priority/age fallback ({highest_priority})'
+                  )
+
+          if highest_issue_num:
+              owner = os.environ.get('ASSIGNMENT_OWNER', '').strip()
+              if owner and owner != 'github-actions[bot]':
+                  assignment = subprocess.run(
+                      ['gh', 'issue', 'edit', highest_issue_num, '--add-assignee', owner],
+                      capture_output=True,
+                      text=True,
+                  )
+                  if assignment.returncode != 0:
+                      print(
+                          f'Warning: could not assign issue #{highest_issue_num} to {owner}: '
+                          f'{assignment.stderr.strip()}'
+                      )
+                  else:
+                      print(f'Assigned issue #{highest_issue_num} to {owner}')
+
+              print(
+                  f'Dispatching assign-top-priority-agent workflow for issue #{highest_issue_num} '
+                  f'({highest_priority})'
+              )
+              dispatch = subprocess.run(
+                  [
+                      'gh', 'workflow', 'run', 'assign-top-priority-agent.lock.yml',
+                      '-f', f'issue_number={highest_issue_num}',
+                      '-f', f'priority={highest_priority}',
+                  ],
+                  capture_output=True,
+                  text=True,
+              )
+              if dispatch.returncode != 0:
+                  print(
+                      'Copilot assignment workflow dispatch failed: '
+                      f'{dispatch.stderr.strip()}'
                   )
                   sys.exit(dispatch.returncode)
-                elif dispatch.stdout.strip():
+              elif dispatch.stdout.strip():
                   print(dispatch.stdout.strip())
           PYEOF
 
