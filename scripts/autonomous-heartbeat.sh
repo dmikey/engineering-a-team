@@ -21,6 +21,8 @@ HEARTBEAT_FILE="$STATE_DIR/heartbeat.json"
 ACTION_STATE_FILE="$STATE_DIR/action-state.tsv"
 DECISION_LOG_FILE="$STATE_DIR/decisions.tsv"
 WORKFLOW_FILE="manual-agent-runner.yml"
+LAUNCH_AGENT_LABEL="com.dmikey.engineering-a-team"
+LAUNCH_AGENT_FILE="$HOME/Library/LaunchAgents/${LAUNCH_AGENT_LABEL}.plist"
 
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-900}"
 DEFAULT_REF="${DEFAULT_REF:-main}"
@@ -57,6 +59,8 @@ Usage:
   scripts/autonomous-heartbeat.sh start [options]
   scripts/autonomous-heartbeat.sh run [options]
   scripts/autonomous-heartbeat.sh once [options]
+  scripts/autonomous-heartbeat.sh install-service [options]
+  scripts/autonomous-heartbeat.sh uninstall-service
   scripts/autonomous-heartbeat.sh doctor
   scripts/autonomous-heartbeat.sh stop
   scripts/autonomous-heartbeat.sh status
@@ -82,6 +86,7 @@ Options:
 Examples:
   scripts/autonomous-heartbeat.sh --interval 600
   scripts/autonomous-heartbeat.sh start --interval 600
+  scripts/autonomous-heartbeat.sh install-service --interval 600
   scripts/autonomous-heartbeat.sh status
   scripts/autonomous-heartbeat.sh stop
   scripts/autonomous-heartbeat.sh once --ref main
@@ -1110,6 +1115,73 @@ start_daemon() {
   fi
 }
 
+run_service() {
+  ensure_prereqs
+  echo "$$" > "$PID_FILE"
+  trap 'if [[ -f "$PID_FILE" ]] && [[ "$(cat "$PID_FILE" 2>/dev/null)" == "$$" ]]; then rm -f "$PID_FILE"; fi' EXIT
+  run_loop "$INTERVAL" "$REF" "0"
+}
+
+install_service() {
+  ensure_prereqs
+  mkdir -p "$(dirname "$LAUNCH_AGENT_FILE")"
+
+  PLIST_PATH="$LAUNCH_AGENT_FILE" \
+  SERVICE_LABEL="$LAUNCH_AGENT_LABEL" \
+  SERVICE_SCRIPT="$SCRIPT_PATH" \
+  SERVICE_ROOT="$ROOT_DIR" \
+  SERVICE_LOG="$LOG_FILE" \
+  SERVICE_INTERVAL="$INTERVAL" \
+  SERVICE_REF="$REF" \
+  SERVICE_MAX_DISPATCHES="$MAX_DISPATCHES_PER_HOUR" \
+  SERVICE_ACTION_COOLDOWN="$ACTION_COOLDOWN_MIN" \
+  SERVICE_MERGE_COOLDOWN="$MERGE_RETRY_COOLDOWN_MIN" \
+  python3 - <<'PYEOF'
+import os
+import plistlib
+
+arguments = [
+    os.environ["SERVICE_SCRIPT"],
+    "service-run",
+    "--interval", os.environ["SERVICE_INTERVAL"],
+    "--ref", os.environ["SERVICE_REF"],
+    "--max-dispatches-per-hour", os.environ["SERVICE_MAX_DISPATCHES"],
+    "--action-cooldown-min", os.environ["SERVICE_ACTION_COOLDOWN"],
+    "--merge-retry-cooldown-min", os.environ["SERVICE_MERGE_COOLDOWN"],
+]
+payload = {
+    "Label": os.environ["SERVICE_LABEL"],
+    "ProgramArguments": arguments,
+    "WorkingDirectory": os.environ["SERVICE_ROOT"],
+    "RunAtLoad": True,
+    "KeepAlive": True,
+    "ThrottleInterval": 10,
+    "ProcessType": "Background",
+    "StandardOutPath": os.environ["SERVICE_LOG"],
+    "StandardErrorPath": os.environ["SERVICE_LOG"],
+    "EnvironmentVariables": {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    },
+}
+with open(os.environ["PLIST_PATH"], "wb") as handle:
+    plistlib.dump(payload, handle)
+PYEOF
+
+  launchctl bootout "gui/$UID/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/$UID" "$LAUNCH_AGENT_FILE"
+  launchctl kickstart -k "gui/$UID/$LAUNCH_AGENT_LABEL"
+
+  echo "Persistent supervisor installed and started."
+  echo "LaunchAgent: $LAUNCH_AGENT_FILE"
+  echo "Label: $LAUNCH_AGENT_LABEL"
+}
+
+uninstall_service() {
+  launchctl bootout "gui/$UID/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1 || true
+  rm -f "$LAUNCH_AGENT_FILE" "$PID_FILE"
+  echo "Persistent supervisor uninstalled."
+}
+
 stop_daemon() {
   if ! is_running; then
     echo "Heartbeat daemon is not running."
@@ -1172,6 +1244,12 @@ doctor() {
 }
 
 status_daemon() {
+  if launchctl print "gui/$UID/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1; then
+    echo "LaunchAgent: loaded (KeepAlive)"
+  else
+    echo "LaunchAgent: not loaded"
+  fi
+
   if is_running; then
     echo "Heartbeat daemon: running (PID $(cat "$PID_FILE"))"
   else
@@ -1384,7 +1462,7 @@ main() {
 
   if [[ $# -gt 0 ]]; then
     case "$1" in
-      start|run|once|doctor|stop|status|-h|--help)
+      start|run|once|install-service|uninstall-service|service-run|doctor|stop|status|-h|--help)
         cmd="$1"
         shift
         ;;
@@ -1426,6 +1504,17 @@ main() {
       parse_common_flags "$@"
       ensure_prereqs
       run_loop "$INTERVAL" "$REF" "1"
+      ;;
+    install-service)
+      parse_common_flags "$@"
+      install_service
+      ;;
+    uninstall-service)
+      uninstall_service
+      ;;
+    service-run)
+      parse_common_flags "$@"
+      run_service
       ;;
     doctor)
       doctor

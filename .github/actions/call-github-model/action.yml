@@ -117,12 +117,32 @@ runs:
         PYEOF
         )
 
-        RAW=$(curl -s \
+        if [[ "$GH_MODEL" != */* ]]; then
+          GH_MODEL="openai/$GH_MODEL"
+          export GH_MODEL
+          PAYLOAD=$(python3 - <<'PYEOF'
+        import json, os
+        payload = {
+            "model":       os.environ["GH_MODEL"],
+            "temperature": float(os.environ["TEMPERATURE"]),
+            "max_tokens":  int(os.environ["MAX_TOKENS"]),
+            "messages": [
+                {"role": "system", "content": os.environ["EFFECTIVE_SYSTEM_PROMPT"]},
+                {"role": "user",   "content": os.environ["USER_PROMPT"]}
+            ]
+        }
+        print(json.dumps(payload))
+        PYEOF
+          )
+        fi
+
+        RAW=$(curl --silent --show-error --retry 3 --retry-all-errors \
+          --connect-timeout 15 --max-time 180 \
           -X POST \
           -H "Authorization: Bearer $API_TOKEN" \
           -H "Content-Type: application/json" \
           -H "Accept: application/json" \
-          "https://models.inference.ai.azure.com/chat/completions" \
+          "https://models.github.ai/inference/chat/completions" \
           -d "$PAYLOAD")
 
         # Capture raw JSON
