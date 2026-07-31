@@ -26,6 +26,7 @@ LAUNCH_AGENT_FILE="$HOME/Library/LaunchAgents/${LAUNCH_AGENT_LABEL}.plist"
 
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-900}"
 DEFAULT_REF="${DEFAULT_REF:-main}"
+MAX_OPEN_PR_BATCH="${MAX_OPEN_PR_BATCH:-100}"
 STALE_PR_HOURS="${STALE_PR_HOURS:-24}"
 STALE_DISCUSSION_HOURS="${STALE_DISCUSSION_HOURS:-24}"
 STALE_ISSUE_HOURS="${STALE_ISSUE_HOURS:-48}"
@@ -51,6 +52,60 @@ SEQUENCE=(
 AUTO_MERGE_PRS="${AUTO_MERGE_PRS:-true}"
 MERGE_METHOD="${MERGE_METHOD:-squash}"
 
+pr_verdict_from_payload() {
+  local payload="$1"
+  python3 - <<'PY' "$payload"
+import json
+import re
+import sys
+from datetime import datetime
+
+
+def parse_ts(value):
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+try:
+    pr = json.loads(sys.argv[1])
+except Exception:
+    pr = {}
+
+decision = (pr.get("reviewDecision") or "").upper()
+if decision == "APPROVED":
+    print("merge")
+    raise SystemExit
+
+last_commit_ts = None
+for commit in pr.get("commits") or []:
+    ts = parse_ts(commit.get("committedDate"))
+    if ts and (last_commit_ts is None or ts > last_commit_ts):
+        last_commit_ts = ts
+
+qa_verdict = None
+qa_ts = None
+for comment in pr.get("comments") or []:
+    body = comment.get("body") or ""
+    if "QA Engineer Agent" not in body and "QA Review — PR" not in body:
+        continue
+    ts = parse_ts(comment.get("createdAt"))
+    match = re.search(r"\*\*Recommendation\*\*:\s*\[(.*?)\]", body, re.IGNORECASE)
+    if match and (qa_ts is None or (ts and ts > qa_ts)):
+        qa_verdict = match.group(1).upper()
+        qa_ts = ts
+
+if qa_verdict is None or (last_commit_ts and qa_ts and qa_ts < last_commit_ts):
+    print("needs_qa")
+elif "REQUEST CHANGES" in qa_verdict or "BLOCK" in qa_verdict:
+    print("wait")
+elif "APPROVE" in qa_verdict:
+    print("approve_and_merge")
+else:
+    print("needs_qa")
+PY
+}
+
 usage() {
   cat <<'EOF'
 Autonomous local heartbeat daemon for engineering-a-team.
@@ -58,8 +113,10 @@ Autonomous local heartbeat daemon for engineering-a-team.
 Usage:
   scripts/autonomous-heartbeat.sh [options]
   scripts/autonomous-heartbeat.sh start [options]
+  scripts/autonomous-heartbeat.sh restart [options]
   scripts/autonomous-heartbeat.sh run [options]
   scripts/autonomous-heartbeat.sh once [options]
+  scripts/autonomous-heartbeat.sh tui [options]
   scripts/autonomous-heartbeat.sh install-service [options]
   scripts/autonomous-heartbeat.sh uninstall-service
   scripts/autonomous-heartbeat.sh doctor
@@ -84,15 +141,178 @@ Options:
   --merge-retry-cooldown-min <m> Cooldown between merge attempts per PR (default: 60)
   --follow                       After start, stream daemon log in current terminal
   --tail-lines <n>               Number of log lines to show before follow (default: 80)
+  --refresh <seconds>            TUI refresh interval (default: 2)
 
 Examples:
   scripts/autonomous-heartbeat.sh --interval 600
   scripts/autonomous-heartbeat.sh start --interval 600
   scripts/autonomous-heartbeat.sh install-service --interval 600
+  scripts/autonomous-heartbeat.sh restart --interval 600
+  scripts/autonomous-heartbeat.sh tui --tail-lines 80 --refresh 2
   scripts/autonomous-heartbeat.sh status
   scripts/autonomous-heartbeat.sh stop
   scripts/autonomous-heartbeat.sh once --ref main
 EOF
+}
+
+render_tui() {
+  local refresh_seconds="$1"
+  local tail_lines="$2"
+
+  while true; do
+    local now_utc launch_state heartbeat_state cycle slot agent task note running_state
+    local throttle_status last_dispatch next_action summary_context
+    now_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    launch_state="not loaded"
+    heartbeat_state="none"
+    cycle="-"
+    slot="-"
+    agent="-"
+    task="-"
+    note="-"
+    running_state="stopped"
+    throttle_status="ready"
+    last_dispatch="none"
+    next_action="unknown"
+    summary_context=""
+
+    if launchctl print "gui/$UID/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1; then
+      launch_state="loaded"
+    fi
+    if is_running; then
+      running_state="running"
+    fi
+
+    if [[ -f "$HEARTBEAT_FILE" ]]; then
+      local hb
+      hb="$(python3 - <<'PYEOF' "$HEARTBEAT_FILE"
+import json, sys
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    print("none|||||||")
+    raise SystemExit
+signals = data.get("signals") or {}
+print("{}|{}|{}|{}|{}|{}|{}|{}".format(
+    data.get("status", "none"),
+    data.get("cycle", "-"),
+    data.get("sequence_slot", "-"),
+    data.get("agent", "-"),
+    data.get("task", "-"),
+    str(data.get("note", "-")).replace("\n", " "),
+    str(signals.get("throttle_status", "ready")),
+    str(signals.get("recent_pr_number", "")),
+))
+PYEOF
+      )"
+      IFS='|' read -r heartbeat_state cycle slot agent task note throttle_status recent_pr_number <<<"$hb"
+      if [[ -z "$heartbeat_state" ]]; then
+        heartbeat_state="none"
+      fi
+
+      if [[ "$heartbeat_state" == "dispatched" || "$heartbeat_state" == "skipped" || "$heartbeat_state" == "throttled" || "$heartbeat_state" == "error" ]]; then
+        last_dispatch="$agent/$task"
+      fi
+
+      case "$throttle_status" in
+        hourly-budget|continuity-reserve|continuity-cooldown|action-cooldown|rotation-fallback)
+          summary_context="${throttle_status}"
+          ;;
+        *)
+          summary_context="ready"
+          ;;
+      esac
+
+      if [[ "$heartbeat_state" == "dispatched" ]]; then
+        next_action="monitor $last_dispatch"
+      elif [[ "$throttle_status" == "continuity-cooldown" ]]; then
+        next_action="retry continuity path"
+      elif [[ "$throttle_status" == "hourly-budget" ]]; then
+        next_action="wait for budget reset"
+      elif [[ -n "$recent_pr_number" && "$recent_pr_number" != "" ]]; then
+        next_action="qa PR #$recent_pr_number"
+      elif [[ "$running_state" == "running" ]]; then
+        next_action="evaluate current signals"
+      else
+        next_action="start supervisor"
+      fi
+    fi
+
+    printf '\033[2J\033[H'
+    echo "Autonomous Supervisor TUI"
+    echo "Repository: $(basename "$ROOT_DIR")"
+    echo "Time (UTC): $now_utc"
+    echo "Service: $running_state | LaunchAgent: $launch_state"
+    echo "Summary: last=$last_dispatch | throttle=$throttle_status | next=$next_action"
+    echo "Heartbeat: state=$heartbeat_state cycle=$cycle slot=$slot agent=$agent task=$task"
+    echo "Note: $note"
+    echo
+    echo "Paths"
+    echo "- heartbeat: $HEARTBEAT_FILE"
+    echo "- log: $LOG_FILE"
+    echo "- decisions: $DECISION_LOG_FILE"
+    echo
+    echo "Controls"
+    echo "- q: quit TUI"
+    echo "- s: show one-shot service status"
+    echo "- l: show latest logs snapshot"
+    echo "- d: show latest local decisions snapshot"
+    echo
+    echo "Recent Log Lines"
+    if [[ -f "$LOG_FILE" ]]; then
+      tail -n "$tail_lines" "$LOG_FILE" 2>/dev/null || true
+    else
+      echo "(log file not created yet)"
+    fi
+
+    local key
+    if read -r -s -n 1 -t "$refresh_seconds" key; then
+      case "$key" in
+        q|Q)
+          echo
+          echo "Exiting TUI."
+          return 0
+          ;;
+        s|S)
+          echo
+          status_daemon
+          echo
+          read -r -s -n 1 -p "Press any key to continue..." _
+          ;;
+        l|L)
+          echo
+          echo "Latest log snapshot:"
+          tail -n "$tail_lines" "$LOG_FILE" 2>/dev/null || true
+          echo
+          read -r -s -n 1 -p "Press any key to continue..." _
+          ;;
+        d|D)
+          echo
+          echo "Latest local decisions snapshot:"
+          tail -n 20 "$DECISION_LOG_FILE" 2>/dev/null || true
+          echo
+          read -r -s -n 1 -p "Press any key to continue..." _
+          ;;
+      esac
+    fi
+  done
+}
+
+tui_mode() {
+  local refresh_seconds="$1"
+  local tail_lines="$2"
+
+  ensure_prereqs
+  touch "$LOG_FILE" "$DECISION_LOG_FILE"
+
+  if [[ ! "$refresh_seconds" =~ ^[0-9]+$ ]] || [[ "$refresh_seconds" -lt 1 ]]; then
+    echo "Error: --refresh must be an integer >= 1." >&2
+    exit 1
+  fi
+
+  render_tui "$refresh_seconds" "$tail_lines"
 }
 
 verify_models_pipeline() {
@@ -281,7 +501,7 @@ collect_supervisor_signals() {
   UNREVIEWED_PR_NUMBER=""
   UNREVIEWED_PR_COUNT=0
 
-  pr_json="$(gh pr list --state open --limit 50 --json number,title,updatedAt,isDraft,reviewDecision 2>/dev/null || echo '[]')"
+  pr_json="$(gh pr list --state open --limit "$MAX_OPEN_PR_BATCH" --json number,title,updatedAt,isDraft,reviewDecision 2>/dev/null || echo '[]')"
   OPEN_PR_COUNT="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$pr_json" 2>/dev/null || echo 0)"
   IFS='|' read -r STALE_PR_COUNT STALE_PR_NUMBER STALE_PR_AGE_HOURS STALE_PR_TITLE <<<"$(
     STALE_PR_HOURS="$STALE_PR_HOURS" python3 - <<'PYEOF' "$pr_json"
@@ -677,62 +897,14 @@ process_open_prs() {
 
   local merged=()
   local numbers
-  numbers="$(gh pr list --state open --limit 30 --json number,isDraft --jq '.[] | select(.isDraft | not) | .number' 2>/dev/null || true)"
+  numbers="$(gh pr list --state open --limit "$MAX_OPEN_PR_BATCH" --json number,isDraft --jq '.[] | select(.isDraft | not) | .number' 2>/dev/null || true)"
   [[ -z "$numbers" ]] && return 0
 
   local pr_num pr_info verdict now_ts
   now_ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   for pr_num in $numbers; do
     pr_info="$(gh pr view "$pr_num" --json reviewDecision,comments,commits 2>/dev/null || echo '{}')"
-    verdict="$(
-      python3 - <<'PYEOF' "$pr_info"
-import json, re, sys
-from datetime import datetime
-
-def parse_ts(value):
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-try:
-    pr = json.loads(sys.argv[1])
-except Exception:
-    pr = {}
-
-decision = (pr.get("reviewDecision") or "").upper()
-if decision == "APPROVED":
-    print("merge")
-    raise SystemExit
-
-last_commit_ts = None
-for commit in pr.get("commits") or []:
-    ts = parse_ts(commit.get("committedDate"))
-    if ts and (last_commit_ts is None or ts > last_commit_ts):
-        last_commit_ts = ts
-
-qa_verdict = None
-qa_ts = None
-for comment in pr.get("comments") or []:
-    body = comment.get("body") or ""
-    if "QA Engineer Agent" not in body and "QA Review — PR" not in body:
-        continue
-    ts = parse_ts(comment.get("createdAt"))
-    match = re.search(r"\*\*Recommendation\*\*:\s*\[(.*?)\]", body)
-    if match and (qa_ts is None or (ts and ts > qa_ts)):
-        qa_verdict = match.group(1).upper()
-        qa_ts = ts
-
-if qa_verdict is None or (last_commit_ts and qa_ts and qa_ts < last_commit_ts):
-    print("needs_qa")
-elif "REQUEST CHANGES" in qa_verdict or "BLOCK" in qa_verdict:
-    print("wait")
-elif "APPROVE" in qa_verdict:
-    print("approve_and_merge")
-else:
-    print("needs_qa")
-PYEOF
-    )"
+    verdict="$(pr_verdict_from_payload "$pr_info")"
 
     case "$verdict" in
       merge|approve_and_merge)
@@ -1096,6 +1268,27 @@ run_loop() {
   done
 }
 
+stop_daemon_internal() {
+  if launchctl print "gui/$UID/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1; then
+    launchctl bootout "gui/$UID/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1 || true
+    rm -f "$PID_FILE"
+    return 0
+  fi
+
+  if ! is_running; then
+    rm -f "$PID_FILE"
+    return 0
+  fi
+
+  local pid
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [[ -n "$pid" ]]; then
+    kill "$pid" 2>/dev/null || true
+  fi
+  rm -f "$PID_FILE"
+  return 0
+}
+
 start_daemon() {
   local interval="$1"
   local ref="$2"
@@ -1111,11 +1304,7 @@ start_daemon() {
   local tail_lines="${12}"
 
   ensure_prereqs
-
-  if is_running; then
-    echo "Heartbeat daemon already running with PID $(cat "$PID_FILE")." >&2
-    exit 1
-  fi
+  stop_daemon_internal
 
   nohup "$SCRIPT_PATH" run \
     --interval "$interval" \
@@ -1200,7 +1389,7 @@ payload = {
     "ProgramArguments": arguments,
     "WorkingDirectory": os.environ["SERVICE_ROOT"],
     "RunAtLoad": True,
-    "KeepAlive": True,
+    "KeepAlive": {"SuccessfulExit": False},
     "ThrottleInterval": 10,
     "ProcessType": "Background",
     "StandardOutPath": os.environ["SERVICE_LOG"],
@@ -1236,24 +1425,17 @@ uninstall_service() {
 }
 
 stop_daemon() {
+  stop_daemon_internal
   if launchctl print "gui/$UID/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1; then
-    launchctl bootout "gui/$UID/$LAUNCH_AGENT_LABEL"
-    rm -f "$PID_FILE"
     echo "Persistent supervisor stopped. Run install-service to start it again."
-    exit 0
-  fi
-
-  if ! is_running; then
+  elif is_running; then
+    local pid
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    echo "Heartbeat daemon stopped (PID $pid)."
+  else
     echo "Heartbeat daemon is not running."
-    rm -f "$PID_FILE"
-    exit 0
   fi
-
-  local pid
-  pid="$(cat "$PID_FILE")"
-  kill "$pid" 2>/dev/null || true
-  rm -f "$PID_FILE"
-  echo "Heartbeat daemon stopped (PID $pid)."
+  exit 0
 }
 
 doctor() {
@@ -1355,6 +1537,7 @@ parse_common_flags() {
   MERGE_RETRY_COOLDOWN_MIN_ARG="$MERGE_RETRY_COOLDOWN_MIN"
   FOLLOW_LOG="false"
   TAIL_LINES_ARG="$TAIL_LINES"
+  REFRESH_SECONDS_ARG="2"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1424,6 +1607,10 @@ parse_common_flags() {
         ;;
       --tail-lines)
         TAIL_LINES_ARG="${2:-}"
+        shift 2
+        ;;
+      --refresh)
+        REFRESH_SECONDS_ARG="${2:-}"
         shift 2
         ;;
       -h|--help)
@@ -1532,14 +1719,28 @@ parse_common_flags() {
   CONTINUITY_COOLDOWN_MIN="$CONTINUITY_COOLDOWN_MIN_ARG"
   MERGE_RETRY_COOLDOWN_MIN="$MERGE_RETRY_COOLDOWN_MIN_ARG"
   TAIL_LINES="$TAIL_LINES_ARG"
+  REFRESH_SECONDS="$REFRESH_SECONDS_ARG"
 }
 
 main() {
   local cmd="run"
 
+  if [[ $# -gt 0 && "$1" == "--print-pr-verdict" ]]; then
+    if [[ $# -lt 2 ]]; then
+      echo "Usage: scripts/autonomous-heartbeat.sh --print-pr-verdict <payload-or-file>" >&2
+      exit 1
+    fi
+    local payload_or_path="$2"
+    if [[ -f "$payload_or_path" ]]; then
+      payload_or_path="$(cat "$payload_or_path" 2>/dev/null || echo '{}')"
+    fi
+    pr_verdict_from_payload "$payload_or_path"
+    exit 0
+  fi
+
   if [[ $# -gt 0 ]]; then
     case "$1" in
-      start|run|once|install-service|uninstall-service|service-run|doctor|stop|status|-h|--help)
+      start|restart|run|once|tui|install-service|uninstall-service|service-run|doctor|stop|status|-h|--help)
         cmd="$1"
         shift
         ;;
@@ -1556,7 +1757,7 @@ main() {
   fi
 
   case "$cmd" in
-    start)
+    start|restart)
       parse_common_flags "$@"
       start_daemon \
         "$INTERVAL" \
@@ -1581,6 +1782,10 @@ main() {
       parse_common_flags "$@"
       ensure_prereqs
       run_loop "$INTERVAL" "$REF" "1"
+      ;;
+    tui)
+      parse_common_flags "$@"
+      tui_mode "$REFRESH_SECONDS" "$TAIL_LINES"
       ;;
     install-service)
       parse_common_flags "$@"

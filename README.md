@@ -120,6 +120,13 @@ scripts/agent-cli.sh run --agent po --task run-playwright --base-url https://exa
 
 # Self-improvement loop against a reference repo
 scripts/agent-cli.sh run --agent self-improvement --task full-loop --reference-repo owner/get-milk
+
+# Open local supervisor TUI (interactive)
+scripts/agent-cli.sh service tui --tail-lines 100 --refresh 2
+
+# Inspect local supervisor status and logs
+scripts/agent-cli.sh service status
+scripts/agent-cli.sh service logs --tail-lines 120 --follow
 ```
 
 To see all options:
@@ -232,6 +239,9 @@ scripts/autonomous-heartbeat.sh \
 ```bash
 # Start daemon in background (10-minute heartbeat)
 scripts/autonomous-heartbeat.sh start --interval 600
+
+# Open interactive local TUI dashboard
+scripts/autonomous-heartbeat.sh tui --tail-lines 120 --refresh 2
 
 # Check daemon state and latest heartbeat JSON
 scripts/autonomous-heartbeat.sh status
