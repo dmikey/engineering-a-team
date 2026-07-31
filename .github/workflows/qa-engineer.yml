@@ -271,29 +271,88 @@ jobs:
 
       # ── Validate model response ───────────────────────────────────────────
       - name: Validate model response
-        id: validate
+        id: qa_response
         env:
           QA_RESPONSE: ${{ steps.qa.outputs.response }}
+          PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
         run: |
-          python3 - <<'PY'
-          import os, sys
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import os
+          import sys
+          import textwrap
+
           response = os.environ.get("QA_RESPONSE", "")
+          pr_number = os.environ.get("PR_NUMBER", "N/A")
+
           if response.startswith("⚠️"):
+              model_error = response
               print(
-                  f"ERROR: Model call failed — {response}\n"
+                  f"WARNING: Model call failed — {model_error}\n"
                   "Check that MODELS_TOKEN is valid, the model identifier is correct,\n"
-                  "and that the GitHub Models API is reachable.",
+                  "and that the GitHub Models API is reachable.\n"
+                  "Falling back to a manual-review handoff so the workflow can still complete.",
                   file=sys.stderr,
               )
-              sys.exit(1)
-          if not response.strip():
+              response = textwrap.dedent(
+                  f"""\
+                  ## QA Review — PR #{pr_number}
+
+                  **Risk Level**: [MEDIUM]
+                  **Recommendation**: [🔄 REQUEST CHANGES]
+
+                  ### Summary
+                  Automated QA analysis could not be completed because the GitHub Models request failed.
+                  Manual follow-up is required before this change is merged.
+
+                  ### Issues Found
+                  - **[MEDIUM]** `workflow` — Quinn could not complete the automated review because the GitHub Models request failed.
+                    - 💡 Fix: verify `MODELS_TOKEN` (or fallback `GITHUB_TOKEN`) has `models:read`, confirm the configured model identifier is valid, and rerun the workflow.
+
+                  ### Security Assessment
+                  Automated security analysis was unavailable because the model response failed. Review OWASP Top 10 areas manually before merging.
+
+                  ### Test Coverage Gaps
+                  Automated QA could not assess coverage. Confirm the changed behavior has focused tests before merging.
+
+                  ### Notes for Author
+                  Original model error: {model_error}"""
+              )
+          elif not response.strip():
               print(
-                  "ERROR: Empty response received from model.\n"
+                  "WARNING: Empty response received from model.\n"
                   "The API call may have timed out or the response was truncated.\n"
-                  "Consider reducing AGENT_MAX_TOKENS or the size of the diff context.",
+                  "Consider reducing AGENT_MAX_TOKENS or the size of the diff context.\n"
+                  "Falling back to a manual-review handoff so the workflow can still complete.",
                   file=sys.stderr,
               )
-              sys.exit(1)
+              response = textwrap.dedent(
+                  f"""\
+                  ## QA Review — PR #{pr_number}
+
+                  **Risk Level**: [MEDIUM]
+                  **Recommendation**: [🔄 REQUEST CHANGES]
+
+                  ### Summary
+                  Automated QA analysis returned an empty response, so Quinn could not complete the review.
+                  Manual follow-up is required before this change is merged.
+
+                  ### Issues Found
+                  - **[MEDIUM]** `workflow` — Quinn returned an empty review payload for this change set.
+                    - 💡 Fix: reduce `AGENT_MAX_TOKENS` or the diff context size if needed, then rerun the workflow.
+
+                  ### Security Assessment
+                  Automated security analysis was unavailable because the model response was empty. Review OWASP Top 10 areas manually before merging.
+
+                  ### Test Coverage Gaps
+                  Automated QA could not assess coverage. Confirm the changed behavior has focused tests before merging.
+
+                  ### Notes for Author
+                  The GitHub Models API returned an empty response for this request."""
+              )
+
+          print("response<<QA_RESP_EOF")
+          print(response)
+          print("QA_RESP_EOF")
           PY
 
       # ── Post PR comment ──────────────────────────────────────────────────
@@ -304,7 +363,7 @@ jobs:
           steps.ctx.outputs.pr_number != 'N/A'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          QA_RESPONSE: ${{ steps.qa.outputs.response }}
+          QA_RESPONSE: ${{ steps.qa_response.outputs.response }}
           PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
         run: |
           COMMENT="@copilot
@@ -352,12 +411,12 @@ jobs:
         # block the overall QA workflow run.
         continue-on-error: true
         if: |
-          contains(steps.qa.outputs.response, 'CRITICAL') ||
+          contains(steps.qa_response.outputs.response, 'CRITICAL') ||
           (env.QA_SEVERITY_THRESHOLD != 'CRITICAL' &&
-           contains(steps.qa.outputs.response, 'HIGH'))
+           contains(steps.qa_response.outputs.response, 'HIGH'))
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          QA_RESPONSE: ${{ steps.qa.outputs.response }}
+          QA_RESPONSE: ${{ steps.qa_response.outputs.response }}
           PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
           PR_TITLE: ${{ steps.ctx.outputs.pr_title }}
           QA_COLLAB_REPOSITORIES: ${{ steps.ctx.outputs.collab_repos }}
@@ -423,7 +482,7 @@ jobs:
           contains(github.event.issue.labels.*.name, 'needs-qa')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          QA_RESPONSE: ${{ steps.qa.outputs.response }}
+          QA_RESPONSE: ${{ steps.qa_response.outputs.response }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           COMMENT="@copilot
