@@ -76,6 +76,20 @@ class QaRobustnessTests(unittest.TestCase):
         self.assertIn("MODELS_TOKEN", self.workflow_text)
         self.assertIn("Model call failed", self.workflow_text)
 
+    def test_model_failures_fall_back_to_manual_review_handoff(self):
+        """Model failures should degrade gracefully instead of failing the workflow."""
+        self.assertIn(
+            "Falling back to a manual-review handoff so the workflow can still complete.",
+            self.workflow_text,
+        )
+        self.assertIn("response<<QA_RESP_EOF", self.workflow_text)
+        self.assertIn("Original model error:", self.workflow_text)
+
+    def test_downstream_steps_use_normalized_qa_response(self):
+        """Posting and issue-creation steps must use the normalized fallback-aware response."""
+        self.assertIn("steps.qa_response.outputs.response", self.workflow_text)
+        self.assertIn("**Recommendation**: [🔄 REQUEST CHANGES]", self.workflow_text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
