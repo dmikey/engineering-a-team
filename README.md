@@ -74,6 +74,10 @@ Issues.
 
 ### 5. Push code and open a PR — Quinn reviews it automatically
 
+Every pull request also runs the **PR Compliance Checks** workflow, which
+publishes a compliance report artifact and fails the check with alert details
+when non-compliance is detected.
+
 ### 6. Run any agent manually from the Actions tab
 
 Open **Actions → Manual Agent Runner → Run workflow** and choose which agent
