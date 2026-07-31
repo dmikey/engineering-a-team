@@ -136,8 +136,13 @@ runs:
           )
         fi
 
-        RAW=$(curl --silent --show-error --retry 3 --retry-all-errors \
-          --connect-timeout 15 --max-time 180 \
+        # The `retry-all-errors` curl flag is intentionally omitted: it would
+        # retry 4xx auth failures (e.g. 401 Unauthorized) up to 3 times, wasting
+        # several minutes before the workflow can surface the real error.
+        # curl retries connection errors and 429/5xx by default.
+        # --retry-delay spaces out retries to respect rate limits.
+        RAW=$(curl --silent --show-error --retry 3 --retry-delay 5 \
+          --connect-timeout 15 --max-time 90 \
           -X POST \
           -H "Authorization: Bearer $API_TOKEN" \
           -H "Content-Type: application/json" \

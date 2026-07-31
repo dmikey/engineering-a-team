@@ -102,5 +102,60 @@ class QaRobustnessTests(unittest.TestCase):
         )
 
 
+class CallGithubModelActionTests(unittest.TestCase):
+    """Verify the call-github-model action's reliability and efficiency settings."""
+
+    @classmethod
+    def setUpClass(cls):
+        action_path = (
+            REPO_ROOT / ".github" / "actions" / "call-github-model" / "action.yml"
+        )
+        cls.action_text = action_path.read_text(encoding="utf-8")
+
+    def test_curl_does_not_use_retry_all_errors(self):
+        """--retry-all-errors must not be used; it causes curl to retry 4xx auth
+        errors (401/403) which wastes up to 3 × max-time seconds before the
+        workflow can surface the real failure."""
+        self.assertNotIn(
+            "--retry-all-errors",
+            self.action_text,
+            "--retry-all-errors is present but must be removed to avoid retrying "
+            "authentication failures (401/403), which inflates run duration.",
+        )
+
+    def test_curl_max_time_is_bounded(self):
+        """--max-time must be ≤90 s to keep individual requests bounded and
+        prevent stuck model calls from consuming the full job timeout."""
+        import re
+
+        match = re.search(r"--max-time\s+(\d+)", self.action_text)
+        self.assertIsNotNone(match, "--max-time not found in call-github-model action")
+        max_time = int(match.group(1))
+        self.assertLessEqual(
+            max_time,
+            90,
+            f"--max-time {max_time}s exceeds 90 s; long timeouts inflate run "
+            "duration when the API is slow or hanging.",
+        )
+
+    def test_curl_uses_retry_delay(self):
+        """--retry-delay should be set so that transient network retries do not
+        hammer the API immediately."""
+        self.assertIn(
+            "--retry-delay",
+            self.action_text,
+            "--retry-delay not found; add it to space out retries and respect "
+            "API rate limits.",
+        )
+
+    def test_curl_retries_are_configured(self):
+        """--retry must be present to handle transient network errors."""
+        self.assertIn(
+            "--retry",
+            self.action_text,
+            "--retry not found in call-github-model action curl command.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
