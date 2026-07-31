@@ -156,6 +156,12 @@ ensure_prereqs() {
 }
 
 is_running() {
+  local service_pid
+  service_pid="$(launchctl print "gui/$UID/$LAUNCH_AGENT_LABEL" 2>/dev/null | awk '/pid =/{print $3; exit}' || true)"
+  if [[ -n "$service_pid" ]] && kill -0 "$service_pid" 2>/dev/null; then
+    return 0
+  fi
+
   if [[ -f "$PID_FILE" ]]; then
     local pid
     pid="$(cat "$PID_FILE" 2>/dev/null || true)"
@@ -1216,6 +1222,13 @@ uninstall_service() {
 }
 
 stop_daemon() {
+  if launchctl print "gui/$UID/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1; then
+    launchctl bootout "gui/$UID/$LAUNCH_AGENT_LABEL"
+    rm -f "$PID_FILE"
+    echo "Persistent supervisor stopped. Run install-service to start it again."
+    exit 0
+  fi
+
   if ! is_running; then
     echo "Heartbeat daemon is not running."
     rm -f "$PID_FILE"
@@ -1277,14 +1290,20 @@ doctor() {
 }
 
 status_daemon() {
-  if launchctl print "gui/$UID/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1; then
-    echo "LaunchAgent: loaded (KeepAlive)"
+  local service_pid
+  service_pid="$(launchctl print "gui/$UID/$LAUNCH_AGENT_LABEL" 2>/dev/null | awk '/pid =/{print $3; exit}' || true)"
+  if [[ -n "$service_pid" ]] && kill -0 "$service_pid" 2>/dev/null; then
+    echo "LaunchAgent: loaded (KeepAlive, PID $service_pid)"
   else
     echo "LaunchAgent: not loaded"
   fi
 
   if is_running; then
-    echo "Heartbeat daemon: running (PID $(cat "$PID_FILE"))"
+    if [[ -n "$service_pid" ]]; then
+      echo "Heartbeat daemon: running (PID $service_pid)"
+    else
+      echo "Heartbeat daemon: running (PID $(cat "$PID_FILE"))"
+    fi
   else
     echo "Heartbeat daemon: stopped"
   fi
