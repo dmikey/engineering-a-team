@@ -672,6 +672,8 @@ process_open_prs() {
   MERGE_ACTIONS="none"
   UNREVIEWED_PR_NUMBER=""
   UNREVIEWED_PR_COUNT=0
+  QA_WAITING_PR_NUMBER=""
+  QA_WAITING_PR_COUNT=0
 
   local merged=()
   local numbers
@@ -748,8 +750,8 @@ PYEOF
             >/dev/null 2>&1 \
             || echo "[$now_ts] Could not submit formal approval for PR #$pr_num (continuing to merge attempt)" | tee -a "$LOG_FILE"
         fi
-        if gh pr merge "$pr_num" "--$MERGE_METHOD" --auto >/dev/null 2>&1 ||
-           gh pr merge "$pr_num" "--$MERGE_METHOD" >/dev/null 2>&1; then
+        if gh pr merge "$pr_num" "--$MERGE_METHOD" --auto --delete-branch >/dev/null 2>&1 ||
+           gh pr merge "$pr_num" "--$MERGE_METHOD" --delete-branch >/dev/null 2>&1; then
           merged+=("#$pr_num")
           echo "[$now_ts] Auto-merge queued/completed for PR #$pr_num" | tee -a "$LOG_FILE"
         else
@@ -761,6 +763,8 @@ PYEOF
         [[ -z "$UNREVIEWED_PR_NUMBER" ]] && UNREVIEWED_PR_NUMBER="$pr_num"
         ;;
       wait)
+        QA_WAITING_PR_COUNT=$((QA_WAITING_PR_COUNT + 1))
+        [[ -z "$QA_WAITING_PR_NUMBER" ]] && QA_WAITING_PR_NUMBER="$pr_num"
         ;;
     esac
   done
@@ -857,6 +861,14 @@ choose_dispatch() {
     return 0
   fi
 
+  if [[ "$QA_WAITING_PR_COUNT" -gt 0 ]] && [[ -n "$QA_WAITING_PR_NUMBER" ]]; then
+    DISPATCH_AGENT="pm"
+    DISPATCH_TASK="groom-backlog"
+    DISPATCH_REASON="qa_waiting_pr=#${QA_WAITING_PR_NUMBER} request_changes_pending=${QA_WAITING_PR_COUNT}"
+    DISPATCH_IS_CONTINUITY=1
+    return 0
+  fi
+
   if [[ "$RECENT_PR_EVENT_COUNT" -gt 0 ]] && [[ -n "$RECENT_PR_NUMBER" ]]; then
     DISPATCH_AGENT="qa"
     DISPATCH_PR_NUMBER="$RECENT_PR_NUMBER"
@@ -937,6 +949,8 @@ write_heartbeat() {
     "auto_ready_action": "${AUTO_READY_ACTION}",
     "merge_actions": "${MERGE_ACTIONS:-none}",
     "unreviewed_pr_count": $UNREVIEWED_PR_COUNT,
+    "qa_waiting_pr_count": ${QA_WAITING_PR_COUNT:-0},
+    "qa_waiting_pr_number": "${QA_WAITING_PR_NUMBER:-}",
     "open_issue_count": $OPEN_ISSUE_COUNT,
     "assigned_issue_count": $ASSIGNED_ISSUE_COUNT,
     "unassigned_issue_count": $UNASSIGNED_ISSUE_COUNT,

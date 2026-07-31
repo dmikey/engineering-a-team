@@ -357,10 +357,7 @@ jobs:
 
       # ── Post PR comment ──────────────────────────────────────────────────
       - name: Post review comment on PR
-        if: |
-          (github.event_name == 'pull_request' ||
-           github.event_name == 'workflow_call') &&
-          steps.ctx.outputs.pr_number != 'N/A'
+        if: steps.ctx.outputs.pr_number != 'N/A'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           QA_RESPONSE: ${{ steps.qa_response.outputs.response }}
