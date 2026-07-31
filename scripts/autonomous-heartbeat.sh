@@ -413,7 +413,7 @@ PYEOF
   )"
 
   run_json="$(gh run list --limit 80 --json workflowName,conclusion,updatedAt,status,createdAt 2>/dev/null || echo '[]')"
-  ACTIVE_WORK_RUN_COUNT="$(python3 -c 'import json,sys; print(sum(1 for r in json.loads(sys.argv[1]) if r.get("status") in ("in_progress", "queued", "waiting", "requested", "pending")))' "$run_json" 2>/dev/null || echo 0)"
+  ACTIVE_WORK_RUN_COUNT="$(python3 -c 'import json,sys; names=("manual agent runner", "assign top priority agent"); print(sum(1 for r in json.loads(sys.argv[1]) if r.get("status") in ("in_progress", "queued", "waiting", "requested", "pending") and (r.get("workflowName") or "").lower() in names))' "$run_json" 2>/dev/null || echo 0)"
   FAILED_ACTION_COUNT="$(
     ACTION_FAILURE_WINDOW_HOURS="$ACTION_FAILURE_WINDOW_HOURS" python3 - <<'PYEOF' "$run_json"
 import json, os, sys
@@ -798,8 +798,7 @@ choose_dispatch() {
 
   if [[ "$OPEN_ISSUE_COUNT" -gt 0 ]] &&
      [[ "$ASSIGNED_ISSUE_COUNT" -eq 0 ]] &&
-     [[ "$OPEN_PR_COUNT" -eq 0 ]] &&
-     [[ "$ACTIVE_WORK_RUN_COUNT" -eq 0 ]]; then
+      [[ "$OPEN_PR_COUNT" -eq 0 ]]; then
     DISPATCH_AGENT="pm"
     DISPATCH_TASK="groom-backlog"
     DISPATCH_REASON="idle-team-assign-most-urgent open=${OPEN_ISSUE_COUNT} unassigned=${UNASSIGNED_ISSUE_COUNT}"
