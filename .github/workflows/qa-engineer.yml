@@ -57,6 +57,7 @@ jobs:
   qa-review:
     name: Quinn · QA Engineer Review
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Run on PRs, manual dispatch, workflow_call, or issues labeled "needs-qa"
     if: |
       github.event_name == 'pull_request' ||
@@ -69,7 +70,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          # Full history needed only for pull_request events (git diff against base).
+          # Non-PR triggers (workflow_dispatch, workflow_call, issues) don't use git
+          # diff and benefit from the faster shallow clone.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
 
       # ── Gather context ───────────────────────────────────────────────────
       - name: Gather PR context
@@ -87,7 +91,7 @@ jobs:
             # Diff stats and content (truncated to stay within token limits)
             DIFF_STAT=$(git diff "origin/$BASE_REF"...HEAD --stat 2>/dev/null | head -80 || echo "N/A")
             FILES=$(git diff --name-only "origin/$BASE_REF"...HEAD 2>/dev/null | head -50 || echo "N/A")
-            DIFF_CONTENT=$(git diff "origin/$BASE_REF"...HEAD 2>/dev/null | head -400 || echo "N/A")
+            DIFF_CONTENT=$(git diff "origin/$BASE_REF"...HEAD 2>/dev/null | head -200 || echo "N/A")
             PR_BODY=$(gh pr view "$PR_NUMBER" --json body --jq '.body' 2>/dev/null || echo "")
 
           elif [ -n "${{ inputs.pr_number }}" ]; then
@@ -98,7 +102,7 @@ jobs:
             PR_BODY=$(echo "$PR_INFO" | python3 -c "import json,sys; print(json.load(sys.stdin).get('body',''))" 2>/dev/null || echo "")
             DIFF_STAT=$(gh pr diff "$PR_NUMBER" --stat 2>/dev/null | head -80 || echo "N/A")
             FILES=$(gh pr diff "$PR_NUMBER" --name-only 2>/dev/null | head -50 || echo "N/A")
-            DIFF_CONTENT=$(gh pr diff "$PR_NUMBER" 2>/dev/null | head -400 || echo "N/A")
+            DIFF_CONTENT=$(gh pr diff "$PR_NUMBER" 2>/dev/null | head -200 || echo "N/A")
 
           else
             # No PR — review the issue body or extra context
@@ -228,15 +232,31 @@ jobs:
             If no issues found, write "No issues found."
 
             ### Security Assessment
-            Evaluate for each of the OWASP Top 10 categories relevant to these
-            changes: A01 Broken Access Control, A02 Cryptographic Failures,
-            A03 Injection (SQL/command/LDAP/XSS), A04 Insecure Design,
-            A05 Security Misconfiguration, A06 Vulnerable & Outdated Components,
-            A07 Identification & Authentication Failures, A08 Software &
-            Data Integrity Failures, A09 Security Logging & Monitoring Failures,
-            A10 Server-Side Request Forgery. Also check for: secret/token
-            exposure in code or logs, insecure dependency versions, and
-            auth bypass patterns. State "No security concerns" if clean.
+            Evaluate for ALL of the OWASP Top 10 categories relevant to these
+            changes and explicitly note findings or "Not applicable" for each:
+            - **A01 Broken Access Control**: missing authorisation checks, IDOR,
+              path traversal, privilege escalation
+            - **A02 Cryptographic Failures**: weak/absent encryption, hardcoded
+              secrets, plaintext sensitive data, insecure hash algorithms (MD5/SHA1)
+            - **A03 Injection**: SQL, command, LDAP, XSS, template injection; any
+              unsanitised user input flowing into interpreters
+            - **A04 Insecure Design**: missing threat modelling, unsafe default
+              configs, lack of rate limiting or input validation
+            - **A05 Security Misconfiguration**: overly permissive CORS/CSP, debug
+              modes enabled, verbose error messages leaking internals
+            - **A06 Vulnerable & Outdated Components**: pinned dependency versions
+              with known CVEs, use of deprecated/unmaintained libraries
+            - **A07 Identification & Authentication Failures**: weak session
+              management, missing MFA paths, predictable tokens
+            - **A08 Software & Data Integrity Failures**: unverified downloads,
+              unsigned packages, unsafe deserialisation, insecure CI/CD pipelines
+            - **A09 Security Logging & Monitoring Failures**: absent or insufficient
+              audit logging, secrets appearing in log output
+            - **A10 Server-Side Request Forgery (SSRF)**: user-controlled URLs
+              passed to HTTP clients without validation
+            Also check for: hardcoded credentials or API keys, insecure randomness,
+            and overly broad GitHub Actions permissions.
+            State "No security concerns identified" if the changes are clean.
 
             ### Test Coverage Gaps
             List specific missing tests with their purpose. State "Coverage looks
@@ -259,10 +279,20 @@ jobs:
           import os, sys
           response = os.environ.get("QA_RESPONSE", "")
           if response.startswith("⚠️"):
-              print(f"ERROR: Model call failed — {response}", file=sys.stderr)
+              print(
+                  f"ERROR: Model call failed — {response}\n"
+                  "Check that MODELS_TOKEN is valid, the model identifier is correct,\n"
+                  "and that the GitHub Models API is reachable.",
+                  file=sys.stderr,
+              )
               sys.exit(1)
           if not response.strip():
-              print("ERROR: Empty response received from model.", file=sys.stderr)
+              print(
+                  "ERROR: Empty response received from model.\n"
+                  "The API call may have timed out or the response was truncated.\n"
+                  "Consider reducing AGENT_MAX_TOKENS or the size of the diff context.",
+                  file=sys.stderr,
+              )
               sys.exit(1)
           PY
 
@@ -318,6 +348,9 @@ jobs:
 
       # ── Open issue for HIGH/CRITICAL findings ───────────────────────────
       - name: Open issue for serious findings
+        # Non-critical step — a failure to create the tracking issue must not
+        # block the overall QA workflow run.
+        continue-on-error: true
         if: |
           contains(steps.qa.outputs.response, 'CRITICAL') ||
           (env.QA_SEVERITY_THRESHOLD != 'CRITICAL' &&
