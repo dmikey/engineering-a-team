@@ -302,20 +302,13 @@ jobs:
       # ── Apply priority labels and trigger Copilot assignment workflow ─────
       - name: Apply priority labels and trigger top issue agent workflow
         if: |
-          steps.pm-groom.outputs.response != '' &&
-          !startsWith(steps.pm-groom.outputs.response, '⚠️') &&
+          steps.data.outputs.task == 'groom-backlog' &&
           steps.data.outputs.open_count != '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GROOMING_REPORT: ${{ steps.pm-groom.outputs.response }}
           ASSIGNMENT_OWNER: ${{ github.actor }}
         run: |
-          # Fail if the grooming report is a model error
-          if echo "$GROOMING_REPORT" | grep -q '⚠️ Model call failed'; then
-            echo "::error::Grooming model call failed — upstream API error. Skipping label and dispatch."
-            exit 1
-          fi
-
           # Ensure priority labels exist
           for LABEL in "priority: critical" "priority: high" "priority: medium" "priority: low" "blocked"; do
             COLOR=""
