@@ -303,6 +303,38 @@ router:
     "/council":  council-discussion.yml
     "/profile":  agent-router.yml
 
+# ─── Agent Health Check ──────────────────────────────────────────────────────
+
+agent_health_check:
+  # Enable or disable the agent health check workflow.
+  # Repository variable: HEALTH_CHECK_ENABLED (true/false)
+  enabled: true
+
+  # Cron schedule for the health check (UTC).
+  # Defined in .github/workflows/agent-health-check.yml.
+  schedule: "0 */6 * * *"   # Every 6 hours
+
+  # Analysis window in hours.  Runs older than this are excluded from metrics.
+  # Repository variable: HEALTH_PERIOD_HOURS
+  period_hours: 24
+
+  # Success-rate % below which an agent is classified as DEGRADED.
+  # Repository variable: HEALTH_WARN_THRESHOLD
+  warn_threshold: 85
+
+  # Success-rate % below which an agent is classified as CRITICAL.
+  # Repository variable: HEALTH_CRIT_THRESHOLD
+  crit_threshold: 70
+
+  # Hours without any run before an agent is classified as INACTIVE.
+  # Repository variable: HEALTH_INACTIVITY_HOURS
+  inactivity_hours: 48
+
+  # Labels applied to health dashboard Issues (fallback) and alert Issues.
+  labels:
+    - agent-health
+    - agent-alert
+
 # ─── Roadmap Collaboration ───────────────────────────────────────────────────
 
 roadmap_collaboration:

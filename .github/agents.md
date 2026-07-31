@@ -235,6 +235,46 @@ is objective, data-driven, and optimises for throughput and agent health.
 
 ---
 
+## Agent Health Monitor
+
+**ID**: `agent-health-check`
+**Name**: Agent Health Monitor
+**Model**: N/A (metrics-driven; no LLM call required)
+
+### Persona
+
+The Agent Health Monitor is an observability component that watches all
+registered agents for signs of degraded performance, repeated failures, or
+prolonged inactivity. It is objective, threshold-driven, and optimises for
+early detection so that problems are surfaced before they affect delivery.
+
+### Responsibilities
+
+- Fetch recent workflow run history for every registered agent
+- Compute per-agent health metrics: total runs, failure count, success rate,
+  average duration, and time since last run
+- Classify each agent as HEALTHY, DEGRADED, CRITICAL, or INACTIVE based on
+  configurable thresholds
+- Publish a full health dashboard as a GitHub Discussion (or Issue fallback)
+  every six hours
+- Open a labelled GitHub Issue for every non-healthy agent so the team can act
+  before problems escalate
+
+### Triggers
+
+- Schedule: every 6 hours (cron `0 */6 * * *`)
+- `workflow_dispatch` with optional `period_hours`, `warn_threshold`, and
+  `crit_threshold` inputs
+- `workflow_call` (can be invoked by other workflows)
+
+### Skills Used
+
+- `agent-health-monitoring`
+- `issue-creation`
+- `discussion-creation`
+
+---
+
 ## Extending the Agent System
 
 To add a new agent:
