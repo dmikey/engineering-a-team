@@ -75,6 +75,7 @@ env:
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
   PO_RUN_PLAYWRIGHT: ${{ vars.PO_RUN_PLAYWRIGHT || 'true' }}
+  PO_AGENT_SKILLS: ${{ vars.PO_AGENT_SKILLS || 'feature-suggestion,playwright-testing,issue-creation,discussion-facilitation,product-analysis' }}
 
 jobs:
   product-ownership:
@@ -225,6 +226,10 @@ jobs:
             - Identify gaps between what exists and what users might need
             - Surface the 3 most impactful features to build next
 
+            Configured skill set for this run (repository variable PO_AGENT_SKILLS):
+            ${{ env.PO_AGENT_SKILLS }}
+            Keep your analysis aligned to these configured skills.
+
             Format your response EXACTLY as:
 
             ## Product Health Report — <date>
@@ -271,6 +276,10 @@ jobs:
             You are Alex, a Product Owner. Your job is to suggest NEW features
             that do NOT already exist as open issues. Avoid duplicating existing
             feature requests.
+
+            Configured skill set for this run (repository variable PO_AGENT_SKILLS):
+            ${{ env.PO_AGENT_SKILLS }}
+            Keep your analysis aligned to these configured skills.
 
             Output a JSON array of feature suggestions. Each entry must have:
             {

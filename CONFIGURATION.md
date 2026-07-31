@@ -86,6 +86,7 @@ Settings → Secrets and variables → Variables → New repository variable
 | `QA_MODEL` | `gpt-4o-mini` | Override model for QA Engineer |
 | `QA_SEVERITY_THRESHOLD` | `HIGH` | Minimum severity to open a tracking issue. Options: `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` |
 | `QA_COLLAB_REPOSITORIES` | _(empty)_ | Optional comma-separated `owner/repo` list used for cross-repo issue context and mirrored serious QA findings. The workflow uses up to the first 3 valid external repositories. Example: `octo-org/frontend,octo-org/backend` |
+| `QA_AGENT_SKILLS` | `code-review,issue-creation,pr-feedback,security-scan` | Comma-separated skill set injected into Quinn's system prompt at runtime |
 
 ### Project Manager Variables
 
@@ -93,6 +94,7 @@ Settings → Secrets and variables → Variables → New repository variable
 |----------|---------|-------------|
 | `PM_MODEL` | `gpt-4o-mini` | Override model for Project Manager |
 | `PM_MILESTONE_LOOKAHEAD_DAYS` | `30` | Days before a milestone due date to start drift detection |
+| `PM_AGENT_SKILLS` | `backlog-grooming,milestone-management,discussion-creation,issue-labeling,skill-development-analysis` | Comma-separated skill set injected into Morgan's system prompts at runtime |
 
 ### Product Owner Variables
 
@@ -101,6 +103,7 @@ Settings → Secrets and variables → Variables → New repository variable
 | `PO_MODEL` | `gpt-4o-mini` | Override model for Product Owner |
 | `PO_RUN_PLAYWRIGHT` | `true` | Set to `false` to disable Playwright test runs |
 | `PLAYWRIGHT_BASE_URL` | _(empty)_ | Base URL passed to Playwright tests |
+| `PO_AGENT_SKILLS` | `feature-suggestion,playwright-testing,issue-creation,discussion-facilitation,product-analysis` | Comma-separated skill set injected into Alex's system prompts at runtime |
 
 ### Self-Improvement Variables
 
@@ -129,6 +132,7 @@ Settings → Secrets and variables → Variables → New repository variable
 |----------|---------|-------------|
 | `COUNCIL_MODEL` | `gpt-4o` | Model for Council Moderator synthesis |
 | `COUNCIL_DISCUSSION_CATEGORY` | `Team Decisions` | GitHub Discussion category for council decisions |
+| `COUNCIL_AGENT_SKILLS` | `discussion-creation` | Comma-separated skill set injected into Casey's moderator prompt at runtime |
 
 Council automation cadence is configured in workflow YAML:
 
@@ -233,6 +237,11 @@ Skills are documented in [`.github/skills.md`](./.github/skills.md). They
 describe the capabilities agents use and the GitHub APIs they call. This file
 is a reference — actual skill implementation lives in the workflow steps and
 composite actions.
+
+To customize each role's active skill set without editing workflow YAML, update
+the role-specific `*_AGENT_SKILLS` repository variables above. These values are
+loaded on every workflow run, so behavior changes apply immediately to the next
+agent execution.
 
 ---
 

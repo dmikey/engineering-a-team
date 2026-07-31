@@ -340,8 +340,11 @@ Override defaults using GitHub repository variables
 | `AGENT_ROUTER_DISCUSSION_CATEGORY` | `General` | Discussion category used when router notifications are posted as discussions |
 | `QA_SEVERITY_THRESHOLD` | `HIGH` | Minimum severity to open an issue |
 | `QA_COLLAB_REPOSITORIES` | _(empty)_ | Optional comma-separated `owner/repo` list for cross-repo QA issue context and mirrored serious QA issues (uses up to 3 valid external repositories) |
+| `QA_AGENT_SKILLS` | `code-review,issue-creation,pr-feedback,security-scan` | Comma-separated skill set injected into QA prompts |
 | `PM_MILESTONE_LOOKAHEAD_DAYS` | `30` | Days ahead for milestone drift detection |
+| `PM_AGENT_SKILLS` | `backlog-grooming,milestone-management,discussion-creation,issue-labeling,skill-development-analysis` | Comma-separated skill set injected into PM prompts |
 | `PO_RUN_PLAYWRIGHT` | `true` | Run Playwright tests when config is found |
+| `PO_AGENT_SKILLS` | `feature-suggestion,playwright-testing,issue-creation,discussion-facilitation,product-analysis` | Comma-separated skill set injected into PO prompts |
 | `REFERENCE_APP_REPO` | current repository | Optional override for the `owner/repo` used for the Get Milk benchmark app |
 | `REFERENCE_APP_BASE_URL` | _(empty)_ | Optional live URL for the Get Milk benchmark app |
 | `SELF_IMPROVEMENT_MODEL` | `gpt-4o-mini` | Model for self-improvement evaluation |
@@ -349,6 +352,7 @@ Override defaults using GitHub repository variables
 | `SKILL_REMINDERS_OPT_IN` | `{}` | JSON object mapping known agent names to `true`/`false` reminder opt-ins |
 | `COPILOT_ASSIGNEE` | _(empty)_ | Optional native Copilot assignee identity |
 | `COUNCIL_DISCUSSION_CATEGORY` | `Team Decisions` | GitHub Discussion category |
+| `COUNCIL_AGENT_SKILLS` | `discussion-creation` | Comma-separated skill set injected into Council Moderator prompts |
 
 Shared agent interaction rules are defined in
 [`/.github/collaboration-rules.md`](./.github/collaboration-rules.md). The file
@@ -370,6 +374,12 @@ as a JSON object whose keys are agent names and whose values are booleans:
 ```
 
 Invalid JSON, unknown agent names, and non-boolean values are ignored.
+
+### Customizing role skill sets
+
+Set the `*_AGENT_SKILLS` variables as comma-separated lists to tailor each
+role's active capabilities. Changes are read fresh on every workflow run, so
+updated skill sets apply immediately to the next agent execution.
 
 Default automation cadence is tuned for active development:
 
