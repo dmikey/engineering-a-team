@@ -492,4 +492,6 @@ jobs:
           ---
           *🤖 Automated analysis by Quinn (QA Engineer Agent) · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
 
-          gh issue comment "$ISSUE_NUMBER" --body "$COMMENT"
+          gh issue comment "$ISSUE_NUMBER" --body "$COMMENT" || {
+            echo "Warning: Failed to post comment on needs-qa issue #$ISSUE_NUMBER — check permissions and issue state." >&2
+          }
