@@ -5,6 +5,7 @@ import unittest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 QA_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "qa-engineer.yml"
+CALL_GITHUB_MODEL_ACTION = REPO_ROOT / ".github" / "actions" / "call-github-model" / "action.yml"
 
 
 class QaCrossRepoCollaborationTests(unittest.TestCase):
@@ -100,6 +101,21 @@ class QaRobustnessTests(unittest.TestCase):
             "Warning: Failed to post comment on needs-qa issue",
             self.workflow_text,
         )
+
+
+class CallGithubModelActionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.action_text = CALL_GITHUB_MODEL_ACTION.read_text(encoding="utf-8")
+
+    def test_retries_are_present_without_retrying_auth_failures(self):
+        self.assertIn("--retry 3", self.action_text)
+        self.assertIn("--retry-delay 5", self.action_text)
+        self.assertNotIn("--retry-all-errors", self.action_text)
+
+    def test_model_call_timeout_is_capped(self):
+        self.assertIn("--connect-timeout 15", self.action_text)
+        self.assertIn("--max-time 90", self.action_text)
 
 
 if __name__ == "__main__":
