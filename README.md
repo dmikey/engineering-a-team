@@ -82,11 +82,19 @@ to execute:
 - `qa`: optional `pr_number` and `extra_context`
 - `pm`: `task` such as `groom-backlog`, `check-milestones`, `full-sprint-report`, `agent-performance-dashboard`, or `skill-development-suggestions` (optional `extra_context`: `period=<days> sort=<success-rate|runs|failures|avg-duration|last-run>`)
 - `po`: `task` such as `product-health-report`, `suggest-features`, or `run-playwright`, plus optional `feature_prompt`, `base_url`, and `extra_context`
-- `council`: `topic`, optional `issue_number`, and `extra_context`
+- `council`: `topic`, optional `issue_number`, optional `council_mode` (`discussion` or `role-adjustment`), and `extra_context`
 - `council-sprint`: optional `sprint_goal`, `issue_number`, and `extra_context` — runs the council sprint prioritization meeting
 - `roadmap`: set `task` to a roadmap horizon (for example `30/60/90 days`), optional `topic` as focus, and optional `extra_context`
 - `self-improvement`: `task` as `full-loop`, `benchmark-only`, or `copilot-handoff`, plus optional `reference_repo`, `base_url`, and `extra_context`
 - `task-assignment`: `task` as `assign-tasks` (default) or `workload-dashboard`, plus optional `extra_context`
+
+You can also request a council-driven role rebalance from comments with:
+
+```text
+/council adjust-roles focus on bug triage and test stability
+```
+
+That mode uses the latest workflow performance and workload metrics to promote a lead agent, shift overloaded agents into advisory roles, and publish an audit log of the changes.
 
 You can still run the individual workflows directly from the Actions tab if
 you want the workflow-specific form.

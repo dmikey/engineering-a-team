@@ -37,6 +37,79 @@ AGENTS: dict[str, dict[str, Any]] = {
     },
 }
 
+BASE_AGENT_ROLES = {
+    "Quinn (QA Engineer)": "QA Engineer",
+    "Morgan (Project Manager)": "Project Manager",
+    "Alex (Product Owner)": "Product Owner",
+}
+
+ADJUSTED_AGENT_ROLES = {
+    "Quinn (QA Engineer)": {
+        "lead": "Lead QA Engineer",
+        "support": "QA Engineer",
+        "advisor": "QA Advisor",
+    },
+    "Morgan (Project Manager)": {
+        "lead": "Lead Project Manager",
+        "support": "Project Manager",
+        "advisor": "Project Management Advisor",
+    },
+    "Alex (Product Owner)": {
+        "lead": "Lead Product Owner",
+        "support": "Product Owner",
+        "advisor": "Product Strategy Advisor",
+    },
+}
+
+PROJECT_FOCUS_KEYWORDS = {
+    "quality": (
+        "bug",
+        "crash",
+        "fix",
+        "incident",
+        "qa",
+        "quality",
+        "regression",
+        "reliability",
+        "security",
+        "stability",
+        "test",
+        "vulnerability",
+    ),
+    "delivery": (
+        "backlog",
+        "blocked",
+        "dependency",
+        "delivery",
+        "milestone",
+        "plan",
+        "priority",
+        "release",
+        "roadmap",
+        "schedule",
+        "sprint",
+        "timeline",
+    ),
+    "product": (
+        "acceptance criteria",
+        "customer",
+        "enhancement",
+        "feature",
+        "feedback",
+        "product",
+        "strategy",
+        "user",
+        "user story",
+        "value",
+    ),
+}
+
+FOCUS_AGENT = {
+    "quality": "Quinn (QA Engineer)",
+    "delivery": "Morgan (Project Manager)",
+    "product": "Alex (Product Owner)",
+}
+
 PERIOD_DAYS_WORKLOAD = 1   # 24 h window for "current workload"
 PERIOD_DAYS_PERF = 30      # 30-day window for performance metrics
 
@@ -45,6 +118,20 @@ PERIOD_DAYS_PERF = 30      # 30-day window for performance metrics
 
 def _parse_ts(raw: str) -> datetime:
     return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+
+
+def _success_rate(data: dict[str, Any]) -> float:
+    total = data["perf_runs"]
+    failures = data["perf_failures"]
+    return ((total - failures) / total * 100.0) if total else 100.0
+
+
+def _role_adjustment_min_score() -> float:
+    raw = os.environ.get("COUNCIL_ROLE_ADJUSTMENT_MIN_SCORE", "80")
+    try:
+        return float(raw)
+    except ValueError:
+        return 80.0
 
 
 # ── Metrics collection ────────────────────────────────────────────────────────
@@ -137,6 +224,100 @@ def build_agent_scores(metrics: dict[str, dict]) -> dict[str, float]:
         scores[name] = round(perf_score + avail_score, 1)
 
     return scores
+
+
+def infer_project_focus(context_text: str) -> str:
+    """Infer whether the current work is quality, delivery, or product focused."""
+    text = (context_text or "").lower()
+    best_focus = "balanced"
+    best_score = 0
+
+    for focus, keywords in PROJECT_FOCUS_KEYWORDS.items():
+        score = sum(1 for keyword in keywords if keyword in text)
+        if score > best_score:
+            best_focus = focus
+            best_score = score
+
+    return best_focus
+
+
+def recommend_role_adjustments(
+    metrics: dict[str, dict],
+    context_text: str = "",
+) -> list[dict]:
+    """Recommend temporary operating roles based on metrics and project needs."""
+    scores = build_agent_scores(metrics)
+    focus = infer_project_focus(context_text)
+    preferred_agent = FOCUS_AGENT.get(focus)
+    lead_threshold = _role_adjustment_min_score()
+
+    ranked_agents = sorted(
+        metrics,
+        key=lambda name: (
+            1 if name == preferred_agent else 0,
+            scores.get(name, 0.0),
+            _success_rate(metrics[name]),
+            -metrics[name]["active_runs"],
+            -metrics[name]["recent_runs"],
+        ),
+        reverse=True,
+    )
+
+    lead_agent = ranked_agents[0] if ranked_agents else None
+    support_agent = ranked_agents[1] if len(ranked_agents) > 1 else None
+
+    adjustments: list[dict] = []
+    for name, data in metrics.items():
+        default_role = BASE_AGENT_ROLES.get(name, name)
+        role_map = ADJUSTED_AGENT_ROLES.get(name, {})
+        success_rate = _success_rate(data)
+        score = scores.get(name, 0.0)
+        active_runs = data["active_runs"]
+        recent_runs = data["recent_runs"]
+        overloaded = active_runs > 0 or recent_runs >= 4
+        degraded = success_rate < 80.0
+
+        if name == lead_agent and score >= lead_threshold and not degraded and not overloaded:
+            adjusted_role = role_map.get("lead", default_role)
+            reason = (
+                f"Best fit for the current {focus} focus with an availability "
+                f"score of {score:.1f}/100."
+                if focus != "balanced"
+                else f"Highest overall availability score at {score:.1f}/100."
+            )
+        elif name == support_agent and not degraded and active_runs == 0:
+            adjusted_role = role_map.get("support", default_role)
+            reason = f"Healthy backup capacity with an availability score of {score:.1f}/100."
+        elif degraded:
+            adjusted_role = role_map.get("advisor", default_role)
+            reason = f"Recent success rate dropped to {success_rate:.1f}%, so advisory coverage is safer."
+        elif overloaded:
+            adjusted_role = role_map.get("advisor", default_role)
+            reason = (
+                f"Current workload is elevated ({active_runs} active runs, "
+                f"{recent_runs} runs in the last 24h)."
+            )
+        else:
+            adjusted_role = role_map.get("support", default_role)
+            reason = f"No change required; score remains healthy at {score:.1f}/100."
+
+        adjustments.append(
+            {
+                "agent": name,
+                "default_role": default_role,
+                "adjusted_role": adjusted_role,
+                "changed": adjusted_role != default_role,
+                "focus": focus,
+                "availability_score": score,
+                "success_rate": success_rate,
+                "active_runs": active_runs,
+                "recent_runs": recent_runs,
+                "reason": reason,
+            }
+        )
+
+    adjustments.sort(key=lambda item: (not item["changed"], -item["availability_score"], item["agent"]))
+    return adjustments
 
 
 # ── Issue matching ────────────────────────────────────────────────────────────
@@ -250,6 +431,67 @@ def render_assignment_table(recommendations: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def render_role_adjustment_report(
+    metrics: dict[str, dict],
+    current_date: str,
+    workflow_url: str,
+    context_text: str = "",
+) -> str:
+    focus = infer_project_focus(context_text)
+    adjustments = recommend_role_adjustments(metrics, context_text)
+    adjustment_lines = [
+        "| Agent | Default Role | Adjusted Role | Score | Success Rate | Active Runs | 24 h Runs | Status |",
+        "|-------|--------------|---------------|------:|-------------:|------------:|----------:|--------|",
+    ]
+    audit_lines = [
+        "| Timestamp | Agent | Change | Reason |",
+        "|-----------|-------|--------|--------|",
+    ]
+
+    changed_rows = 0
+    for item in adjustments:
+        status = "Changed" if item["changed"] else "Unchanged"
+        adjustment_lines.append(
+            f"| {item['agent']} | {item['default_role']} | {item['adjusted_role']} "
+            f"| {item['availability_score']:.1f} | {item['success_rate']:.1f}% "
+            f"| {item['active_runs']} | {item['recent_runs']} | {status} |"
+        )
+        if item["changed"]:
+            changed_rows += 1
+            audit_lines.append(
+                f"| {current_date} | {item['agent']} | {item['default_role']} → {item['adjusted_role']} "
+                f"| {item['reason']} |"
+            )
+
+    if changed_rows == 0:
+        audit_lines.append(f"| {current_date} | — | No role changes required | All agents remain in their default roles. |")
+
+    return "\n".join(
+        [
+            f"# 🔄 Dynamic Agent Role Adjustment — {current_date}",
+            "",
+            "> Generated by Casey (Council Moderator)",
+            "",
+            f"**Detected Focus**: `{focus}`  ",
+            f"**Role Changes Applied**: {changed_rows}",
+            "",
+            "## Real-Time Role Allocation",
+            "",
+            "Roles are adjusted from recent workflow performance and workload signals so",
+            "the most capable agent can lead while overloaded or degraded agents shift",
+            "into advisory coverage.",
+            "",
+            "\n".join(adjustment_lines),
+            "",
+            "## Audit Log",
+            "",
+            "\n".join(audit_lines),
+            "",
+            f"*🤖 Council Moderator role adjustment · [Workflow run]({workflow_url})*",
+        ]
+    )
+
+
 def render_dashboard(
     metrics: dict[str, dict],
     scores: dict[str, float],
@@ -297,7 +539,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Dynamic Task Assignment System")
     parser.add_argument("--runs", required=True, help="Path to workflow runs JSON")
     parser.add_argument("--issues", required=True, help="Path to open issues JSON")
-    parser.add_argument("--output", choices=["dashboard", "recommendations"], default="dashboard")
+    parser.add_argument(
+        "--output",
+        choices=["dashboard", "recommendations", "role-adjustments", "role-adjustments-json"],
+        default="dashboard",
+    )
+    parser.add_argument(
+        "--context-text",
+        default="",
+        help="Optional project context used when inferring the desired role focus",
+    )
     args = parser.parse_args()
 
     now = datetime.now(timezone.utc)
@@ -317,6 +568,10 @@ def main() -> None:
 
     if args.output == "recommendations":
         print(json.dumps(recommendations, indent=2, default=str))
+    elif args.output == "role-adjustments-json":
+        print(json.dumps(recommend_role_adjustments(metrics, args.context_text), indent=2, default=str))
+    elif args.output == "role-adjustments":
+        print(render_role_adjustment_report(metrics, current_date, workflow_url, args.context_text))
     else:
         print(render_dashboard(metrics, scores, recommendations, current_date, workflow_url))
 

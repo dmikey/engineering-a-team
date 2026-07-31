@@ -25,10 +25,14 @@ on:
   pull_request:
     types: [labeled]
   workflow_run:
-    workflows: ["Product Owner Agent"]
+    workflows: ["Product Owner Agent", "Task Assignment"]
     types: [completed]
   workflow_dispatch:
     inputs:
+      mode:
+        description: 'discussion | role-adjustment'
+        required: false
+        default: discussion
       topic:
         description: 'Topic for council discussion'
         required: true
@@ -40,6 +44,11 @@ on:
         required: false
   workflow_call:
     inputs:
+      mode:
+        type: string
+        description: 'discussion | role-adjustment'
+        required: false
+        default: discussion
       topic:
         type: string
         description: 'Topic for council discussion'
@@ -72,6 +81,7 @@ permissions:
 
 env:
   COUNCIL_MODEL: ${{ vars.COUNCIL_MODEL || 'gpt-4o' }}
+  COUNCIL_ROLE_ADJUSTMENT_MIN_SCORE: ${{ vars.COUNCIL_ROLE_ADJUSTMENT_MIN_SCORE || '80' }}
   AGENT_MODEL: ${{ vars.AGENT_MODEL || 'gpt-4o-mini' }}
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
@@ -95,7 +105,7 @@ jobs:
 
     outputs:
       decision_url: ${{ steps.post-decision.outputs.url }}
-      decision: ${{ steps.moderator.outputs.response }}
+      decision: ${{ steps.final-record.outputs.body }}
 
     steps:
       - name: Checkout repository
@@ -108,13 +118,27 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Determine topic
+          MODE="${{ inputs.mode }}"
+          if [ -z "$MODE" ]; then
+            if [ "${{ github.event_name }}" = "workflow_run" ] && [ "${{ github.event.workflow_run.name }}" = "Task Assignment" ]; then
+             MODE="role-adjustment"
+            else
+             MODE="discussion"
+            fi
+          fi
+
           if [ -n "${{ inputs.topic }}" ]; then
             TOPIC="${{ inputs.topic }}"
             CONTEXT="${{ inputs.context }}"
             REF_NUMBER="${{ inputs.issue_number }}"
           elif [ "${{ github.event_name }}" = "workflow_run" ]; then
-            TOPIC="Product Decision Review — Product Owner run #${{ github.event.workflow_run.run_number }}"
-            CONTEXT="Triggered from Product Owner workflow completion (${{ github.event.workflow_run.html_url }})"
+            if [ "$MODE" = "role-adjustment" ]; then
+             TOPIC="Dynamic Agent Role Adjustment — Task Assignment run #${{ github.event.workflow_run.run_number }}"
+             CONTEXT="Triggered from Task Assignment workflow completion (${{ github.event.workflow_run.html_url }})"
+            else
+             TOPIC="Product Decision Review — Product Owner run #${{ github.event.workflow_run.run_number }}"
+             CONTEXT="Triggered from Product Owner workflow completion (${{ github.event.workflow_run.html_url }})"
+            fi
             REF_NUMBER=""
           elif [ "${{ github.event_name }}" = "schedule" ]; then
             TOPIC="Daily Product Decision Review"
@@ -147,6 +171,7 @@ jobs:
           CURRENT_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
           {
+            echo "mode=$MODE"
             echo "topic=$TOPIC"
             echo "ref_number=$REF_NUMBER"
             echo "current_date=$CURRENT_DATE"
@@ -189,21 +214,39 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REF_NUMBER: ${{ steps.resolve.outputs.ref_number }}
+          MODE: ${{ steps.resolve.outputs.mode }}
         run: |
-          COMMENT="## 🏛️ Council Discussion Initiated
+          if [ "$MODE" = "role-adjustment" ]; then
+            COMMENT="## 🔄 Dynamic Agent Role Adjustment Initiated
 
-          The engineering council has been convened to review this topic.
+          Casey is reviewing current project metrics to rebalance agent roles in real time.
 
           **Participants**:
-          - 🔍 Quinn (QA Engineer) — code quality, security, testing
-          - 📋 Morgan (Project Manager) — timeline, priorities, dependencies
-          - 🧪 Alex (Product Owner) — user value, product fit, acceptance criteria
+          - 🔍 Quinn (QA Engineer)
+          - 📋 Morgan (Project Manager)
+          - 🧪 Alex (Product Owner)
+
+          Agents will be notified of any role changes in the resulting audit record.
 
           **Moderator**: Casey (Council Moderator)
 
-          Results will be posted shortly. ⏳
-
           *[Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+          else
+            COMMENT="## 🏛️ Council Discussion Initiated
+
+            The engineering council has been convened to review this topic.
+
+            **Participants**:
+            - 🔍 Quinn (QA Engineer) — code quality, security, testing
+            - 📋 Morgan (Project Manager) — timeline, priorities, dependencies
+            - 🧪 Alex (Product Owner) — user value, product fit, acceptance criteria
+
+            **Moderator**: Casey (Council Moderator)
+
+            Results will be posted shortly. ⏳
+
+            *[Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+          fi
 
           if [ "${{ github.event_name }}" = "issues" ]; then
             gh issue comment "$REF_NUMBER" --body "$COMMENT"
@@ -215,7 +258,67 @@ jobs:
       # Round 1 — Each agent analyses independently
       # ══════════════════════════════════════════════════════════════════════
 
+      - name: Gather role-adjustment metrics
+        if: steps.resolve.outputs.mode == 'role-adjustment'
+        id: role-data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/actions/runs?per_page=100" > /tmp/council-runs-page1.json
+          gh api "repos/${{ github.repository }}/actions/runs?per_page=100&page=2" > /tmp/council-runs-page2.json
+          gh api "repos/${{ github.repository }}/actions/runs?status=in_progress&per_page=50" > /tmp/council-active-runs.json
+
+          python3 - <<'PYEOF'
+          import json
+
+          def load(path):
+              try:
+                  with open(path) as fh:
+                      return json.load(fh).get("workflow_runs", [])
+              except Exception:
+                  return []
+
+          runs = load("/tmp/council-runs-page1.json") + load("/tmp/council-runs-page2.json")
+          seen_ids = {run.get("id") for run in runs}
+          for run in load("/tmp/council-active-runs.json"):
+              if run.get("id") not in seen_ids:
+                  runs.append(run)
+
+          with open("/tmp/council-runs.json", "w", encoding="utf-8") as fh:
+              json.dump({"workflow_runs": runs}, fh)
+          PYEOF
+
+      - name: Build role-adjustment report
+        if: steps.resolve.outputs.mode == 'role-adjustment'
+        id: role-adjustment
+        env:
+          CURRENT_DATE: ${{ steps.resolve.outputs.current_date }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TOPIC: ${{ steps.resolve.outputs.topic }}
+          BASE_CONTEXT: ${{ steps.resolve.outputs.base_context }}
+        run: |
+          printf '[]\n' > /tmp/council-role-issues.json
+          {
+            echo "$TOPIC"
+            echo
+            echo "$BASE_CONTEXT"
+          } > /tmp/council-role-context.txt
+
+          python3 .github/scripts/task_assignment.py \
+            --runs /tmp/council-runs.json \
+            --issues /tmp/council-role-issues.json \
+            --output role-adjustments \
+            --context-text "$(cat /tmp/council-role-context.txt)" \
+            > /tmp/council-role-adjustment.md
+
+          {
+            echo "report<<ROLE_ADJUSTMENT_EOF"
+            cat /tmp/council-role-adjustment.md
+            echo "ROLE_ADJUSTMENT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Quinn — QA perspective
+        if: steps.resolve.outputs.mode != 'role-adjustment'
         id: qa-perspective
         uses: ./.github/actions/call-github-model
         with:
@@ -241,6 +344,7 @@ jobs:
             ${{ steps.resolve.outputs.base_context }}
 
       - name: Morgan — PM perspective
+        if: steps.resolve.outputs.mode != 'role-adjustment'
         id: pm-perspective
         uses: ./.github/actions/call-github-model
         with:
@@ -266,6 +370,7 @@ jobs:
             ${{ steps.resolve.outputs.base_context }}
 
       - name: Alex — PO perspective
+        if: steps.resolve.outputs.mode != 'role-adjustment'
         id: po-perspective
         uses: ./.github/actions/call-github-model
         with:
@@ -295,6 +400,7 @@ jobs:
       # ══════════════════════════════════════════════════════════════════════
 
       - name: Casey — Council Moderator synthesis
+        if: steps.resolve.outputs.mode != 'role-adjustment'
         id: moderator
         uses: ./.github/actions/call-github-model
         with:
@@ -363,6 +469,7 @@ jobs:
 
       # ── Post council decision ────────────────────────────────────────────
       - name: Compose full council record
+        if: steps.resolve.outputs.mode != 'role-adjustment'
         id: compose
         env:
           QA_RESP: ${{ steps.qa-perspective.outputs.response }}
@@ -402,12 +509,35 @@ jobs:
             echo "COUNCIL_RECORD_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Select final council record
+        id: final-record
+        env:
+          MODE: ${{ steps.resolve.outputs.mode }}
+          TOPIC: ${{ steps.resolve.outputs.topic }}
+          DISCUSSION_RECORD: ${{ steps.compose.outputs.full_record }}
+          ROLE_RECORD: ${{ steps.role-adjustment.outputs.report }}
+        run: |
+          if [ "$MODE" = "role-adjustment" ]; then
+            TITLE="🔄 Dynamic Agent Role Adjustment: $TOPIC"
+            BODY="$ROLE_RECORD"
+          else
+            TITLE="🏛️ Council Decision: $TOPIC"
+            BODY="$DISCUSSION_RECORD"
+          fi
+
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          {
+            echo "body<<COUNCIL_BODY_EOF"
+            echo "$BODY"
+            echo "COUNCIL_BODY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Post council decision
         id: post-decision
         uses: ./.github/actions/post-council-results
         with:
-          title: "🏛️ Council Decision: ${{ steps.resolve.outputs.topic }}"
-          body: ${{ steps.compose.outputs.full_record }}
+          title: ${{ steps.final-record.outputs.title }}
+          body: ${{ steps.final-record.outputs.body }}
           category: ${{ vars.COUNCIL_DISCUSSION_CATEGORY || 'Team Decisions' }}
           labels: 'council-decision'
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -420,18 +550,33 @@ jobs:
           REF_NUMBER: ${{ steps.resolve.outputs.ref_number }}
           DECISION_URL: ${{ steps.post-decision.outputs.url }}
           DECISION_TYPE: ${{ steps.post-decision.outputs.type }}
+          MODE: ${{ steps.resolve.outputs.mode }}
         run: |
-          COMMENT="## 🏛️ Council Decision Posted
+          if [ "$MODE" = "role-adjustment" ]; then
+            COMMENT="## 🔄 Dynamic Agent Role Adjustment Posted
 
-          The engineering council has reached a decision.
+            Casey has published a real-time role-adjustment record based on the latest workflow metrics.
 
-          **View full decision**: $DECISION_URL
-          **Posted as**: $DECISION_TYPE
+            **View full report**: $DECISION_URL
+            **Posted as**: $DECISION_TYPE
 
-          $(echo '${{ steps.moderator.outputs.response }}' | head -20)
+            This report includes the role allocation summary, immediate notifications, and the audit log entry.
 
-          ---
-          *🤖 Automated council decision · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+            ---
+            *🤖 Automated council role adjustment · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+          else
+            COMMENT="## 🏛️ Council Decision Posted
+
+            The engineering council has reached a decision.
+
+            **View full decision**: $DECISION_URL
+            **Posted as**: $DECISION_TYPE
+
+            $(echo '${{ steps.moderator.outputs.response }}' | head -20)
+
+            ---
+            *🤖 Automated council decision · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+          fi
 
           if [ -n "$REF_NUMBER" ] && { [ "${{ github.event_name }}" = "issues" ] || [ "${{ github.event_name }}" = "workflow_call" ]; }; then
             gh issue comment "$REF_NUMBER" --body "$COMMENT" 2>/dev/null || true

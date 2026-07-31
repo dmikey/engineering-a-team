@@ -28,6 +28,10 @@ on:
         description: 'Topic for council discussion'
         required: false
         default: ''
+      council_mode:
+        description: 'Council mode: discussion or role-adjustment'
+        required: false
+        default: 'discussion'
       sprint_goal:
         description: 'Sprint goal or focus area for council-sprint prioritization'
         required: false
@@ -92,6 +96,7 @@ jobs:
     if: ${{ inputs.agent == 'council' }}
     uses: ./.github/workflows/council-discussion.yml
     with:
+      mode: ${{ inputs.council_mode != '' && inputs.council_mode || 'discussion' }}
       topic: ${{ inputs.topic != '' && inputs.topic || 'Manual council discussion' }}
       context: ${{ inputs.extra_context }}
       issue_number: ${{ inputs.issue_number }}
