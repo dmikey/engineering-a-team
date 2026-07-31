@@ -180,6 +180,9 @@ Default rotation (keeps PM assigning and council cycling with no user):
 
 Loop-completion guarantees (the process acts on the user's behalf):
 
+- When open issues exist but none are assigned and no PR work is active, PM selects the most urgent issue immediately
+- PM uses model priorities when available and a deterministic priority-label/age fallback otherwise
+- The selected issue is visibly assigned to the triggering user and handed to the Copilot coding agent
 - Every non-draft open PR with no QA verdict (or a verdict older than the latest commit) gets a QA dispatch
 - When Quinn's QA comment recommends APPROVE, the supervisor submits the formal PR approval and merges (squash; `--auto-merge-prs false` to disable)
 - PRs where Quinn requested changes or blocked are left open and re-QA'd after new commits
