@@ -90,6 +90,17 @@ class QaRobustnessTests(unittest.TestCase):
         self.assertIn("steps.qa_response.outputs.response", self.workflow_text)
         self.assertIn("**Recommendation**: [🔄 REQUEST CHANGES]", self.workflow_text)
 
+    def test_needs_qa_issue_comment_handles_errors_gracefully(self):
+        """The needs-qa issue comment step must not fail the workflow on transient API errors."""
+        self.assertIn(
+            'gh issue comment "$ISSUE_NUMBER" --body "$COMMENT" || {',
+            self.workflow_text,
+        )
+        self.assertIn(
+            "Warning: Failed to post comment on needs-qa issue",
+            self.workflow_text,
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
