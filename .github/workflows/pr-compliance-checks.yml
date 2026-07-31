@@ -151,6 +151,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
           set -euo pipefail
 
@@ -167,6 +169,27 @@ jobs:
               --field body="$(cat compliance-report.md)"
           else
             gh pr comment "$PR_NUMBER" --body-file compliance-report.md
+          fi
+
+          ALERT_TITLE="⚠️ Compliance alert for PR #${PR_NUMBER}"
+          EXISTING_ALERT_ISSUE=$(gh issue list \
+            --state open \
+            --search "\"${ALERT_TITLE}\" in:title" \
+            --limit 1 \
+            --json title \
+            --jq ".[] | select(.title == \"${ALERT_TITLE}\") | .title" || true)
+
+          if [ -z "$EXISTING_ALERT_ISSUE" ]; then
+            ALERT_BODY=$(printf 'Non-compliance was detected for [PR #%s](%s) — **%s**.\n\nThe latest compliance report is attached to the workflow run:\n%s\n' \
+              "$PR_NUMBER" \
+              "$PR_URL" \
+              "$PR_TITLE" \
+              "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+
+            gh issue create \
+              --title "$ALERT_TITLE" \
+              --body "$ALERT_BODY" \
+              --label "bug" || true
           fi
 
           echo "::error::Non-compliance detected. Review the PR Compliance Checks report for details."
