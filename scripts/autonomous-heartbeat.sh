@@ -37,6 +37,7 @@ AUTO_READY_DRAFT_PRS="${AUTO_READY_DRAFT_PRS:-true}"
 TAIL_LINES="${TAIL_LINES:-80}"
 MAX_DISPATCHES_PER_HOUR="${MAX_DISPATCHES_PER_HOUR:-4}"
 ACTION_COOLDOWN_MIN="${ACTION_COOLDOWN_MIN:-30}"
+CONTINUITY_COOLDOWN_MIN="${CONTINUITY_COOLDOWN_MIN:-10}"
 MERGE_RETRY_COOLDOWN_MIN="${MERGE_RETRY_COOLDOWN_MIN:-60}"
 
 SEQUENCE=(
@@ -79,6 +80,7 @@ Options:
   --auto-merge-prs <bool>        Auto-merge approved, passing PRs (default: true)
   --max-dispatches-per-hour <n>  Global workflow dispatch budget (default: 4)
   --action-cooldown-min <m>      Cooldown for identical agent work (default: 30)
+  --continuity-cooldown-min <m>  Cooldown for idle-team/PR recovery (default: 10)
   --merge-retry-cooldown-min <m> Cooldown between merge attempts per PR (default: 60)
   --follow                       After start, stream daemon log in current terminal
   --tail-lines <n>               Number of log lines to show before follow (default: 80)
@@ -920,6 +922,7 @@ write_heartbeat() {
     "dispatches_last_hour": ${DISPATCHES_LAST_HOUR:-0},
     "max_dispatches_per_hour": $MAX_DISPATCHES_PER_HOUR,
     "action_cooldown_min": $ACTION_COOLDOWN_MIN,
+    "continuity_cooldown_min": $CONTINUITY_COOLDOWN_MIN,
     "failed_actions": $FAILED_ACTION_COUNT,
     "recent_pr_event_count": $RECENT_PR_EVENT_COUNT,
     "recent_pr_number": "${RECENT_PR_NUMBER}",
@@ -990,11 +993,16 @@ dispatch_slot() {
     echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Continuity reserve cycle=$cycle agent=$agent task=$task dispatches=${DISPATCHES_LAST_HOUR}/${MAX_DISPATCHES_PER_HOUR}" | tee -a "$LOG_FILE"
   fi
 
-  if action_on_cooldown "$dispatch_key" "$((ACTION_COOLDOWN_MIN * 60))" "dispatch"; then
+  local effective_cooldown_min="$ACTION_COOLDOWN_MIN"
+  if [[ "$DISPATCH_IS_CONTINUITY" -eq 1 ]]; then
+    effective_cooldown_min="$CONTINUITY_COOLDOWN_MIN"
+  fi
+
+  if action_on_cooldown "$dispatch_key" "$((effective_cooldown_min * 60))" "dispatch"; then
     local blocked_reason="$reason"
     if [[ "$DISPATCH_IS_CONTINUITY" -eq 1 ]]; then
       THROTTLE_STATUS="continuity-cooldown"
-      record_local_action "decision" "$dispatch_key" "throttled" "continuity-cooldown ${ACTION_COOLDOWN_MIN}m"
+      record_local_action "decision" "$dispatch_key" "throttled" "continuity-cooldown ${CONTINUITY_COOLDOWN_MIN}m"
       echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Throttle cycle=$cycle agent=$agent task=$task reason=continuity-cooldown" | tee -a "$LOG_FILE"
       write_heartbeat "throttled" "$cycle" "$slot" "$agent" "$task" "continuity action cooling down | $reason"
       return 0
@@ -1103,6 +1111,7 @@ start_daemon() {
     --auto-merge-prs "$AUTO_MERGE_PRS" \
     --max-dispatches-per-hour "$MAX_DISPATCHES_PER_HOUR" \
     --action-cooldown-min "$ACTION_COOLDOWN_MIN" \
+    --continuity-cooldown-min "$CONTINUITY_COOLDOWN_MIN" \
     --merge-retry-cooldown-min "$MERGE_RETRY_COOLDOWN_MIN" \
     >> "$LOG_FILE" 2>&1 &
   local pid=$!
@@ -1150,6 +1159,7 @@ install_service() {
   SERVICE_REF="$REF" \
   SERVICE_MAX_DISPATCHES="$MAX_DISPATCHES_PER_HOUR" \
   SERVICE_ACTION_COOLDOWN="$ACTION_COOLDOWN_MIN" \
+  SERVICE_CONTINUITY_COOLDOWN="$CONTINUITY_COOLDOWN_MIN" \
   SERVICE_MERGE_COOLDOWN="$MERGE_RETRY_COOLDOWN_MIN" \
   python3 - <<'PYEOF'
 import os
@@ -1162,6 +1172,7 @@ arguments = [
     "--ref", os.environ["SERVICE_REF"],
     "--max-dispatches-per-hour", os.environ["SERVICE_MAX_DISPATCHES"],
     "--action-cooldown-min", os.environ["SERVICE_ACTION_COOLDOWN"],
+    "--continuity-cooldown-min", os.environ["SERVICE_CONTINUITY_COOLDOWN"],
     "--merge-retry-cooldown-min", os.environ["SERVICE_MERGE_COOLDOWN"],
 ]
 payload = {
@@ -1307,6 +1318,7 @@ parse_common_flags() {
   AUTO_MERGE_PRS_ARG="$AUTO_MERGE_PRS"
   MAX_DISPATCHES_PER_HOUR_ARG="$MAX_DISPATCHES_PER_HOUR"
   ACTION_COOLDOWN_MIN_ARG="$ACTION_COOLDOWN_MIN"
+  CONTINUITY_COOLDOWN_MIN_ARG="$CONTINUITY_COOLDOWN_MIN"
   MERGE_RETRY_COOLDOWN_MIN_ARG="$MERGE_RETRY_COOLDOWN_MIN"
   FOLLOW_LOG="false"
   TAIL_LINES_ARG="$TAIL_LINES"
@@ -1363,6 +1375,10 @@ parse_common_flags() {
         ;;
       --action-cooldown-min)
         ACTION_COOLDOWN_MIN_ARG="${2:-}"
+        shift 2
+        ;;
+      --continuity-cooldown-min)
+        CONTINUITY_COOLDOWN_MIN_ARG="${2:-}"
         shift 2
         ;;
       --merge-retry-cooldown-min)
@@ -1455,6 +1471,11 @@ parse_common_flags() {
     exit 1
   fi
 
+  if [[ ! "$CONTINUITY_COOLDOWN_MIN_ARG" =~ ^[0-9]+$ ]] || [[ "$CONTINUITY_COOLDOWN_MIN_ARG" -lt 1 ]]; then
+    echo "Error: --continuity-cooldown-min must be an integer >= 1." >&2
+    exit 1
+  fi
+
   if [[ ! "$MERGE_RETRY_COOLDOWN_MIN_ARG" =~ ^[0-9]+$ ]] || [[ "$MERGE_RETRY_COOLDOWN_MIN_ARG" -lt 1 ]]; then
     echo "Error: --merge-retry-cooldown-min must be an integer >= 1." >&2
     exit 1
@@ -1475,6 +1496,7 @@ parse_common_flags() {
   AUTO_MERGE_PRS="$AUTO_MERGE_PRS_ARG"
   MAX_DISPATCHES_PER_HOUR="$MAX_DISPATCHES_PER_HOUR_ARG"
   ACTION_COOLDOWN_MIN="$ACTION_COOLDOWN_MIN_ARG"
+  CONTINUITY_COOLDOWN_MIN="$CONTINUITY_COOLDOWN_MIN_ARG"
   MERGE_RETRY_COOLDOWN_MIN="$MERGE_RETRY_COOLDOWN_MIN_ARG"
   TAIL_LINES="$TAIL_LINES_ARG"
 }

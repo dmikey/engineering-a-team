@@ -201,6 +201,7 @@ Local rate controls prevent an unchanged signal from producing unbounded runs:
 
 - At most 4 workflow dispatches per rolling hour
 - 30-minute cooldown for identical agent/task/PR decisions
+- 10-minute continuity cooldown when no delivery run or PR exists
 - 60-minute cooldown between merge attempts for the same PR
 - Only one Manual Agent Runner may be in progress
 - When no delivery run or PR exists, one continuity action may exceed the general hourly budget; cooldown and concurrency limits still apply
