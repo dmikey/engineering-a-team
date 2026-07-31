@@ -140,7 +140,9 @@ Simplest mode (single process in your terminal):
 scripts/autonomous-heartbeat.sh --interval 600
 ```
 
-That one command runs continuously and heartbeats every 10 minutes.
+That one command runs continuously and heartbeats every 10 minutes. The local
+supervisor makes orchestration, prioritization, merge, and throttle decisions;
+GitHub Actions executes the selected agent workflow using GitHub Models.
 
 Supervisor behavior per heartbeat cycle (event + time):
 
@@ -156,24 +158,25 @@ Supervisor behavior per heartbeat cycle (event + time):
 
 Priority order:
 
-1. No PM execution in last 24h: run `pm` task `full-sprint-report` (cadence guarantee)
-2. No council execution in last 24h: run `council` with an autonomous cycle topic (cadence guarantee)
-3. PR needs QA (no verdict, or verdict older than latest commit): run `qa` for that PR
-4. Recent PR event found: run `qa` for that PR
-5. Waiting/queued runs older than threshold: run `task-assignment` task `assign-tasks`
-6. Failed Actions found: run `pm` task `agent-performance-dashboard`
-7. Stale PR found: run `qa` against the oldest stale PR
-8. Stale Discussion found: run `pm` task `full-sprint-report` to drive discussion follow-through
-9. Stale Issues found: run `pm` task `groom-backlog`
-10. If nothing is stale/failing: use normal rotation schedule
+1. No task assignment execution in last 4h: run `task-assignment` task `assign-tasks`
+2. No PM execution in last 24h: run `pm` task `full-sprint-report`
+3. No council execution in last 24h: run `council` with an autonomous cycle topic
+4. No Product Owner execution in last 24h: run `po` task `product-health-report`
+5. PR needs QA (no verdict, or verdict older than latest commit): run `qa` for that PR
+6. Recent PR event found: run `qa` for that PR
+7. Waiting/queued runs older than threshold: run `task-assignment` task `assign-tasks`
+8. Failed Actions found: run `pm` task `agent-performance-dashboard`
+9. Stale PR, Discussion, or Issue found: dispatch its owning agent
+10. Otherwise use normal rotation; if a selected action is cooling down, choose another rotation action
 
 Default rotation (keeps PM assigning and council cycling with no user):
 
 1. `pm` → `full-sprint-report`
 2. `task-assignment` → `assign-tasks`
 3. `pm` → `groom-backlog`
-4. `council` → autonomous council cycle
-5. `pm` → `check-milestones`
+4. `po` → `product-health-report`
+5. `council` → autonomous council cycle
+6. `pm` → `check-milestones`
 
 Loop-completion guarantees (the process acts on the user's behalf):
 
@@ -182,6 +185,16 @@ Loop-completion guarantees (the process acts on the user's behalf):
 - PRs where Quinn requested changes or blocked are left open and re-QA'd after new commits
 - PM and council each run at least once every 24 hours, plus their rotation slots
 - `task-assignment` keeps issues assigned every rotation and whenever runs stall
+- Task assignment is guaranteed at least every 4 hours; PM, Product Owner, and council are guaranteed daily
+
+Local rate controls prevent an unchanged signal from producing unbounded runs:
+
+- At most 4 workflow dispatches per rolling hour
+- 30-minute cooldown for identical agent/task/PR decisions
+- 60-minute cooldown between merge attempts for the same PR
+- Only one Manual Agent Runner may be in progress
+- Throttle state survives daemon restarts in `.autonomous/action-state.tsv`
+- Every selected, throttled, and merge decision is recorded in `.autonomous/decisions.tsv`
 
 The daemon skips dispatch when `manual-agent-runner.yml` already has an active
 run, so it avoids overlapping/flooding runs.
@@ -198,7 +211,10 @@ scripts/autonomous-heartbeat.sh \
   --event-pr-window-min 20 \
   --waiting-run-min 15 \
   --auto-ready-draft-prs true \
-  --auto-merge-prs true
+  --auto-merge-prs true \
+  --max-dispatches-per-hour 4 \
+  --action-cooldown-min 30 \
+  --merge-retry-cooldown-min 60
 ```
 
 ```bash
@@ -220,6 +236,8 @@ Artifacts written locally:
 - PID file: `.autonomous/heartbeat.pid`
 - Log file: `.autonomous/heartbeat.log`
 - Heartbeat status: `.autonomous/heartbeat.json`
+- Persistent throttle state: `.autonomous/action-state.tsv`
+- Local decision history: `.autonomous/decisions.tsv`
 
 Use `scripts/autonomous-heartbeat.sh --help` for all options.
 

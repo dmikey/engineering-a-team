@@ -18,6 +18,8 @@ STATE_DIR="$ROOT_DIR/.autonomous"
 PID_FILE="$STATE_DIR/heartbeat.pid"
 LOG_FILE="$STATE_DIR/heartbeat.log"
 HEARTBEAT_FILE="$STATE_DIR/heartbeat.json"
+ACTION_STATE_FILE="$STATE_DIR/action-state.tsv"
+DECISION_LOG_FILE="$STATE_DIR/decisions.tsv"
 WORKFLOW_FILE="manual-agent-runner.yml"
 
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-900}"
@@ -31,11 +33,15 @@ EVENT_PR_WINDOW_MIN="${EVENT_PR_WINDOW_MIN:-20}"
 WAITING_RUN_MIN="${WAITING_RUN_MIN:-15}"
 AUTO_READY_DRAFT_PRS="${AUTO_READY_DRAFT_PRS:-true}"
 TAIL_LINES="${TAIL_LINES:-80}"
+MAX_DISPATCHES_PER_HOUR="${MAX_DISPATCHES_PER_HOUR:-4}"
+ACTION_COOLDOWN_MIN="${ACTION_COOLDOWN_MIN:-30}"
+MERGE_RETRY_COOLDOWN_MIN="${MERGE_RETRY_COOLDOWN_MIN:-60}"
 
 SEQUENCE=(
   "pm:full-sprint-report"
   "task-assignment:assign-tasks"
   "pm:groom-backlog"
+  "po:product-health-report"
   "council:"
   "pm:check-milestones"
 )
@@ -67,6 +73,9 @@ Options:
   --waiting-run-min <m>          Treat queued/waiting runs older than m minutes as stalled (default: 15)
   --auto-ready-draft-prs <bool>  Auto-mark recent non-WIP draft PRs ready for review (true/false)
   --auto-merge-prs <bool>        Auto-merge approved, passing PRs (default: true)
+  --max-dispatches-per-hour <n>  Global workflow dispatch budget (default: 4)
+  --action-cooldown-min <m>      Cooldown for identical agent work (default: 30)
+  --merge-retry-cooldown-min <m> Cooldown between merge attempts per PR (default: 60)
   --follow                       After start, stream daemon log in current terminal
   --tail-lines <n>               Number of log lines to show before follow (default: 80)
 
@@ -118,6 +127,7 @@ detect_models_token_mode() {
 
 ensure_prereqs() {
   mkdir -p "$STATE_DIR"
+  touch "$ACTION_STATE_FILE" "$DECISION_LOG_FILE"
 
   if [[ ! -x "$CLI_SCRIPT" ]]; then
     echo "Error: missing or non-executable script: $CLI_SCRIPT" >&2
@@ -181,6 +191,52 @@ to_int_or_zero() {
   fi
 }
 
+action_key() {
+  printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+}
+
+action_on_cooldown() {
+  local raw_key="$1"
+  local cooldown_seconds="$2"
+  local kind="$3"
+  local key now latest
+
+  key="$(action_key "$raw_key")"
+  now="$(date +%s)"
+  latest="$(awk -F '\t' -v key="$key" -v kind="$kind" '$2 == kind && $3 == key && $1 > latest { latest = $1 } END { print latest + 0 }' "$ACTION_STATE_FILE")"
+  [[ $((now - latest)) -lt "$cooldown_seconds" ]]
+}
+
+dispatch_budget_exhausted() {
+  local now cutoff
+  now="$(date +%s)"
+  cutoff=$((now - 3600))
+  DISPATCHES_LAST_HOUR="$(awk -F '\t' -v cutoff="$cutoff" '$1 >= cutoff && $2 == "dispatch" { count++ } END { print count + 0 }' "$ACTION_STATE_FILE" 2>/dev/null || echo 0)"
+  [[ "$DISPATCHES_LAST_HOUR" -ge "$MAX_DISPATCHES_PER_HOUR" ]]
+}
+
+record_local_action() {
+  local kind="$1"
+  local raw_key="$2"
+  local outcome="$3"
+  local reason="$4"
+  local now key
+
+  now="$(date +%s)"
+  key="$(action_key "$raw_key")"
+  printf '%s\t%s\t%s\n' "$now" "$kind" "$key" >> "$ACTION_STATE_FILE"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$kind" "$raw_key" "$outcome" "$reason" >> "$DECISION_LOG_FILE"
+
+  if [[ "$(wc -l < "$ACTION_STATE_FILE")" -gt 2000 ]]; then
+    tail -n 1000 "$ACTION_STATE_FILE" > "$ACTION_STATE_FILE.tmp"
+    mv "$ACTION_STATE_FILE.tmp" "$ACTION_STATE_FILE"
+  fi
+  if [[ "$(wc -l < "$DECISION_LOG_FILE")" -gt 10000 ]]; then
+    tail -n 5000 "$DECISION_LOG_FILE" > "$DECISION_LOG_FILE.tmp"
+    mv "$DECISION_LOG_FILE.tmp" "$DECISION_LOG_FILE"
+  fi
+}
+
 collect_supervisor_signals() {
   local pr_json discussion_json issue_json run_json
 
@@ -196,6 +252,8 @@ collect_supervisor_signals() {
   FAILED_ACTION_COUNT=0
   PM_RUNS_LAST_24H=0
   COUNCIL_RUNS_LAST_24H=0
+  TASK_ASSIGNMENT_RUNS_LAST_4H=0
+  PO_RUNS_LAST_24H=0
   RECENT_PR_EVENT_COUNT=0
   RECENT_PR_NUMBER=""
   RECENT_PR_IS_DRAFT=0
@@ -468,6 +526,60 @@ print(count)
 PYEOF
   )"
 
+  TASK_ASSIGNMENT_RUNS_LAST_4H="$(
+  python3 - <<'PYEOF' "$run_json"
+import json, sys
+from datetime import datetime, timezone
+
+now = datetime.now(timezone.utc)
+try:
+  runs = json.loads(sys.argv[1])
+except Exception:
+  runs = []
+
+count = 0
+for run in runs:
+  if "task assignment" not in (run.get("workflowName") or "").lower():
+    continue
+  if (run.get("conclusion") or "") in ("failure", "startup_failure", "timed_out", "cancelled"):
+    continue
+  try:
+    updated = datetime.fromisoformat(run.get("updatedAt", "").replace("Z", "+00:00"))
+  except Exception:
+    continue
+  if int((now - updated).total_seconds() // 3600) <= 4:
+    count += 1
+print(count)
+PYEOF
+  )"
+
+  PO_RUNS_LAST_24H="$(
+  python3 - <<'PYEOF' "$run_json"
+import json, sys
+from datetime import datetime, timezone
+
+now = datetime.now(timezone.utc)
+try:
+  runs = json.loads(sys.argv[1])
+except Exception:
+  runs = []
+
+count = 0
+for run in runs:
+  if "product owner" not in (run.get("workflowName") or "").lower():
+    continue
+  if (run.get("conclusion") or "") in ("failure", "startup_failure", "timed_out", "cancelled"):
+    continue
+  try:
+    updated = datetime.fromisoformat(run.get("updatedAt", "").replace("Z", "+00:00"))
+  except Exception:
+    continue
+  if int((now - updated).total_seconds() // 3600) <= 24:
+    count += 1
+print(count)
+PYEOF
+  )"
+
   STALE_PR_COUNT="$(to_int_or_zero "$STALE_PR_COUNT")"
   STALE_PR_AGE_HOURS="$(to_int_or_zero "$STALE_PR_AGE_HOURS")"
   STALE_DISCUSSION_COUNT="$(to_int_or_zero "$STALE_DISCUSSION_COUNT")"
@@ -476,11 +588,26 @@ PYEOF
   FAILED_ACTION_COUNT="$(to_int_or_zero "$FAILED_ACTION_COUNT")"
   PM_RUNS_LAST_24H="$(to_int_or_zero "$PM_RUNS_LAST_24H")"
   COUNCIL_RUNS_LAST_24H="$(to_int_or_zero "$COUNCIL_RUNS_LAST_24H")"
+  TASK_ASSIGNMENT_RUNS_LAST_4H="$(to_int_or_zero "$TASK_ASSIGNMENT_RUNS_LAST_4H")"
+  PO_RUNS_LAST_24H="$(to_int_or_zero "$PO_RUNS_LAST_24H")"
   UNREVIEWED_PR_COUNT="$(to_int_or_zero "$UNREVIEWED_PR_COUNT")"
   RECENT_PR_EVENT_COUNT="$(to_int_or_zero "$RECENT_PR_EVENT_COUNT")"
   RECENT_PR_IS_DRAFT="$(to_int_or_zero "$RECENT_PR_IS_DRAFT")"
   WAITING_RUN_COUNT="$(to_int_or_zero "$WAITING_RUN_COUNT")"
   OLDEST_WAITING_MIN="$(to_int_or_zero "$OLDEST_WAITING_MIN")"
+
+  if action_on_cooldown "agent:task-assignment" "$((4 * 3600))" "agent-cadence"; then
+    TASK_ASSIGNMENT_RUNS_LAST_4H=$((TASK_ASSIGNMENT_RUNS_LAST_4H + 1))
+  fi
+  if action_on_cooldown "agent:pm" "$((24 * 3600))" "agent-cadence"; then
+    PM_RUNS_LAST_24H=$((PM_RUNS_LAST_24H + 1))
+  fi
+  if action_on_cooldown "agent:po" "$((24 * 3600))" "agent-cadence"; then
+    PO_RUNS_LAST_24H=$((PO_RUNS_LAST_24H + 1))
+  fi
+  if action_on_cooldown "agent:council" "$((24 * 3600))" "agent-cadence"; then
+    COUNCIL_RUNS_LAST_24H=$((COUNCIL_RUNS_LAST_24H + 1))
+  fi
 }
 
 auto_ready_recent_pr_if_needed() {
@@ -512,9 +639,7 @@ auto_ready_recent_pr_if_needed() {
   fi
 }
 
-# Completes the PR loop on behalf of the user: reads Quinn's QA verdict from
-# PR comments, submits the formal approval, merges approved PRs, and flags
-# PRs whose QA verdict is missing or older than the latest commit.
+# Completes the PR loop from Quinn's local supervisor verdict.
 process_open_prs() {
   MERGE_ACTIONS="none"
   UNREVIEWED_PR_NUMBER=""
@@ -584,6 +709,11 @@ PYEOF
         if [[ "$AUTO_MERGE_PRS" != "true" ]]; then
           continue
         fi
+        if action_on_cooldown "merge:pr:$pr_num" "$((MERGE_RETRY_COOLDOWN_MIN * 60))" "merge-attempt"; then
+          echo "[$now_ts] Merge attempt throttled for PR #$pr_num" | tee -a "$LOG_FILE"
+          continue
+        fi
+        record_local_action "merge-attempt" "merge:pr:$pr_num" "selected" "$verdict"
         if [[ "$verdict" == "approve_and_merge" ]]; then
           gh pr review "$pr_num" --approve \
             --body "Approving on behalf of the supervisor based on Quinn's QA verdict (autonomous heartbeat)." \
@@ -612,6 +742,36 @@ PYEOF
   fi
 }
 
+set_rotation_dispatch() {
+  local slot="$1"
+  local spec="${SEQUENCE[$slot]}"
+
+  DISPATCH_AGENT="${spec%%:*}"
+  DISPATCH_TASK="${spec#*:}"
+  DISPATCH_TOPIC=""
+  DISPATCH_PR_NUMBER=""
+  if [[ "$DISPATCH_AGENT" == "council" ]]; then
+    DISPATCH_TASK=""
+    DISPATCH_TOPIC="Autonomous council cycle: review product decisions and keep delivery moving"
+  fi
+  DISPATCH_REASON="scheduled-rotation"
+}
+
+choose_available_rotation() {
+  local start_slot="$1"
+  local offset slot key
+
+  for ((offset = 0; offset < ${#SEQUENCE[@]}; offset++)); do
+    slot=$(((start_slot + offset) % ${#SEQUENCE[@]}))
+    set_rotation_dispatch "$slot"
+    key="agent:$DISPATCH_AGENT:task:$DISPATCH_TASK:pr:$DISPATCH_PR_NUMBER:topic:$DISPATCH_TOPIC"
+    if ! action_on_cooldown "$key" "$((ACTION_COOLDOWN_MIN * 60))" "dispatch"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 choose_dispatch() {
   local slot="$1"
 
@@ -621,7 +781,13 @@ choose_dispatch() {
   DISPATCH_PR_NUMBER=""
   DISPATCH_REASON=""
 
-  # 24h cadence guarantees come first so PR churn can never starve PM/council.
+  if [[ "$TASK_ASSIGNMENT_RUNS_LAST_4H" -eq 0 ]]; then
+    DISPATCH_AGENT="task-assignment"
+    DISPATCH_TASK="assign-tasks"
+    DISPATCH_REASON="task-assignment-heartbeat-missing-last4h"
+    return 0
+  fi
+
   if [[ "$PM_RUNS_LAST_24H" -eq 0 ]]; then
     DISPATCH_AGENT="pm"
     DISPATCH_TASK="full-sprint-report"
@@ -633,6 +799,13 @@ choose_dispatch() {
     DISPATCH_AGENT="council"
     DISPATCH_TOPIC="Autonomous council cycle: review recent decisions, backlog priorities, and unblock in-flight work"
     DISPATCH_REASON="council-heartbeat-missing-last24h"
+    return 0
+  fi
+
+  if [[ "$PO_RUNS_LAST_24H" -eq 0 ]]; then
+    DISPATCH_AGENT="po"
+    DISPATCH_TASK="product-health-report"
+    DISPATCH_REASON="product-owner-heartbeat-missing-last24h"
     return 0
   fi
 
@@ -685,14 +858,7 @@ choose_dispatch() {
     return 0
   fi
 
-  local spec="${SEQUENCE[$slot]}"
-  DISPATCH_AGENT="${spec%%:*}"
-  DISPATCH_TASK="${spec#*:}"
-  if [[ "$DISPATCH_AGENT" == "council" ]]; then
-    DISPATCH_TASK=""
-    DISPATCH_TOPIC="Autonomous council cycle: review product decisions and keep delivery moving"
-  fi
-  DISPATCH_REASON="scheduled-rotation"
+  set_rotation_dispatch "$slot"
 }
 
 write_heartbeat() {
@@ -717,6 +883,10 @@ write_heartbeat() {
     "models_pipeline_ok": $MODELS_PIPELINE_OK,
     "models_pipeline_note": "${MODELS_PIPELINE_NOTE}",
     "models_token_mode": "${MODELS_TOKEN_MODE}",
+    "throttle_status": "${THROTTLE_STATUS:-ready}",
+    "dispatches_last_hour": ${DISPATCHES_LAST_HOUR:-0},
+    "max_dispatches_per_hour": $MAX_DISPATCHES_PER_HOUR,
+    "action_cooldown_min": $ACTION_COOLDOWN_MIN,
     "failed_actions": $FAILED_ACTION_COUNT,
     "recent_pr_event_count": $RECENT_PR_EVENT_COUNT,
     "recent_pr_number": "${RECENT_PR_NUMBER}",
@@ -725,6 +895,8 @@ write_heartbeat() {
     "auto_ready_action": "${AUTO_READY_ACTION}",
     "merge_actions": "${MERGE_ACTIONS:-none}",
     "unreviewed_pr_count": $UNREVIEWED_PR_COUNT,
+    "task_assignment_runs_last_4h": $TASK_ASSIGNMENT_RUNS_LAST_4H,
+    "product_owner_runs_last_24h": $PO_RUNS_LAST_24H,
     "council_runs_last_24h": $COUNCIL_RUNS_LAST_24H,
     "pm_runs_last_24h": $PM_RUNS_LAST_24H,
     "stale_pr_count": $STALE_PR_COUNT,
@@ -754,12 +926,45 @@ dispatch_slot() {
   local topic="$DISPATCH_TOPIC"
   local pr_number="$DISPATCH_PR_NUMBER"
   local reason="$DISPATCH_REASON"
+  local dispatch_key
+
+  dispatch_key="agent:$agent:task:$task:pr:$pr_number:topic:$topic"
+  THROTTLE_STATUS="ready"
+  DISPATCHES_LAST_HOUR=0
 
   active_count="$(active_runner_count)"
   if [[ "$active_count" != "0" ]]; then
     echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Skip cycle=$cycle agent=$agent task=$task reason=$reason (active manual runner count=$active_count)" | tee -a "$LOG_FILE"
     write_heartbeat "skipped" "$cycle" "$slot" "$agent" "$task" "active run in progress | $reason"
     return 0
+  fi
+
+  if dispatch_budget_exhausted; then
+    THROTTLE_STATUS="hourly-budget"
+    record_local_action "decision" "$dispatch_key" "throttled" "hourly-budget ${DISPATCHES_LAST_HOUR}/${MAX_DISPATCHES_PER_HOUR}"
+    echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Throttle cycle=$cycle reason=hourly-budget dispatches=${DISPATCHES_LAST_HOUR}/${MAX_DISPATCHES_PER_HOUR}" | tee -a "$LOG_FILE"
+    write_heartbeat "throttled" "$cycle" "$slot" "$agent" "$task" "hourly dispatch budget reached | $reason"
+    return 0
+  fi
+
+  if action_on_cooldown "$dispatch_key" "$((ACTION_COOLDOWN_MIN * 60))" "dispatch"; then
+    local blocked_reason="$reason"
+    if choose_available_rotation "$slot"; then
+      agent="$DISPATCH_AGENT"
+      task="$DISPATCH_TASK"
+      topic="$DISPATCH_TOPIC"
+      pr_number="$DISPATCH_PR_NUMBER"
+      reason="scheduled-rotation-fallback blocked=$blocked_reason"
+      dispatch_key="agent:$agent:task:$task:pr:$pr_number:topic:$topic"
+      THROTTLE_STATUS="rotation-fallback"
+      echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Fallback cycle=$cycle agent=$agent task=$task blocked=$blocked_reason" | tee -a "$LOG_FILE"
+    else
+      THROTTLE_STATUS="action-cooldown"
+      record_local_action "decision" "$dispatch_key" "throttled" "action-cooldown ${ACTION_COOLDOWN_MIN}m"
+      echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Throttle cycle=$cycle agent=$agent task=$task reason=action-cooldown" | tee -a "$LOG_FILE"
+      write_heartbeat "throttled" "$cycle" "$slot" "$agent" "$task" "identical action cooling down | $reason"
+      return 0
+    fi
   fi
 
   local context
@@ -779,6 +984,8 @@ dispatch_slot() {
   fi
 
   if "${dispatch_cmd[@]}" >> "$LOG_FILE" 2>&1; then
+    record_local_action "dispatch" "$dispatch_key" "success" "$reason"
+    record_local_action "agent-cadence" "agent:$agent" "success" "$reason"
     write_heartbeat "dispatched" "$cycle" "$slot" "$agent" "$task" "workflow dispatched | $reason"
     echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Dispatch success cycle=$cycle agent=$agent" | tee -a "$LOG_FILE"
   else
@@ -845,6 +1052,9 @@ start_daemon() {
     --waiting-run-min "$waiting_run_min" \
     --auto-ready-draft-prs "$auto_ready_draft_prs" \
     --auto-merge-prs "$AUTO_MERGE_PRS" \
+    --max-dispatches-per-hour "$MAX_DISPATCHES_PER_HOUR" \
+    --action-cooldown-min "$ACTION_COOLDOWN_MIN" \
+    --merge-retry-cooldown-min "$MERGE_RETRY_COOLDOWN_MIN" \
     >> "$LOG_FILE" 2>&1 &
   local pid=$!
   echo "$pid" > "$PID_FILE"
@@ -862,6 +1072,7 @@ start_daemon() {
   echo "PID: $pid"
   echo "Log: $LOG_FILE"
   echo "Heartbeat: $HEARTBEAT_FILE"
+  echo "Local decisions: $DECISION_LOG_FILE"
 
   if [[ "$follow_log" == "true" ]]; then
     echo "Following log (Ctrl+C to stop following; daemon keeps running)..."
@@ -946,6 +1157,11 @@ status_daemon() {
   fi
 
   echo "Log file: $LOG_FILE"
+  echo "Local decision log: $DECISION_LOG_FILE"
+  if [[ -s "$DECISION_LOG_FILE" ]]; then
+    echo "Latest local decisions:"
+    tail -n 5 "$DECISION_LOG_FILE"
+  fi
 }
 
 parse_common_flags() {
@@ -960,6 +1176,9 @@ parse_common_flags() {
   WAITING_RUN_MIN_ARG="$WAITING_RUN_MIN"
   AUTO_READY_DRAFT_PRS_ARG="$AUTO_READY_DRAFT_PRS"
   AUTO_MERGE_PRS_ARG="$AUTO_MERGE_PRS"
+  MAX_DISPATCHES_PER_HOUR_ARG="$MAX_DISPATCHES_PER_HOUR"
+  ACTION_COOLDOWN_MIN_ARG="$ACTION_COOLDOWN_MIN"
+  MERGE_RETRY_COOLDOWN_MIN_ARG="$MERGE_RETRY_COOLDOWN_MIN"
   FOLLOW_LOG="false"
   TAIL_LINES_ARG="$TAIL_LINES"
 
@@ -1007,6 +1226,18 @@ parse_common_flags() {
         ;;
       --auto-merge-prs)
         AUTO_MERGE_PRS_ARG="${2:-}"
+        shift 2
+        ;;
+      --max-dispatches-per-hour)
+        MAX_DISPATCHES_PER_HOUR_ARG="${2:-}"
+        shift 2
+        ;;
+      --action-cooldown-min)
+        ACTION_COOLDOWN_MIN_ARG="${2:-}"
+        shift 2
+        ;;
+      --merge-retry-cooldown-min)
+        MERGE_RETRY_COOLDOWN_MIN_ARG="${2:-}"
         shift 2
         ;;
       --follow)
@@ -1085,6 +1316,21 @@ parse_common_flags() {
       ;;
   esac
 
+  if [[ ! "$MAX_DISPATCHES_PER_HOUR_ARG" =~ ^[0-9]+$ ]] || [[ "$MAX_DISPATCHES_PER_HOUR_ARG" -lt 1 ]]; then
+    echo "Error: --max-dispatches-per-hour must be an integer >= 1." >&2
+    exit 1
+  fi
+
+  if [[ ! "$ACTION_COOLDOWN_MIN_ARG" =~ ^[0-9]+$ ]] || [[ "$ACTION_COOLDOWN_MIN_ARG" -lt 1 ]]; then
+    echo "Error: --action-cooldown-min must be an integer >= 1." >&2
+    exit 1
+  fi
+
+  if [[ ! "$MERGE_RETRY_COOLDOWN_MIN_ARG" =~ ^[0-9]+$ ]] || [[ "$MERGE_RETRY_COOLDOWN_MIN_ARG" -lt 1 ]]; then
+    echo "Error: --merge-retry-cooldown-min must be an integer >= 1." >&2
+    exit 1
+  fi
+
   if [[ ! "$TAIL_LINES_ARG" =~ ^[0-9]+$ ]] || [[ "$TAIL_LINES_ARG" -lt 1 ]]; then
     echo "Error: --tail-lines must be an integer >= 1." >&2
     exit 1
@@ -1098,6 +1344,9 @@ parse_common_flags() {
   WAITING_RUN_MIN="$WAITING_RUN_MIN_ARG"
   AUTO_READY_DRAFT_PRS="$AUTO_READY_DRAFT_PRS_ARG"
   AUTO_MERGE_PRS="$AUTO_MERGE_PRS_ARG"
+  MAX_DISPATCHES_PER_HOUR="$MAX_DISPATCHES_PER_HOUR_ARG"
+  ACTION_COOLDOWN_MIN="$ACTION_COOLDOWN_MIN_ARG"
+  MERGE_RETRY_COOLDOWN_MIN="$MERGE_RETRY_COOLDOWN_MIN_ARG"
   TAIL_LINES="$TAIL_LINES_ARG"
 }
 
