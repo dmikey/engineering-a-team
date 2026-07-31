@@ -114,6 +114,7 @@ jobs:
           CURRENT_DATE: ${{ steps.data.outputs.current_date }}
           WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SKILL_REMINDERS_OPT_IN: ${{ vars.SKILL_REMINDERS_OPT_IN || '{}' }}
+          LATEST_INTERACTION: ${{ github.event_name == 'workflow_run' && toJson(github.event.workflow_run) || '' }}
         run: |
           # Generate full report with trend badges
           # The script computes current and prior period internally when both
@@ -166,7 +167,7 @@ jobs:
         run: |
           OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
           REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
-          TITLE="🎓 Skill Development Report — $CURRENT_DATE"
+          TITLE="🤝 Cross-Agent Feedback & Skill Development Report — $CURRENT_DATE"
 
           REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
           DISCUSSION_CREATED=false

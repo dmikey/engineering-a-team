@@ -544,7 +544,7 @@ jobs:
             fi
 
             if [ -n "$CATEGORY_ID" ]; then
-              TITLE="🎓 Cross-Agent Skill Development Report — $CURRENT_DATE"
+              TITLE="🤝 Cross-Agent Feedback & Skill Development Report — $CURRENT_DATE"
               DISCUSSION_URL=$(gh api graphql \
                 -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
                 -f ri="$REPO_ID" -f ci="$CATEGORY_ID" \
@@ -560,11 +560,11 @@ jobs:
 
           if [ "$DISCUSSION_CREATED" = "false" ]; then
             gh issue create \
-              --title "🎓 Cross-Agent Skill Development Report — $CURRENT_DATE" \
+              --title "🤝 Cross-Agent Feedback & Skill Development Report — $CURRENT_DATE" \
               --body "$REPORT" \
               2>/dev/null || \
             gh issue create \
-              --title "🎓 Cross-Agent Skill Development Report — $CURRENT_DATE" \
+              --title "🤝 Cross-Agent Feedback & Skill Development Report — $CURRENT_DATE" \
               --body "$REPORT"
             echo "✅ Skill development report posted as Issue (Discussion fallback)"
           fi
