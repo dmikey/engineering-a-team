@@ -52,6 +52,7 @@ env:
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
   QA_SEVERITY_THRESHOLD: ${{ vars.QA_SEVERITY_THRESHOLD || 'HIGH' }}
   QA_COLLAB_REPOSITORIES: ${{ vars.QA_COLLAB_REPOSITORIES || '' }}
+  QA_AGENT_SKILLS: ${{ vars.QA_AGENT_SKILLS || 'code-review,issue-creation,pr-feedback,security-scan' }}
 
 jobs:
   qa-review:
@@ -213,6 +214,10 @@ jobs:
             - Identify missing test coverage and suggest specific test cases
             - Assess risk and provide an approval recommendation
             - Be constructive, specific, and actionable — never vague
+
+            Configured skill set for this run (repository variable QA_AGENT_SKILLS):
+            ${{ env.QA_AGENT_SKILLS }}
+            Keep your analysis aligned to these configured skills.
 
             Always format your response EXACTLY as follows:
 

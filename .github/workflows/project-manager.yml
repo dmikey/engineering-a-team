@@ -87,6 +87,7 @@ env:
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
   PM_MILESTONE_LOOKAHEAD: ${{ vars.PM_MILESTONE_LOOKAHEAD_DAYS || '30' }}
+  PM_AGENT_SKILLS: ${{ vars.PM_AGENT_SKILLS || 'backlog-grooming,milestone-management,discussion-creation,issue-labeling,skill-development-analysis' }}
 
 jobs:
   project-management:
@@ -230,6 +231,10 @@ jobs:
             - Identify issues with no clear owner or milestone
             - Suggest milestone assignments for unassigned issues
 
+            Configured skill set for this run (repository variable PM_AGENT_SKILLS):
+            ${{ env.PM_AGENT_SKILLS }}
+            Keep your analysis aligned to these configured skills.
+
             Format your response EXACTLY as:
 
             ## Backlog Grooming Report — <date>
@@ -278,6 +283,10 @@ jobs:
               remaining open issues
             - Flag milestones at risk of slipping
             - Recommend scope changes or timeline adjustments
+
+            Configured skill set for this run (repository variable PM_AGENT_SKILLS):
+            ${{ env.PM_AGENT_SKILLS }}
+            Keep your analysis aligned to these configured skills.
 
             Format your response EXACTLY as:
 

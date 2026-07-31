@@ -68,6 +68,8 @@ always provides actionable, constructive feedback.
 
 ### Skills Used
 
+Default skill set (customizable via `*_AGENT_SKILLS` repository variables):
+
 - `code-review`
 - `issue-creation`
 - `pr-feedback`
@@ -107,6 +109,8 @@ clearly, always grounding decisions in milestone dates and team capacity.
 - Called by the council workflow
 
 ### Skills Used
+
+Default skill set (customizable via `*_AGENT_SKILLS` repository variables):
 
 - `backlog-grooming`
 - `milestone-management`
@@ -150,6 +154,8 @@ back to customer outcomes.
 - Called by the council workflow
 
 ### Skills Used
+
+Default skill set (customizable via `*_AGENT_SKILLS` repository variables):
 
 - `feature-suggestion`
 - `playwright-testing`
