@@ -147,11 +147,27 @@ def resolve_repo(explicit_repo: str | None) -> dict[str, str]:
 
 
 def resolve_models_token() -> tuple[str | None, str]:
+    # In GitHub Actions, require explicit model token env vars.
+    if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+        for env_name in ("MODELS_TOKEN", "GH_MODELS_TOKEN"):
+            value = os.environ.get(env_name, "").strip()
+            if value:
+                return value, env_name
+        return None, "actions-unconfigured"
+
+    # Local runs default to GitHub CLI auth token.
+    gh_token_result = run_command(["gh", "auth", "token"], check=False)
+    if gh_token_result.returncode == 0:
+        value = gh_token_result.stdout.strip()
+        if value:
+            return value, "gh-auth-token"
+
+    # Local fallback to explicit env vars when CLI auth is unavailable.
     for env_name in ("MODELS_TOKEN", "GH_MODELS_TOKEN"):
         value = os.environ.get(env_name, "").strip()
         if value:
             return value, env_name
-    return None, "unconfigured"
+    return None, "local-unconfigured"
 
 
 def resolve_gh_command_env() -> tuple[dict[str, str] | None, str]:
