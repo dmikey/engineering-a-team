@@ -677,7 +677,7 @@ jobs:
           if [ -n "$INSIGHTS" ] && [[ "$INSIGHTS" != "⚠️"* ]]; then
             REPORT="${METRICS}
 
-${INSIGHTS}"
+            ${INSIGHTS}"
           else
             REPORT="$METRICS"
           fi
