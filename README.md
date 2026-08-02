@@ -427,6 +427,21 @@ Run it continuously every 5 minutes:
 python3 ./scripts/heartbeat_runner.py --interval 300
 ```
 
+Run the full interactive TUI:
+
+```bash
+python3 ./scripts/heartbeat_runner.py --tui --interval 300
+```
+
+TUI controls:
+
+- `q`: quit
+- `r`: run a heartbeat immediately
+- `p`: pause/resume automatic heartbeats
+
+The TUI displays live queue status, PR decision actions, workflow pressure,
+model/auth status, and the actions executed in the latest heartbeat.
+
 The runner prints an in-depth overview each cycle and also writes the latest
 report plus local dedupe state under `.git/heartbeat-runner/`.
 
@@ -450,6 +465,15 @@ Without `MODELS_TOKEN` or `GH_MODELS_TOKEN`, the runner falls back to safe
 heuristics. It will still merge clearly safe PRs, dispatch QA on pending PRs,
 route feature and planning backlog to the existing workflows, and comment on
 blocked PRs with an `@copilot` handoff.
+
+The heartbeat PR flow is:
+
+1. If a PR (draft or non-draft) has merge conflicts or failing workflow/check
+  signals, post an `@copilot` fix request.
+2. If a draft PR is mergeable with no failing checks/workflow signals, convert
+  it to ready for review.
+3. After conversion, attempt merge using the same safety guard used for
+  non-draft PRs.
 
 ---
 

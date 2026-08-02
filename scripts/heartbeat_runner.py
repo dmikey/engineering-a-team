@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import curses
 import hashlib
 import json
 import os
@@ -39,6 +40,7 @@ WORKFLOW_COOLDOWNS = {
     "product-owner.yml": timedelta(hours=12),
 }
 AUTH_FAILURE_COOLDOWN = timedelta(hours=6)
+PR_READY_COOLDOWN = timedelta(hours=6)
 
 GH_COMMAND_ENV: dict[str, str] | None = None
 GH_AUTH_SOURCE = "gh-auth"
@@ -213,10 +215,6 @@ def fetch_open_prs(repo: str, limit: int) -> list[dict[str, Any]]:
     )
     prs: list[dict[str, Any]] = []
     for item in base:
-        if item.get("isDraft"):
-            prs.append(item)
-            continue
-
         detailed = None
         for _ in range(3):
             detailed = gh_json(
@@ -393,16 +391,10 @@ def heuristic_repo_actions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
 def heuristic_pr_decisions(snapshot: dict[str, Any], state: dict[str, Any]) -> list[dict[str, Any]]:
     decisions: list[dict[str, Any]] = []
     for pr in snapshot["prs"]:
-        branch_runs = relevant_runs_for_branch(snapshot["runs"], pr.get("headRefName", ""))
-        failures = workflow_failure_runs(branch_runs)
         checks = checks_summary(pr)
         review_decision = pr.get("reviewDecision") or ""
         mergeable = pr.get("mergeable") or "UNKNOWN"
         merge_state = pr.get("mergeStateStatus") or "UNKNOWN"
-
-        if pr.get("isDraft"):
-            decisions.append({"number": pr["number"], "action": "wait", "reason": "PR is still a draft."})
-            continue
 
         if mergeable == "CONFLICTING" or merge_state == "DIRTY":
             decisions.append({
@@ -412,11 +404,43 @@ def heuristic_pr_decisions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
             })
             continue
 
-        if failures or checks["failing"] > 0:
+        if pr.get("isDraft"):
+            if checks["failing"] > 0:
+                decisions.append({
+                    "number": pr["number"],
+                    "action": "send_back_to_copilot",
+                    "reason": "Draft PR has failing status checks and needs fixes before it can be marked ready.",
+                })
+                continue
+
+            if review_decision == "CHANGES_REQUESTED":
+                decisions.append({
+                    "number": pr["number"],
+                    "action": "send_back_to_copilot",
+                    "reason": "Draft PR has requested changes and needs implementation updates before readying.",
+                })
+                continue
+
+            if mergeable == "MERGEABLE":
+                decisions.append({
+                    "number": pr["number"],
+                    "action": "mark_ready",
+                    "reason": "Draft PR is mergeable with no failing checks and should be converted to ready-for-review.",
+                })
+                continue
+
+            decisions.append({
+                "number": pr["number"],
+                "action": "wait",
+                "reason": "Draft PR is not mergeable yet.",
+            })
+            continue
+
+        if checks["failing"] > 0:
             decisions.append({
                 "number": pr["number"],
                 "action": "send_back_to_copilot",
-                "reason": "Recent QA/compliance runs or status checks are failing or require action.",
+                "reason": "Status checks are failing or require action.",
             })
             continue
 
@@ -444,14 +468,6 @@ def heuristic_pr_decisions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
             })
             continue
 
-        if not has_recent_successful_qa(branch_runs, timedelta(hours=6)):
-            decisions.append({
-                "number": pr["number"],
-                "action": "run_qa",
-                "reason": "No recent successful QA run was found for this branch.",
-            })
-            continue
-
         decisions.append({
             "number": pr["number"],
             "action": "wait",
@@ -461,7 +477,6 @@ def heuristic_pr_decisions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
 
 
 def mergeable_guard(pr: dict[str, Any], runs: list[dict[str, Any]]) -> tuple[bool, str]:
-    branch_runs = relevant_runs_for_branch(runs, pr.get("headRefName", ""))
     checks = checks_summary(pr)
     if pr.get("isDraft"):
         return False, "draft"
@@ -473,8 +488,6 @@ def mergeable_guard(pr: dict[str, Any], runs: list[dict[str, Any]]) -> tuple[boo
         return False, f"reviewDecision={pr.get('reviewDecision')}"
     if checks["failing"] > 0:
         return False, f"failingChecks={checks['failing']}"
-    if workflow_failure_runs(branch_runs):
-        return False, "workflow failures present"
     return True, "ready"
 
 
@@ -483,9 +496,10 @@ def model_prompt(snapshot: dict[str, Any], heuristic: dict[str, Any], rules: str
         part for part in [
             "You are Casey, the local heartbeat orchestrator for an autonomous GitHub engineering team.",
             "You must choose only safe actions and return JSON only.",
-            "Allowed PR actions: merge, send_back_to_copilot, run_qa, wait.",
+            "Allowed PR actions: merge, mark_ready, send_back_to_copilot, run_qa, wait.",
             "Allowed repo actions: dispatch_task_assignment, dispatch_project_manager, dispatch_product_owner, wait.",
             "Prefer merge only for non-draft PRs that are MERGEABLE, have no failing checks, and no blocking review.",
+            "For draft PRs that are mergeable with no failing checks, prefer mark_ready.",
             "Use send_back_to_copilot for merge conflicts, failing compliance, or requested changes.",
             "Use run_qa when review is missing or stale.",
             rules and f"Follow these collaboration rules:\n\n{rules}",
@@ -566,7 +580,7 @@ def sanitize_model_plan(raw_text: str, heuristic: dict[str, Any]) -> dict[str, A
     except (ValueError, json.JSONDecodeError):
         return heuristic
 
-    valid_pr_actions = {"merge", "send_back_to_copilot", "run_qa", "wait"}
+    valid_pr_actions = {"merge", "mark_ready", "send_back_to_copilot", "run_qa", "wait"}
     valid_repo_actions = {"dispatch_task_assignment", "dispatch_project_manager", "dispatch_product_owner", "wait"}
 
     by_number = {entry["number"]: entry for entry in heuristic["pull_requests"]}
@@ -656,6 +670,19 @@ def merge_pr(repo: str, pr_number: int, dry_run: bool) -> str:
     return result.stdout.strip() or f"Merged or queued PR #{pr_number}"
 
 
+def mark_pr_ready(repo: str, pr_number: int, dry_run: bool) -> str:
+    command = ["gh", "pr", "ready", str(pr_number), "--repo", repo]
+    if dry_run:
+        return "DRY RUN: " + " ".join(command)
+    result = run_command(command, check=False)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"failed to mark PR #{pr_number} ready"
+        if "already in \"ready for review\"" in detail.lower():
+            return f"PR #{pr_number} is already ready for review"
+        raise RuntimeError(detail)
+    return result.stdout.strip() or f"Marked PR #{pr_number} ready for review"
+
+
 def send_back_to_copilot(repo: str, pr: dict[str, Any], reason: str, dry_run: bool) -> str:
     body = (
         "@copilot\n\n"
@@ -728,6 +755,45 @@ def execute_plan(snapshot: dict[str, Any], plan: dict[str, Any], state: dict[str
             try:
                 output = merge_pr(repo, pr["number"], dry_run)
                 results.append({"target": f"pr#{pr['number']}", "action": action, "status": "ok", "detail": output})
+                actions_taken += 1
+            except RuntimeError as exc:
+                results.append({"target": f"pr#{pr['number']}", "action": action, "status": "error", "detail": str(exc)})
+            continue
+
+        if action == "mark_ready":
+            event_key = f"ready:pr:{pr['number']}"
+            if state_event_recent(state, event_key, PR_READY_COOLDOWN):
+                results.append({"target": f"pr#{pr['number']}", "action": action, "status": "skipped", "detail": "Ready conversion is still within cooldown."})
+                continue
+            try:
+                ready_output = mark_pr_ready(repo, pr["number"], dry_run)
+                if not dry_run:
+                    record_event(state, event_key, {"reason": reason})
+
+                if dry_run:
+                    results.append({"target": f"pr#{pr['number']}", "action": action, "status": "ok", "detail": ready_output})
+                    actions_taken += 1
+                    continue
+
+                refreshed = gh_json(
+                    [
+                        "pr",
+                        "view",
+                        str(pr["number"]),
+                        "--repo",
+                        repo,
+                        "--json",
+                        "number,title,isDraft,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,headRefName",
+                    ],
+                    default=pr,
+                    check=False,
+                )
+                allowed, detail = mergeable_guard(refreshed, snapshot["runs"])
+                if allowed:
+                    merge_output = merge_pr(repo, pr["number"], dry_run)
+                    results.append({"target": f"pr#{pr['number']}", "action": action, "status": "ok", "detail": f"{ready_output}; {merge_output}"})
+                else:
+                    results.append({"target": f"pr#{pr['number']}", "action": action, "status": "ok", "detail": f"{ready_output}; merge deferred ({detail})"})
                 actions_taken += 1
             except RuntimeError as exc:
                 results.append({"target": f"pr#{pr['number']}", "action": action, "status": "error", "detail": str(exc)})
@@ -837,7 +903,14 @@ def render_overview(snapshot: dict[str, Any], plan: dict[str, Any], results: lis
     return "\n".join(lines) + "\n"
 
 
-def heartbeat(repo_root: Path, repo_info: dict[str, str], args: argparse.Namespace, state: dict[str, Any], state_file: Path, overview_file: Path) -> int:
+def run_heartbeat_cycle(
+    repo_root: Path,
+    repo_info: dict[str, str],
+    args: argparse.Namespace,
+    state: dict[str, Any],
+    state_file: Path,
+    overview_file: Path,
+) -> tuple[int, dict[str, Any]]:
     snapshot = {
         "repo": repo_info,
         "prs": fetch_open_prs(repo_info["nameWithOwner"], args.pr_limit),
@@ -856,8 +929,161 @@ def heartbeat(repo_root: Path, repo_info: dict[str, str], args: argparse.Namespa
 
     overview = render_overview(snapshot, plan, results, meta, args.interval, args.dry_run)
     overview_file.write_text(overview, encoding="utf-8")
-    print(overview, end="")
-    return sum(1 for result in results if result["status"] == "error")
+    errors = sum(1 for result in results if result["status"] == "error")
+    return errors, {
+        "snapshot": snapshot,
+        "plan": plan,
+        "results": results,
+        "meta": meta,
+        "overview": overview,
+        "errors": errors,
+    }
+
+
+def render_tui_lines(
+    heartbeat_data: dict[str, Any] | None,
+    interval: int,
+    dry_run: bool,
+    paused: bool,
+    next_run_in: int,
+    status_message: str,
+) -> list[str]:
+    mode = "dry-run" if dry_run else "active"
+    header = f"Heartbeat Runner TUI | mode={mode} | interval={max(interval, 5)}s"
+    lines = [header]
+    lines.append("Controls: q quit | r run now | p pause/resume")
+    if paused:
+        lines.append("State: paused")
+    else:
+        lines.append(f"Next run in: {max(next_run_in, 0)}s")
+
+    if status_message:
+        lines.append(f"Status: {status_message}")
+
+    if heartbeat_data is None:
+        lines.extend(["", "Waiting for first heartbeat cycle..."])
+        return lines
+
+    snapshot = heartbeat_data["snapshot"]
+    plan = heartbeat_data["plan"]
+    results = heartbeat_data["results"]
+    meta = heartbeat_data["meta"]
+    prs = snapshot["prs"]
+    issues = snapshot["issues"]
+    runs = snapshot["runs"]
+
+    active_runs = [run for run in runs if (run.get("status") or "").lower() in ACTIVE_RUN_STATUSES]
+    failing_runs = [run for run in runs if (run.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS]
+    non_draft = [pr for pr in prs if not pr.get("isDraft")]
+    mergeable = [pr for pr in non_draft if pr.get("mergeable") == "MERGEABLE"]
+    conflicting = [pr for pr in non_draft if pr.get("mergeable") == "CONFLICTING" or pr.get("mergeStateStatus") == "DIRTY"]
+    unassigned = [issue for issue in issues if not issue.get("assignees")]
+
+    lines.extend(
+        [
+            "",
+            "Summary",
+            f"- Repo: {snapshot['repo']['nameWithOwner']} | branch: {snapshot['repo']['defaultBranch']}",
+            f"- Decision source: {meta['decision_source']}",
+            f"- Models: {meta['models_status']} | GH auth: {meta['gh_auth_source']}",
+            f"- PRs: total={len(prs)} non-draft={len(non_draft)} mergeable={len(mergeable)} conflicting={len(conflicting)}",
+            f"- Issues: total={len(issues)} unassigned={len(unassigned)}",
+            f"- Workflow pressure: active={len(active_runs)} failing/action-required={len(failing_runs)}",
+            "",
+            "PR Decision Queue",
+        ]
+    )
+
+    if plan["pull_requests"]:
+        for decision in plan["pull_requests"][:12]:
+            pr = next((candidate for candidate in prs if candidate.get("number") == decision["number"]), None)
+            if not pr:
+                continue
+            checks = checks_summary(pr)
+            lines.append(
+                f"- #{pr['number']} action={decision['action']} mergeable={pr.get('mergeable', 'UNKNOWN')} review={pr.get('reviewDecision', '') or 'none'} checks(p={checks['pending']},f={checks['failing']})"
+            )
+    else:
+        lines.append("- None")
+
+    lines.extend(["", "Actions This Heartbeat"])
+    if results:
+        for result in results[:12]:
+            lines.append(f"- {result['target']} | {result['action']} | {result['status']}")
+    else:
+        lines.append("- No actions executed")
+
+    return lines
+
+
+def draw_tui(stdscr: curses.window, lines: list[str]) -> None:
+    stdscr.erase()
+    height, width = stdscr.getmaxyx()
+    max_lines = max(height - 1, 1)
+    for idx, line in enumerate(lines[:max_lines]):
+        truncated = line[: max(width - 1, 1)]
+        stdscr.addstr(idx, 0, truncated)
+    stdscr.refresh()
+
+
+def run_tui(
+    repo_root: Path,
+    repo_info: dict[str, str],
+    args: argparse.Namespace,
+    state: dict[str, Any],
+    state_file: Path,
+    overview_file: Path,
+) -> int:
+    interval = max(args.interval, 5)
+    heartbeat_data: dict[str, Any] | None = None
+    paused = False
+    next_run_at = time.monotonic()
+    status_message = ""
+
+    def _main(stdscr: curses.window) -> int:
+        nonlocal heartbeat_data, paused, next_run_at, status_message
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        stdscr.nodelay(True)
+        stdscr.timeout(200)
+
+        while True:
+            now = time.monotonic()
+            if not paused and (heartbeat_data is None or now >= next_run_at):
+                errors, heartbeat_data = run_heartbeat_cycle(repo_root, repo_info, args, state, state_file, overview_file)
+                if errors:
+                    status_message = f"Completed with {errors} action errors"
+                else:
+                    status_message = "Completed successfully"
+                next_run_at = time.monotonic() + interval
+
+            remaining = int(next_run_at - time.monotonic()) if not paused else interval
+            lines = render_tui_lines(heartbeat_data, args.interval, args.dry_run, paused, remaining, status_message)
+            draw_tui(stdscr, lines)
+
+            key = stdscr.getch()
+            if key == -1:
+                continue
+
+            if key in (ord("q"), ord("Q")):
+                return 0
+            if key in (ord("r"), ord("R")):
+                next_run_at = time.monotonic()
+                paused = False
+                status_message = "Manual run requested"
+            if key in (ord("p"), ord("P")):
+                paused = not paused
+                status_message = "Paused" if paused else "Resumed"
+
+    return curses.wrapper(_main)
+
+
+def heartbeat(repo_root: Path, repo_info: dict[str, str], args: argparse.Namespace, state: dict[str, Any], state_file: Path, overview_file: Path) -> int:
+    errors, heartbeat_data = run_heartbeat_cycle(repo_root, repo_info, args, state, state_file, overview_file)
+    print(heartbeat_data["overview"], end="")
+    return errors
 
 
 def parse_args() -> argparse.Namespace:
@@ -871,6 +1097,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-actions", type=int, default=25, help="Maximum actions to execute per heartbeat. Default: 25")
     parser.add_argument("--dry-run", action="store_true", help="Compute and print the queue without mutating GitHub state.")
     parser.add_argument("--once", action="store_true", help="Run a single heartbeat instead of looping forever.")
+    parser.add_argument("--tui", action="store_true", help="Run an interactive terminal UI with live heartbeat status.")
     return parser.parse_args()
 
 
@@ -885,6 +1112,9 @@ def main() -> int:
     GH_COMMAND_ENV, GH_AUTH_SOURCE = resolve_gh_command_env()
 
     try:
+        if args.tui:
+            return run_tui(repo_root, repo_info, args, state, state_file, overview_file)
+
         if args.once:
             return heartbeat(repo_root, repo_info, args, state, state_file, overview_file)
 
