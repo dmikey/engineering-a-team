@@ -44,6 +44,10 @@ AUTH_FAILURE_COOLDOWN = timedelta(hours=6)
 PR_READY_COOLDOWN = timedelta(hours=6)
 COPILOT_HANDOFF_COOLDOWN = timedelta(hours=12)
 PR_SYNC_COOLDOWN = timedelta(hours=6)
+STUCK_PR_ISSUE_COOLDOWN = timedelta(hours=3)
+COUNCIL_ESCALATION_COOLDOWN = timedelta(hours=12)
+STUCK_PR_ISSUE_THRESHOLD = 3
+STUCK_PR_COUNCIL_THRESHOLD = 5
 
 GH_COMMAND_ENV: dict[str, str] | None = None
 GH_AUTH_SOURCE = "gh-auth"
@@ -399,6 +403,231 @@ def format_remaining(duration: timedelta) -> str:
 
 def record_event(state: dict[str, Any], key: str, payload: dict[str, Any] | None = None) -> None:
     state.setdefault("events", {})[key] = {"at": isoformat(), "payload": payload or {}}
+
+
+def conflict_failure_map(state: dict[str, Any]) -> dict[str, int]:
+    raw = state.setdefault("conflict_failures", {})
+    clean: dict[str, int] = {}
+    for key, value in raw.items():
+        try:
+            clean[str(int(key))] = max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+    state["conflict_failures"] = clean
+    return clean
+
+
+def reset_conflict_failure(state: dict[str, Any], pr_number: int) -> None:
+    failures = conflict_failure_map(state)
+    failures[str(pr_number)] = 0
+
+
+def increment_conflict_failure(state: dict[str, Any], pr_number: int) -> int:
+    failures = conflict_failure_map(state)
+    key = str(pr_number)
+    failures[key] = int(failures.get(key, 0)) + 1
+    return failures[key]
+
+
+def reconcile_conflict_failures(state: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    failures = conflict_failure_map(state)
+    active_conflicting: set[str] = set()
+    for pr in snapshot["prs"]:
+        mergeable = pr.get("mergeable") or ""
+        merge_state = pr.get("mergeStateStatus") or ""
+        if mergeable == "CONFLICTING" or merge_state == "DIRTY":
+            active_conflicting.add(str(pr.get("number")))
+
+    for key in list(failures.keys()):
+        if key not in active_conflicting:
+            failures.pop(key, None)
+
+
+def adaptive_model_every(snapshot: dict[str, Any], configured_every: int, enabled: bool) -> tuple[int, str]:
+    baseline = max(1, configured_every)
+    if not enabled:
+        return baseline, "adaptive-off"
+
+    prs = snapshot["prs"]
+    issues = snapshot["issues"]
+    runs = snapshot["runs"]
+    conflicting = [pr for pr in prs if pr.get("mergeable") == "CONFLICTING" or pr.get("mergeStateStatus") == "DIRTY"]
+    failing_runs = [run for run in runs if (run.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS]
+    unassigned = [issue for issue in issues if not issue.get("assignees")]
+
+    if conflicting or len(failing_runs) >= 5:
+        return 1, "high-risk"
+    if len(unassigned) >= 30:
+        return min(baseline, 2), "backlog-pressure"
+    return baseline, "steady-state"
+
+
+def collect_stuck_conflicting_prs(snapshot: dict[str, Any], state: dict[str, Any], threshold: int) -> list[dict[str, Any]]:
+    failures = conflict_failure_map(state)
+    stuck: list[dict[str, Any]] = []
+    for pr in snapshot["prs"]:
+        mergeable = pr.get("mergeable") or ""
+        merge_state = pr.get("mergeStateStatus") or ""
+        if mergeable != "CONFLICTING" and merge_state != "DIRTY":
+            continue
+        count = int(failures.get(str(pr.get("number")), 0))
+        if count < threshold:
+            continue
+        checks = checks_summary(pr)
+        stuck.append(
+            {
+                "number": pr["number"],
+                "title": pr.get("title", ""),
+                "url": pr.get("url", ""),
+                "failures": count,
+                "reviewDecision": pr.get("reviewDecision") or "none",
+                "pendingChecks": checks["pending"],
+                "failingChecks": checks["failing"],
+            }
+        )
+    return stuck
+
+
+def build_stuck_pr_issue(stuck_prs: list[dict[str, Any]]) -> tuple[str, str, str]:
+    title = "[Heartbeat] Stuck PR Escalation"
+    lines = [
+        "Heartbeat detected pull requests that remain in conflict after repeated automatic sync attempts.",
+        "",
+        f"Generated at: {isoformat()}",
+        "",
+        "| PR | Failures | Review | Checks (pending/failing) |",
+        "| --- | --- | --- | --- |",
+    ]
+    for item in stuck_prs:
+        lines.append(
+            f"| #{item['number']} {item['title']} ({item['url']}) | {item['failures']} | {item['reviewDecision']} | {item['pendingChecks']}/{item['failingChecks']} |"
+        )
+    lines.extend(
+        [
+            "",
+            "Action requested:",
+            "- Rebase or merge latest main into these branches.",
+            "- Resolve conflicts and rerun checks.",
+            "- If repeated failures continue, trigger council review.",
+        ]
+    )
+    body = "\n".join(lines)
+    digest_source = "|".join(str(item["number"]) for item in sorted(stuck_prs, key=lambda entry: entry["number"]))
+    digest = fingerprint(digest_source)
+    return title, body, digest
+
+
+def upsert_stuck_pr_issue(repo: str, title: str, body: str, dry_run: bool) -> tuple[str, str]:
+    existing = gh_json(
+        [
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            "20",
+            "--search",
+            f"{title} in:title",
+            "--json",
+            "number,title,url",
+        ],
+        default=[],
+        check=False,
+    )
+    issue = next((item for item in existing if item.get("title") == title), None)
+
+    if dry_run:
+        if issue:
+            return "updated", f"DRY RUN: would update issue #{issue['number']} ({issue['url']})"
+        return "created", "DRY RUN: would create a new stuck PR escalation issue"
+
+    if issue:
+        result = run_command(
+            [
+                "gh",
+                "api",
+                "--method",
+                "PATCH",
+                f"repos/{repo}/issues/{issue['number']}",
+                "-f",
+                f"title={title}",
+                "-f",
+                f"body={body}",
+            ],
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "failed to update stuck PR issue")
+        return "updated", issue["url"]
+
+    created = gh_json(
+        [
+            "api",
+            "--method",
+            "POST",
+            f"repos/{repo}/issues",
+            "-f",
+            f"title={title}",
+            "-f",
+            f"body={body}",
+            "-f",
+            "labels[]=blocked",
+        ],
+        default=None,
+        check=False,
+    )
+    if not created or not created.get("html_url"):
+        raise RuntimeError("failed to create stuck PR issue")
+    return "created", created["html_url"]
+
+
+def run_stuck_pr_escalations(snapshot: dict[str, Any], state: dict[str, Any], repo: str, dry_run: bool) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+
+    stuck_issue_prs = collect_stuck_conflicting_prs(snapshot, state, STUCK_PR_ISSUE_THRESHOLD)
+    if stuck_issue_prs:
+        title, body, body_hash = build_stuck_pr_issue(stuck_issue_prs)
+        issue_event_key = f"stuck-pr-issue:{body_hash}"
+        if state_event_recent(state, issue_event_key, STUCK_PR_ISSUE_COOLDOWN):
+            results.append({"target": "stuck-pr-issue", "action": "upsert_issue", "status": "skipped", "detail": "Stuck PR issue content unchanged within cooldown."})
+        else:
+            try:
+                outcome, detail = upsert_stuck_pr_issue(repo, title, body, dry_run)
+                if not dry_run:
+                    record_event(state, issue_event_key, {"outcome": outcome, "stuck_count": len(stuck_issue_prs)})
+                results.append({"target": "stuck-pr-issue", "action": "upsert_issue", "status": "ok", "detail": detail})
+            except RuntimeError as exc:
+                results.append({"target": "stuck-pr-issue", "action": "upsert_issue", "status": "error", "detail": str(exc)})
+
+    stuck_council_prs = collect_stuck_conflicting_prs(snapshot, state, STUCK_PR_COUNCIL_THRESHOLD)
+    if stuck_council_prs:
+        council_event_key = "dispatch:council-stuck-prs"
+        if state_event_recent(state, council_event_key, COUNCIL_ESCALATION_COOLDOWN):
+            results.append({"target": "council-discussion.yml", "action": "dispatch_council", "status": "skipped", "detail": "Council escalation cooldown active."})
+        elif state_event_recent(state, "dispatch-blocked:council-discussion.yml", AUTH_FAILURE_COOLDOWN):
+            results.append({"target": "council-discussion.yml", "action": "dispatch_council", "status": "skipped", "detail": "Council escalation is auth-blocked and still within cooldown."})
+        else:
+            numbers = ", ".join(f"#{item['number']}" for item in stuck_council_prs)
+            topic = f"Resolve persistently conflicting pull requests: {numbers}"
+            context = "Heartbeat escalation: repeated automatic branch sync attempts were unable to clear merge conflicts."
+            try:
+                output = dispatch_workflow(
+                    repo,
+                    "council-discussion.yml",
+                    {"topic": topic, "extra_context": context},
+                    dry_run,
+                )
+                if not dry_run:
+                    record_event(state, council_event_key, {"prs": [item["number"] for item in stuck_council_prs]})
+                results.append({"target": "council-discussion.yml", "action": "dispatch_council", "status": "ok", "detail": output})
+            except RuntimeError as exc:
+                if "Resource not accessible by integration" in str(exc) and not dry_run:
+                    record_event(state, "dispatch-blocked:council-discussion.yml", {"reason": str(exc)})
+                results.append({"target": "council-discussion.yml", "action": "dispatch_council", "status": "error", "detail": str(exc)})
+
+    return results
 
 
 def heuristic_repo_actions(snapshot: dict[str, Any], state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -973,6 +1202,7 @@ def execute_plan(snapshot: dict[str, Any], plan: dict[str, Any], state: dict[str
                 output = sync_pr_branch(repo, pr["number"], dry_run)
                 if not dry_run:
                     record_event(state, event_key, {"reason": reason})
+                    reset_conflict_failure(state, pr["number"])
                 results.append({"target": f"pr#{pr['number']}", "action": action, "status": "ok", "detail": output})
                 actions_taken += 1
             except RuntimeError as exc:
@@ -985,17 +1215,21 @@ def execute_plan(snapshot: dict[str, Any], plan: dict[str, Any], state: dict[str
                     or "conflict" in lowered
                 )
                 if unresolved_conflict:
+                    if not dry_run:
+                        streak = increment_conflict_failure(state, pr["number"])
+                    else:
+                        streak = int(conflict_failure_map(state).get(str(pr["number"]), 0)) + 1
                     fallback_reason = "Automatic branch update could not resolve base conflicts; manual conflict resolution is required."
                     message_hash = handoff_fingerprint(pr, fallback_reason)
                     comment_event = f"comment:pr:{pr['number']}:{message_hash}"
                     if state_event_recent(state, comment_event, COPILOT_HANDOFF_COOLDOWN):
-                        results.append({"target": f"pr#{pr['number']}", "action": action, "status": "skipped", "detail": "Sync failed with conflicts and no PR state changes since the last Copilot handoff."})
+                        results.append({"target": f"pr#{pr['number']}", "action": action, "status": "skipped", "detail": f"Sync failed with conflicts and no PR state changes since the last Copilot handoff (streak={streak})."})
                     else:
                         try:
                             output = send_back_to_copilot(repo, pr, fallback_reason, dry_run)
                             if not dry_run:
                                 record_event(state, comment_event, {"reason": fallback_reason})
-                            results.append({"target": f"pr#{pr['number']}", "action": "send_back_to_copilot", "status": "ok", "detail": f"sync failed ({detail}); {output}"})
+                            results.append({"target": f"pr#{pr['number']}", "action": "send_back_to_copilot", "status": "ok", "detail": f"sync failed ({detail}); {output}; streak={streak}"})
                             actions_taken += 1
                         except RuntimeError as comment_exc:
                             results.append({"target": f"pr#{pr['number']}", "action": "send_back_to_copilot", "status": "error", "detail": f"sync failed ({detail}); comment failed ({comment_exc})"})
@@ -1043,6 +1277,7 @@ def render_overview(snapshot: dict[str, Any], plan: dict[str, Any], results: lis
         f"- Interval seconds: {interval}",
         f"- Decision source: {meta['decision_source']}",
         f"- Models status: {meta['models_status']}",
+        f"- Model cadence: {meta.get('model_cadence', 'n/a')}",
         f"- GH command auth: {meta['gh_auth_source']}",
         "",
         "## Queue Summary",
@@ -1106,12 +1341,16 @@ def run_heartbeat_cycle(
         "issues": fetch_open_issues(repo_info["nameWithOwner"], args.issue_limit),
         "runs": fetch_runs(repo_info["nameWithOwner"], args.run_limit),
     }
+    reconcile_conflict_failures(state, snapshot)
+    effective_model_every, cadence_reason = adaptive_model_every(snapshot, args.model_every, args.adaptive_model_cadence)
     models_token, token_source = resolve_models_token()
-    plan, meta = build_plan(snapshot, state, repo_root, args.model, models_token, args.model_every)
+    plan, meta = build_plan(snapshot, state, repo_root, args.model, models_token, effective_model_every)
     if meta["models_status"] == "ready":
         meta["models_status"] = f"ready via {token_source}"
+    meta["model_cadence"] = f"{effective_model_every} ({cadence_reason})"
     meta["gh_auth_source"] = GH_AUTH_SOURCE
     results = execute_plan(snapshot, plan, state, repo_info["nameWithOwner"], args.dry_run, args.max_actions)
+    results.extend(run_stuck_pr_escalations(snapshot, state, repo_info["nameWithOwner"], args.dry_run))
     state["heartbeats"] = int(state.get("heartbeats", 0)) + 1
     state["last_heartbeat_at"] = isoformat()
     save_state(state_file, state)
@@ -1174,7 +1413,7 @@ def render_tui_lines(
             "Summary",
             f"- Repo: {snapshot['repo']['nameWithOwner']} | branch: {snapshot['repo']['defaultBranch']}",
             f"- Decision source: {meta['decision_source']}",
-            f"- Models: {meta['models_status']} | GH auth: {meta['gh_auth_source']}",
+            f"- Models: {meta['models_status']} | cadence={meta.get('model_cadence', 'n/a')} | GH auth: {meta['gh_auth_source']}",
             f"- PRs: total={len(prs)} non-draft={len(non_draft)} mergeable={len(mergeable)} conflicting={len(conflicting)}",
             f"- Issues: total={len(issues)} unassigned={len(unassigned)}",
             f"- Workflow pressure: active={len(active_runs)} failing/action-required={len(failing_runs)}",
@@ -1280,6 +1519,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo", help="Target repository in owner/repo format. Defaults to the current gh repo.")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"GitHub Models identifier. Default: {DEFAULT_MODEL}")
     parser.add_argument("--model-every", type=int, default=DEFAULT_MODEL_EVERY, help=f"Use GitHub Models inference every N heartbeats (heuristic otherwise). Default: {DEFAULT_MODEL_EVERY}")
+    parser.add_argument("--adaptive-model-cadence", action=argparse.BooleanOptionalAction, default=True, help="Dynamically increase model usage under high queue risk. Default: enabled")
     parser.add_argument("--interval", type=int, default=300, help="Heartbeat interval in seconds. Default: 300")
     parser.add_argument("--pr-limit", type=int, default=30, help="Number of open PRs to inspect per heartbeat. Default: 30")
     parser.add_argument("--issue-limit", type=int, default=50, help="Number of open issues to inspect per heartbeat. Default: 50")

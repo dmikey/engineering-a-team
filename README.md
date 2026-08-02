@@ -430,11 +430,18 @@ python3 ./scripts/heartbeat_runner.py --interval 300
 For stronger, cost-effective automation, use retries plus model cadence:
 
 ```bash
-python3 ./scripts/heartbeat_runner.py --interval 300 --max-retries 2 --model-every 3
+python3 ./scripts/heartbeat_runner.py --interval 300 --max-retries 2 --model-every 3 --adaptive-model-cadence
 ```
 
 - `--max-retries`: retries transient GitHub/API failures before surfacing an error.
 - `--model-every`: uses GitHub Models every N cycles and heuristic planning in between to reduce token spend.
+- `--adaptive-model-cadence`: increases model usage automatically when PR conflict risk or workflow failure pressure rises.
+
+Escalation automation is built in:
+
+- Repeated sync-conflict failures on the same PR automatically open/update a tracked **stuck PR escalation issue**.
+- Higher conflict-failure streaks automatically dispatch the **council discussion workflow**.
+- These escalations use cooldown guards to avoid noisy repeats while still ensuring unresolved work is actively routed.
 
 Run the full interactive TUI:
 
