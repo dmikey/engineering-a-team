@@ -41,6 +41,7 @@ WORKFLOW_COOLDOWNS = {
 }
 AUTH_FAILURE_COOLDOWN = timedelta(hours=6)
 PR_READY_COOLDOWN = timedelta(hours=6)
+COPILOT_HANDOFF_COOLDOWN = timedelta(hours=12)
 
 GH_COMMAND_ENV: dict[str, str] | None = None
 GH_AUTH_SOURCE = "gh-auth"
@@ -225,7 +226,7 @@ def fetch_open_prs(repo: str, limit: int) -> list[dict[str, Any]]:
                     "--repo",
                     repo,
                     "--json",
-                    "number,title,body,isDraft,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,baseRefName,headRefName,url,author,statusCheckRollup",
+                    "number,title,body,isDraft,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,baseRefName,headRefName,headRefOid,url,author,statusCheckRollup,updatedAt",
                 ],
                 default=None,
                 check=False,
@@ -314,12 +315,51 @@ def fingerprint(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
+def handoff_fingerprint(pr: dict[str, Any], reason: str) -> str:
+    checks = checks_summary(pr)
+    state_blob = "|".join(
+        [
+            reason,
+            str(pr.get("headRefName") or ""),
+            str(pr.get("headRefOid") or ""),
+            str(pr.get("mergeable") or ""),
+            str(pr.get("mergeStateStatus") or ""),
+            str(pr.get("reviewDecision") or ""),
+            str(checks.get("pending", 0)),
+            str(checks.get("failing", 0)),
+        ]
+    )
+    return fingerprint(state_blob)
+
+
 def state_event_recent(state: dict[str, Any], key: str, cooldown: timedelta) -> bool:
     event = state.get("events", {}).get(key)
     if not event:
         return False
     at = parse_ts(event.get("at"))
     return bool(at and at >= now_utc() - cooldown)
+
+
+def event_cooldown_remaining(state: dict[str, Any], key: str, cooldown: timedelta) -> timedelta | None:
+    event = state.get("events", {}).get(key)
+    if not event:
+        return None
+    at = parse_ts(event.get("at"))
+    if not at:
+        return None
+    remaining = (at + cooldown) - now_utc()
+    if remaining.total_seconds() <= 0:
+        return None
+    return remaining
+
+
+def format_remaining(duration: timedelta) -> str:
+    total_seconds = max(int(duration.total_seconds()), 0)
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, _ = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
 
 
 def record_event(state: dict[str, Any], key: str, payload: dict[str, Any] | None = None) -> None:
@@ -346,44 +386,95 @@ def heuristic_repo_actions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
         if created and workflow_name and workflow_name not in recent_runs_by_workflow:
             recent_runs_by_workflow[workflow_name] = created
 
-    if unassigned and not state_event_recent(state, "dispatch:task-assignment.yml", WORKFLOW_COOLDOWNS["task-assignment.yml"]) and not state_event_recent(state, "dispatch-blocked:task-assignment.yml", AUTH_FAILURE_COOLDOWN):
-        actions.append(
-            {
-                "action": "dispatch_task_assignment",
-                "reason": f"{len(unassigned)} open issues are unassigned and need routing.",
-                "workflow": "task-assignment.yml",
-                "inputs": {
-                    "task": "assign-tasks",
-                    "extra_context": f"Heartbeat backlog routing for {len(unassigned)} unassigned issues.",
-                },
-            }
-        )
+    if unassigned:
+        blocked_for = event_cooldown_remaining(state, "dispatch-blocked:task-assignment.yml", AUTH_FAILURE_COOLDOWN)
+        dispatch_for = event_cooldown_remaining(state, "dispatch:task-assignment.yml", WORKFLOW_COOLDOWNS["task-assignment.yml"])
+        if blocked_for:
+            actions.append(
+                {
+                    "action": "wait",
+                    "reason": f"task-assignment dispatch is auth-blocked for ~{format_remaining(blocked_for)}. Export GH_USER_PAT or HEARTBEAT_GH_TOKEN with actions:write.",
+                }
+            )
+        elif dispatch_for:
+            actions.append(
+                {
+                    "action": "wait",
+                    "reason": f"task-assignment dispatch cooldown active for ~{format_remaining(dispatch_for)}.",
+                }
+            )
+        else:
+            actions.append(
+                {
+                    "action": "dispatch_task_assignment",
+                    "reason": f"{len(unassigned)} open issues are unassigned and need routing.",
+                    "workflow": "task-assignment.yml",
+                    "inputs": {
+                        "task": "assign-tasks",
+                        "extra_context": f"Heartbeat backlog routing for {len(unassigned)} unassigned issues.",
+                    },
+                }
+            )
 
-    if blocked_or_priority and not state_event_recent(state, "dispatch:project-manager.yml", WORKFLOW_COOLDOWNS["project-manager.yml"]) and not state_event_recent(state, "dispatch-blocked:project-manager.yml", AUTH_FAILURE_COOLDOWN):
-        actions.append(
-            {
-                "action": "dispatch_project_manager",
-                "reason": f"{len(blocked_or_priority)} blocked or priority-tagged issues need planning attention.",
-                "workflow": "project-manager.yml",
-                "inputs": {
-                    "task": "full-sprint-report",
-                    "extra_context": f"Heartbeat escalation: {len(blocked_or_priority)} blocked/priority issues are open.",
-                },
-            }
-        )
+    if blocked_or_priority:
+        blocked_for = event_cooldown_remaining(state, "dispatch-blocked:project-manager.yml", AUTH_FAILURE_COOLDOWN)
+        dispatch_for = event_cooldown_remaining(state, "dispatch:project-manager.yml", WORKFLOW_COOLDOWNS["project-manager.yml"])
+        if blocked_for:
+            actions.append(
+                {
+                    "action": "wait",
+                    "reason": f"project-manager dispatch is auth-blocked for ~{format_remaining(blocked_for)}. Export GH_USER_PAT or HEARTBEAT_GH_TOKEN with actions:write.",
+                }
+            )
+        elif dispatch_for:
+            actions.append(
+                {
+                    "action": "wait",
+                    "reason": f"project-manager dispatch cooldown active for ~{format_remaining(dispatch_for)}.",
+                }
+            )
+        else:
+            actions.append(
+                {
+                    "action": "dispatch_project_manager",
+                    "reason": f"{len(blocked_or_priority)} blocked or priority-tagged issues need planning attention.",
+                    "workflow": "project-manager.yml",
+                    "inputs": {
+                        "task": "full-sprint-report",
+                        "extra_context": f"Heartbeat escalation: {len(blocked_or_priority)} blocked/priority issues are open.",
+                    },
+                }
+            )
 
-    if feature_issues and not state_event_recent(state, "dispatch:product-owner.yml", WORKFLOW_COOLDOWNS["product-owner.yml"]) and not state_event_recent(state, "dispatch-blocked:product-owner.yml", AUTH_FAILURE_COOLDOWN):
-        actions.append(
-            {
-                "action": "dispatch_product_owner",
-                "reason": f"{len(feature_issues)} feature issues are waiting for product guidance.",
-                "workflow": "product-owner.yml",
-                "inputs": {
-                    "task": "product-health-report",
-                    "extra_context": f"Heartbeat feature backlog review for {len(feature_issues)} open feature issues.",
-                },
-            }
-        )
+    if feature_issues:
+        blocked_for = event_cooldown_remaining(state, "dispatch-blocked:product-owner.yml", AUTH_FAILURE_COOLDOWN)
+        dispatch_for = event_cooldown_remaining(state, "dispatch:product-owner.yml", WORKFLOW_COOLDOWNS["product-owner.yml"])
+        if blocked_for:
+            actions.append(
+                {
+                    "action": "wait",
+                    "reason": f"product-owner dispatch is auth-blocked for ~{format_remaining(blocked_for)}. Export GH_USER_PAT or HEARTBEAT_GH_TOKEN with actions:write.",
+                }
+            )
+        elif dispatch_for:
+            actions.append(
+                {
+                    "action": "wait",
+                    "reason": f"product-owner dispatch cooldown active for ~{format_remaining(dispatch_for)}.",
+                }
+            )
+        else:
+            actions.append(
+                {
+                    "action": "dispatch_product_owner",
+                    "reason": f"{len(feature_issues)} feature issues are waiting for product guidance.",
+                    "workflow": "product-owner.yml",
+                    "inputs": {
+                        "task": "product-health-report",
+                        "extra_context": f"Heartbeat feature backlog review for {len(feature_issues)} open feature issues.",
+                    },
+                }
+            )
 
     return actions
 
@@ -815,10 +906,10 @@ def execute_plan(snapshot: dict[str, Any], plan: dict[str, Any], state: dict[str
             continue
 
         if action == "send_back_to_copilot":
-            message_hash = fingerprint(reason)
+            message_hash = handoff_fingerprint(pr, reason)
             event_key = f"comment:pr:{pr['number']}:{message_hash}"
-            if state_event_recent(state, event_key, timedelta(hours=12)):
-                results.append({"target": f"pr#{pr['number']}", "action": action, "status": "skipped", "detail": "Equivalent Copilot handoff was already sent recently."})
+            if state_event_recent(state, event_key, COPILOT_HANDOFF_COOLDOWN):
+                results.append({"target": f"pr#{pr['number']}", "action": action, "status": "skipped", "detail": "No PR state changes since the last Copilot handoff."})
                 continue
             try:
                 output = send_back_to_copilot(repo, pr, reason, dry_run)
