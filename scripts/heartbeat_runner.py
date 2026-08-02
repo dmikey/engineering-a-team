@@ -18,6 +18,7 @@ from typing import Any
 
 MODELS_URL = "https://models.inference.ai.azure.com/chat/completions"
 DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL_EVERY = 3
 FAILURE_CONCLUSIONS = {
     "action_required",
     "cancelled",
@@ -42,9 +43,25 @@ WORKFLOW_COOLDOWNS = {
 AUTH_FAILURE_COOLDOWN = timedelta(hours=6)
 PR_READY_COOLDOWN = timedelta(hours=6)
 COPILOT_HANDOFF_COOLDOWN = timedelta(hours=12)
+PR_SYNC_COOLDOWN = timedelta(hours=6)
 
 GH_COMMAND_ENV: dict[str, str] | None = None
 GH_AUTH_SOURCE = "gh-auth"
+GH_MAX_RETRIES = 2
+
+TRANSIENT_ERROR_MARKERS = (
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+    "connection reset",
+    "connection refused",
+    "tls handshake timeout",
+    "502",
+    "503",
+    "504",
+    "429",
+    "rate limit",
+)
 
 
 def now_utc() -> datetime:
@@ -61,11 +78,29 @@ def parse_ts(raw: str | None) -> datetime | None:
     return datetime.fromisoformat(raw.replace("Z", "+00:00"))
 
 
+def is_transient_error(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in TRANSIENT_ERROR_MARKERS)
+
+
 def run_command(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(command, capture_output=True, text=True, env=GH_COMMAND_ENV)
-    if check and result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "command failed")
-    return result
+    attempts = max(1, GH_MAX_RETRIES)
+    last_result: subprocess.CompletedProcess[str] | None = None
+    for attempt in range(1, attempts + 1):
+        result = subprocess.run(command, capture_output=True, text=True, env=GH_COMMAND_ENV)
+        last_result = result
+        if result.returncode == 0:
+            return result
+
+        detail = (result.stderr.strip() or result.stdout.strip() or "command failed").lower()
+        if attempt < attempts and is_transient_error(detail):
+            continue
+        break
+
+    assert last_result is not None
+    if check and last_result.returncode != 0:
+        raise RuntimeError(last_result.stderr.strip() or last_result.stdout.strip() or "command failed")
+    return last_result
 
 
 def gh_json(args: list[str], *, default: Any = None, check: bool = True) -> Any:
@@ -490,8 +525,8 @@ def heuristic_pr_decisions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
         if mergeable == "CONFLICTING" or merge_state == "DIRTY":
             decisions.append({
                 "number": pr["number"],
-                "action": "send_back_to_copilot",
-                "reason": "PR has merge conflicts and must be rebased or resolved before merge.",
+                "action": "sync_branch",
+                "reason": "PR conflicts with base; attempt an automatic branch update before requesting manual conflict resolution.",
             })
             continue
 
@@ -587,11 +622,12 @@ def model_prompt(snapshot: dict[str, Any], heuristic: dict[str, Any], rules: str
         part for part in [
             "You are Casey, the local heartbeat orchestrator for an autonomous GitHub engineering team.",
             "You must choose only safe actions and return JSON only.",
-            "Allowed PR actions: merge, mark_ready, send_back_to_copilot, run_qa, wait.",
+            "Allowed PR actions: merge, mark_ready, sync_branch, send_back_to_copilot, run_qa, wait.",
             "Allowed repo actions: dispatch_task_assignment, dispatch_project_manager, dispatch_product_owner, wait.",
             "Prefer merge only for non-draft PRs that are MERGEABLE, have no failing checks, and no blocking review.",
             "For draft PRs that are mergeable with no failing checks, prefer mark_ready.",
-            "Use send_back_to_copilot for merge conflicts, failing compliance, or requested changes.",
+            "For merge conflicts, prefer sync_branch first and then send_back_to_copilot if conflicts remain.",
+            "Use send_back_to_copilot for failing compliance, requested changes, or unresolved conflicts.",
             "Use run_qa when review is missing or stale.",
             rules and f"Follow these collaboration rules:\n\n{rules}",
         ] if part
@@ -671,7 +707,7 @@ def sanitize_model_plan(raw_text: str, heuristic: dict[str, Any]) -> dict[str, A
     except (ValueError, json.JSONDecodeError):
         return heuristic
 
-    valid_pr_actions = {"merge", "mark_ready", "send_back_to_copilot", "run_qa", "wait"}
+    valid_pr_actions = {"merge", "mark_ready", "sync_branch", "send_back_to_copilot", "run_qa", "wait"}
     valid_repo_actions = {"dispatch_task_assignment", "dispatch_project_manager", "dispatch_product_owner", "wait"}
 
     by_number = {entry["number"]: entry for entry in heuristic["pull_requests"]}
@@ -714,7 +750,14 @@ def sanitize_model_plan(raw_text: str, heuristic: dict[str, Any]) -> dict[str, A
     return {"pull_requests": final_prs, "repo_actions": final_repo}
 
 
-def build_plan(snapshot: dict[str, Any], state: dict[str, Any], repo_root: Path, model: str, models_token: str | None) -> tuple[dict[str, Any], dict[str, str]]:
+def build_plan(
+    snapshot: dict[str, Any],
+    state: dict[str, Any],
+    repo_root: Path,
+    model: str,
+    models_token: str | None,
+    model_every: int,
+) -> tuple[dict[str, Any], dict[str, str]]:
     heuristic = {
         "pull_requests": heuristic_pr_decisions(snapshot, state),
         "repo_actions": heuristic_repo_actions(snapshot, state),
@@ -723,6 +766,12 @@ def build_plan(snapshot: dict[str, Any], state: dict[str, Any], repo_root: Path,
 
     if not models_token:
         meta["models_status"] = "disabled: MODELS_TOKEN or GH_MODELS_TOKEN not set"
+        return heuristic, meta
+
+    cadence = max(1, model_every)
+    upcoming_heartbeat = int(state.get("heartbeats", 0)) + 1
+    if cadence > 1 and (upcoming_heartbeat % cadence) != 0:
+        meta["models_status"] = f"skipped this cycle for cost control (model_every={cadence})"
         return heuristic, meta
 
     system_prompt, user_prompt = model_prompt(snapshot, heuristic, read_collaboration_rules(repo_root))
@@ -759,6 +808,16 @@ def merge_pr(repo: str, pr_number: int, dry_run: bool) -> str:
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"failed to merge PR #{pr_number}")
     return result.stdout.strip() or f"Merged or queued PR #{pr_number}"
+
+
+def sync_pr_branch(repo: str, pr_number: int, dry_run: bool) -> str:
+    command = ["gh", "api", "--method", "PUT", f"repos/{repo}/pulls/{pr_number}/update-branch"]
+    if dry_run:
+        return "DRY RUN: " + " ".join(command)
+    result = run_command(command, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"failed to sync PR #{pr_number} with base branch")
+    return result.stdout.strip() or f"Requested branch update for PR #{pr_number}"
 
 
 def mark_pr_ready(repo: str, pr_number: int, dry_run: bool) -> str:
@@ -905,6 +964,45 @@ def execute_plan(snapshot: dict[str, Any], plan: dict[str, Any], state: dict[str
                 results.append({"target": f"pr#{pr['number']}", "action": action, "status": "error", "detail": str(exc)})
             continue
 
+        if action == "sync_branch":
+            event_key = f"sync:pr:{pr['number']}"
+            if state_event_recent(state, event_key, PR_SYNC_COOLDOWN):
+                results.append({"target": f"pr#{pr['number']}", "action": action, "status": "skipped", "detail": "Branch sync is still within cooldown."})
+                continue
+            try:
+                output = sync_pr_branch(repo, pr["number"], dry_run)
+                if not dry_run:
+                    record_event(state, event_key, {"reason": reason})
+                results.append({"target": f"pr#{pr['number']}", "action": action, "status": "ok", "detail": output})
+                actions_taken += 1
+            except RuntimeError as exc:
+                detail = str(exc)
+                lowered = detail.lower()
+                unresolved_conflict = (
+                    "merge conflict" in lowered
+                    or "not mergeable" in lowered
+                    or "422" in lowered
+                    or "conflict" in lowered
+                )
+                if unresolved_conflict:
+                    fallback_reason = "Automatic branch update could not resolve base conflicts; manual conflict resolution is required."
+                    message_hash = handoff_fingerprint(pr, fallback_reason)
+                    comment_event = f"comment:pr:{pr['number']}:{message_hash}"
+                    if state_event_recent(state, comment_event, COPILOT_HANDOFF_COOLDOWN):
+                        results.append({"target": f"pr#{pr['number']}", "action": action, "status": "skipped", "detail": "Sync failed with conflicts and no PR state changes since the last Copilot handoff."})
+                    else:
+                        try:
+                            output = send_back_to_copilot(repo, pr, fallback_reason, dry_run)
+                            if not dry_run:
+                                record_event(state, comment_event, {"reason": fallback_reason})
+                            results.append({"target": f"pr#{pr['number']}", "action": "send_back_to_copilot", "status": "ok", "detail": f"sync failed ({detail}); {output}"})
+                            actions_taken += 1
+                        except RuntimeError as comment_exc:
+                            results.append({"target": f"pr#{pr['number']}", "action": "send_back_to_copilot", "status": "error", "detail": f"sync failed ({detail}); comment failed ({comment_exc})"})
+                else:
+                    results.append({"target": f"pr#{pr['number']}", "action": action, "status": "error", "detail": detail})
+            continue
+
         if action == "send_back_to_copilot":
             message_hash = handoff_fingerprint(pr, reason)
             event_key = f"comment:pr:{pr['number']}:{message_hash}"
@@ -1009,7 +1107,7 @@ def run_heartbeat_cycle(
         "runs": fetch_runs(repo_info["nameWithOwner"], args.run_limit),
     }
     models_token, token_source = resolve_models_token()
-    plan, meta = build_plan(snapshot, state, repo_root, args.model, models_token)
+    plan, meta = build_plan(snapshot, state, repo_root, args.model, models_token, args.model_every)
     if meta["models_status"] == "ready":
         meta["models_status"] = f"ready via {token_source}"
     meta["gh_auth_source"] = GH_AUTH_SOURCE
@@ -1181,11 +1279,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Long-running GitHub heartbeat runner for PR decisions and workflow dispatch.")
     parser.add_argument("--repo", help="Target repository in owner/repo format. Defaults to the current gh repo.")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"GitHub Models identifier. Default: {DEFAULT_MODEL}")
+    parser.add_argument("--model-every", type=int, default=DEFAULT_MODEL_EVERY, help=f"Use GitHub Models inference every N heartbeats (heuristic otherwise). Default: {DEFAULT_MODEL_EVERY}")
     parser.add_argument("--interval", type=int, default=300, help="Heartbeat interval in seconds. Default: 300")
     parser.add_argument("--pr-limit", type=int, default=30, help="Number of open PRs to inspect per heartbeat. Default: 30")
     parser.add_argument("--issue-limit", type=int, default=50, help="Number of open issues to inspect per heartbeat. Default: 50")
     parser.add_argument("--run-limit", type=int, default=100, help="Number of recent workflow runs to inspect per heartbeat. Default: 100")
     parser.add_argument("--max-actions", type=int, default=25, help="Maximum actions to execute per heartbeat. Default: 25")
+    parser.add_argument("--max-retries", type=int, default=2, help="Retry attempts for transient CLI/API errors. Default: 2")
     parser.add_argument("--dry-run", action="store_true", help="Compute and print the queue without mutating GitHub state.")
     parser.add_argument("--once", action="store_true", help="Run a single heartbeat instead of looping forever.")
     parser.add_argument("--tui", action="store_true", help="Run an interactive terminal UI with live heartbeat status.")
@@ -1193,9 +1293,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    global GH_AUTH_SOURCE, GH_COMMAND_ENV
+    global GH_AUTH_SOURCE, GH_COMMAND_ENV, GH_MAX_RETRIES
 
     args = parse_args()
+    GH_MAX_RETRIES = max(1, args.max_retries)
     repo_root = Path.cwd()
     state_file, overview_file = state_paths()
     state = load_state(state_file)

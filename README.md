@@ -427,6 +427,15 @@ Run it continuously every 5 minutes:
 python3 ./scripts/heartbeat_runner.py --interval 300
 ```
 
+For stronger, cost-effective automation, use retries plus model cadence:
+
+```bash
+python3 ./scripts/heartbeat_runner.py --interval 300 --max-retries 2 --model-every 3
+```
+
+- `--max-retries`: retries transient GitHub/API failures before surfacing an error.
+- `--model-every`: uses GitHub Models every N cycles and heuristic planning in between to reduce token spend.
+
 Run the full interactive TUI:
 
 ```bash
