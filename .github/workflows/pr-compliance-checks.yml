@@ -1,0 +1,201 @@
+name: PR Compliance Checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  compliance:
+    name: Compliance validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Evaluate PR compliance
+        id: evaluate
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body || '' }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+
+          FILE_LIST=$(git diff --name-only "origin/${BASE_REF}"...HEAD 2>/dev/null || true)
+          FILE_COUNT=$(printf '%s\n' "$FILE_LIST" | sed '/^$/d' | wc -l | tr -d ' ')
+          WORKFLOW_FILES=$(printf '%s\n' "$FILE_LIST" | grep '^.github/workflows/' || true)
+          WORKFLOW_CHANGE_COUNT=$(printf '%s\n' "$WORKFLOW_FILES" | sed '/^$/d' | wc -l | tr -d ' ')
+
+          TITLE_LEN=$(printf '%s' "$PR_TITLE" | wc -c | tr -d ' ')
+          BODY_LEN=$(printf '%s' "$PR_BODY" | tr -d '[:space:]' | wc -c | tr -d ' ')
+
+          COMPLIANT=true
+          PASSED=0
+          FAILED=0
+          REPORT_ROWS=""
+          FAIL_MESSAGES=""
+
+          append_check() {
+            local check_name="$1"
+            local check_result="$2"
+            local details="$3"
+            REPORT_ROWS+="| ${check_name} | ${check_result} | ${details} |"$'\n'
+            if [ "$check_result" = "✅ PASS" ]; then
+              PASSED=$((PASSED + 1))
+            else
+              FAILED=$((FAILED + 1))
+              COMPLIANT=false
+              FAIL_MESSAGES+="- ${check_name}: ${details}"$'\n'
+            fi
+          }
+
+          if [ "$TITLE_LEN" -ge 10 ]; then
+            append_check "Descriptive PR title" "✅ PASS" "Title length is ${TITLE_LEN} characters"
+          else
+            append_check "Descriptive PR title" "❌ FAIL" "Title must be at least 10 characters"
+          fi
+
+          if [ "$BODY_LEN" -ge 40 ]; then
+            append_check "Detailed PR description" "✅ PASS" "Description has sufficient detail"
+          else
+            append_check "Detailed PR description" "❌ FAIL" "Add a description with at least 40 non-whitespace characters"
+          fi
+
+          if printf '%s' "$PR_BODY" | grep -Eqi '(close[sd]?|fix(e[sd])?|resolve[sd]?)[: ]+#?[0-9]+|#[0-9]+'; then
+            append_check "Issue traceability" "✅ PASS" "Related issue reference found"
+          else
+            append_check "Issue traceability" "❌ FAIL" "Reference a related issue (for example: Fixes #123)"
+          fi
+
+          if [ "$WORKFLOW_CHANGE_COUNT" -gt 0 ]; then
+            if printf '%s' "$PR_LABELS" | grep -Eq '(^|,)council-review(,|$)'; then
+              append_check "Workflow governance" "✅ PASS" "Workflow changes are labeled council-review"
+            else
+              append_check "Workflow governance" "❌ FAIL" "PRs changing .github/workflows/* must include the council-review label"
+            fi
+          else
+            append_check "Workflow governance" "✅ PASS" "No workflow files modified"
+          fi
+
+          if [ "$FILE_COUNT" -le 120 ]; then
+            append_check "Change size control" "✅ PASS" "Changed files count (${FILE_COUNT}) is within policy"
+          elif printf '%s' "$PR_BODY" | grep -Eqi '(risk|rollback|mitigation|testing)'; then
+            append_check "Change size control" "✅ PASS" "Large PR includes risk/testing context"
+          else
+            append_check "Change size control" "❌ FAIL" "Large PRs (>120 files) must include risk, rollback, or testing notes"
+          fi
+
+          if [ "$COMPLIANT" = "true" ]; then
+            REPORT_STATUS="✅ PASS"
+          else
+            REPORT_STATUS="❌ FAIL"
+          fi
+
+          {
+            echo "<!-- compliance-check-report -->"
+            echo "## ${REPORT_STATUS} Automated Compliance Report"
+            echo
+            echo "- **PR**: #${PR_NUMBER}"
+            echo "- **Compliant**: ${COMPLIANT}"
+            echo "- **Passed checks**: ${PASSED}"
+            echo "- **Failed checks**: ${FAILED}"
+            echo "- **Workflow run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "| Check | Status | Details |"
+            echo "|---|---|---|"
+            printf '%s' "$REPORT_ROWS"
+
+            if [ "$WORKFLOW_CHANGE_COUNT" -gt 0 ]; then
+              echo
+              echo "### Workflow files changed"
+              echo '```text'
+              printf '%s\n' "$WORKFLOW_FILES"
+              echo '```'
+            fi
+
+            if [ "$FAILED" -gt 0 ]; then
+              echo
+              echo "### Non-compliance alerts"
+              printf '%s' "$FAIL_MESSAGES"
+            fi
+          } > compliance-report.md
+
+          echo "compliant=${COMPLIANT}" >> "$GITHUB_OUTPUT"
+          echo "failed_checks=${FAILED}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload compliance report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compliance-report-pr-${{ github.event.pull_request.number }}
+          path: compliance-report.md
+          retention-days: 30
+
+      - name: Publish compliance summary
+        if: always()
+        run: cat compliance-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Alert on non-compliance
+        if: steps.evaluate.outputs.compliant != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+
+          COMMENT_ID=$(gh api \
+            "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --paginate \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- compliance-check-report -->"))) | .id' \
+            | tail -n 1)
+
+          if [ -n "$COMMENT_ID" ]; then
+            gh api \
+              --method PATCH \
+              "repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" \
+              --field body="$(cat compliance-report.md)"
+          else
+            gh pr comment "$PR_NUMBER" --body-file compliance-report.md
+          fi
+
+          ALERT_TITLE="⚠️ Compliance alert for PR #${PR_NUMBER}"
+          EXISTING_ALERT_ISSUE=$(gh issue list \
+            --state open \
+            --search "\"${ALERT_TITLE}\" in:title" \
+            --limit 1 \
+            --json title \
+            --jq ".[] | select(.title == \"${ALERT_TITLE}\") | .title" || true)
+
+          if [ -z "$EXISTING_ALERT_ISSUE" ]; then
+            ALERT_BODY=$(printf 'Non-compliance was detected for [PR #%s](%s) — **%s**.\n\nThe latest compliance report is attached to the workflow run:\n%s\n' \
+              "$PR_NUMBER" \
+              "$PR_URL" \
+              "$PR_TITLE" \
+              "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+
+            gh issue create \
+              --title "$ALERT_TITLE" \
+              --body "$ALERT_BODY" \
+              --label "bug" || true
+          fi
+
+          echo "::error::Non-compliance detected. Review the PR Compliance Checks report for details."
+
+      - name: Enforce compliance gate
+        if: steps.evaluate.outputs.compliant != 'true'
+        run: |
+          echo "Compliance checks failed (${{ steps.evaluate.outputs.failed_checks }} issue(s))."
+          exit 1

@@ -85,6 +85,10 @@ env:
   AGENT_MODEL: ${{ vars.AGENT_MODEL || 'gpt-4o-mini' }}
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
+  QA_AGENT_SKILLS: ${{ vars.QA_AGENT_SKILLS || 'code-review,issue-creation,pr-feedback,security-scan' }}
+  PM_AGENT_SKILLS: ${{ vars.PM_AGENT_SKILLS || 'backlog-grooming,milestone-management,discussion-creation,issue-labeling,skill-development-analysis' }}
+  PO_AGENT_SKILLS: ${{ vars.PO_AGENT_SKILLS || 'feature-suggestion,playwright-testing,issue-creation,discussion-facilitation,product-analysis' }}
+  COUNCIL_AGENT_SKILLS: ${{ vars.COUNCIL_AGENT_SKILLS || 'discussion-creation' }}
 
 jobs:
   council:
@@ -331,6 +335,10 @@ jobs:
             engineering council discussion. Provide your honest professional
             perspective focused on quality, security, and testability.
 
+            Configured skill set for this run (repository variable QA_AGENT_SKILLS):
+            ${{ env.QA_AGENT_SKILLS }}
+            Keep your analysis aligned to these configured skills.
+
             Be concise (max 300 words). Structure your response as:
 
             ### Quinn's Perspective (QA Engineer)
@@ -357,6 +365,10 @@ jobs:
             in an engineering council discussion. Provide your honest professional
             perspective focused on timelines, resources, and project impact.
 
+            Configured skill set for this run (repository variable PM_AGENT_SKILLS):
+            ${{ env.PM_AGENT_SKILLS }}
+            Keep your analysis aligned to these configured skills.
+
             Be concise (max 300 words). Structure your response as:
 
             ### Morgan's Perspective (Project Manager)
@@ -382,6 +394,10 @@ jobs:
             You are Alex, a Product Owner. You are participating in an engineering
             council discussion. Provide your honest professional perspective
             focused on user value, product strategy, and business impact.
+
+            Configured skill set for this run (repository variable PO_AGENT_SKILLS):
+            ${{ env.PO_AGENT_SKILLS }}
+            Keep your analysis aligned to these configured skills.
 
             Be concise (max 300 words). Structure your response as:
 
@@ -413,6 +429,10 @@ jobs:
             team. Your role is to synthesise the perspectives of the QA Engineer,
             Project Manager, and Product Owner into a clear, actionable council
             decision.
+
+            Configured skill set for this run (repository variable COUNCIL_AGENT_SKILLS):
+            ${{ env.COUNCIL_AGENT_SKILLS }}
+            Keep your analysis aligned to these configured skills.
 
             Be fair, impartial, and evidence-driven. Acknowledge disagreements
             explicitly. Your decision must be concrete and actionable.

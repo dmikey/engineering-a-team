@@ -74,6 +74,10 @@ Issues.
 
 ### 5. Push code and open a PR — Quinn reviews it automatically
 
+Every pull request also runs the **PR Compliance Checks** workflow, which
+publishes a compliance report artifact and fails the check with alert details
+when non-compliance is detected.
+
 ### 6. Run any agent manually from the Actions tab
 
 Open **Actions → Manual Agent Runner → Run workflow** and choose which agent
@@ -95,6 +99,11 @@ You can also request a council-driven role rebalance from comments with:
 ```
 
 That mode uses the latest workflow performance and workload metrics to promote a lead agent, shift overloaded agents into advisory roles, and publish an audit log of the changes.
+
+The Project Manager's `skill-development-suggestions` task and the
+scheduled Skill Development Tracking workflow now publish a shared
+cross-agent feedback report after completed agent interactions, plus a
+weekly summary for team-wide review.
 
 You can still run the individual workflows directly from the Actions tab if
 you want the workflow-specific form.
@@ -128,6 +137,13 @@ scripts/agent-cli.sh run --agent po --task run-playwright --base-url https://exa
 
 # Self-improvement loop against a reference repo
 scripts/agent-cli.sh run --agent self-improvement --task full-loop --reference-repo owner/get-milk
+
+# Open local supervisor TUI (interactive)
+scripts/agent-cli.sh service tui --tail-lines 100 --refresh 2
+
+# Inspect local supervisor status and logs
+scripts/agent-cli.sh service status
+scripts/agent-cli.sh service logs --tail-lines 120 --follow
 ```
 
 To see all options:
@@ -241,6 +257,9 @@ scripts/autonomous-heartbeat.sh \
 # Start daemon in background (10-minute heartbeat)
 scripts/autonomous-heartbeat.sh start --interval 600
 
+# Open interactive local TUI dashboard
+scripts/autonomous-heartbeat.sh tui --tail-lines 120 --refresh 2
+
 # Check daemon state and latest heartbeat JSON
 scripts/autonomous-heartbeat.sh status
 
@@ -329,8 +348,11 @@ Override defaults using GitHub repository variables
 | `AGENT_ROUTER_DISCUSSION_CATEGORY` | `General` | Discussion category used when router notifications are posted as discussions |
 | `QA_SEVERITY_THRESHOLD` | `HIGH` | Minimum severity to open an issue |
 | `QA_COLLAB_REPOSITORIES` | _(empty)_ | Optional comma-separated `owner/repo` list for cross-repo QA issue context and mirrored serious QA issues (uses up to 3 valid external repositories) |
+| `QA_AGENT_SKILLS` | `code-review,issue-creation,pr-feedback,security-scan` | Comma-separated skill set injected into QA prompts |
 | `PM_MILESTONE_LOOKAHEAD_DAYS` | `30` | Days ahead for milestone drift detection |
+| `PM_AGENT_SKILLS` | `backlog-grooming,milestone-management,discussion-creation,issue-labeling,skill-development-analysis` | Comma-separated skill set injected into PM prompts |
 | `PO_RUN_PLAYWRIGHT` | `true` | Run Playwright tests when config is found |
+| `PO_AGENT_SKILLS` | `feature-suggestion,playwright-testing,issue-creation,discussion-facilitation,product-analysis` | Comma-separated skill set injected into PO prompts |
 | `REFERENCE_APP_REPO` | current repository | Optional override for the `owner/repo` used for the Get Milk benchmark app |
 | `REFERENCE_APP_BASE_URL` | _(empty)_ | Optional live URL for the Get Milk benchmark app |
 | `SELF_IMPROVEMENT_MODEL` | `gpt-4o-mini` | Model for self-improvement evaluation |
@@ -338,6 +360,7 @@ Override defaults using GitHub repository variables
 | `SKILL_REMINDERS_OPT_IN` | `{}` | JSON object mapping known agent names to `true`/`false` reminder opt-ins |
 | `COPILOT_ASSIGNEE` | _(empty)_ | Optional native Copilot assignee identity |
 | `COUNCIL_DISCUSSION_CATEGORY` | `Team Decisions` | GitHub Discussion category |
+| `COUNCIL_AGENT_SKILLS` | `discussion-creation` | Comma-separated skill set injected into Council Moderator prompts |
 
 Shared agent interaction rules are defined in
 [`/.github/collaboration-rules.md`](./.github/collaboration-rules.md). The file
@@ -360,6 +383,12 @@ as a JSON object whose keys are agent names and whose values are booleans:
 
 Invalid JSON, unknown agent names, and non-boolean values are ignored.
 
+### Customizing role skill sets
+
+Set the `*_AGENT_SKILLS` variables as comma-separated lists to tailor each
+role's active capabilities. Changes are read fresh on every workflow run, so
+updated skill sets apply immediately to the next agent execution.
+
 Default automation cadence is tuned for active development:
 
 - Project Manager runs every weekday at 09:00 UTC
@@ -372,6 +401,118 @@ Default automation cadence is tuned for active development:
 
 See [CONFIGURATION.md](./CONFIGURATION.md) for schedule details and how to
 change them.
+
+### Clear Mergeable PRs From Linux
+
+When you want to clear the current PR backlog from a Linux shell, use the
+local runner in [scripts/auto-merge-prs.sh](./scripts/auto-merge-prs.sh):
+
+```bash
+./scripts/auto-merge-prs.sh --base main --dry-run
+./scripts/auto-merge-prs.sh --base main
+```
+
+The script uses `gh pr merge --auto --delete-branch` for every eligible,
+non-draft PR. GitHub merges immediately when allowed and enables auto-merge
+when checks are still pending. Pull requests with merge conflicts, failing
+checks, or blocking review decisions are skipped.
+
+### Run The Long-Lived Heartbeat Orchestrator
+
+If you want a local process that keeps scanning the repo, builds a decision
+queue, merges safe PRs, sends blocked PRs back to Copilot, and dispatches the
+pending agent workflows, run [scripts/heartbeat_runner.py](./scripts/heartbeat_runner.py).
+
+Start with a single dry-run heartbeat:
+
+```bash
+python3 ./scripts/heartbeat_runner.py --once --dry-run
+```
+
+Run it continuously every 5 minutes:
+
+```bash
+python3 ./scripts/heartbeat_runner.py --interval 300
+```
+
+For stronger, cost-effective automation, use retries plus model cadence:
+
+```bash
+python3 ./scripts/heartbeat_runner.py --interval 300 --max-retries 2 --model-every 3 --adaptive-model-cadence
+```
+
+- `--max-retries`: retries transient GitHub/API failures before surfacing an error.
+- `--model-every`: uses GitHub Models every N cycles and heuristic planning in between to reduce token spend.
+- `--adaptive-model-cadence`: increases model usage automatically when PR conflict risk or workflow failure pressure rises.
+
+Escalation automation is built in:
+
+- Repeated sync-conflict failures on the same PR automatically open/update a tracked **stuck PR escalation issue**.
+- Higher conflict-failure streaks automatically dispatch the **council discussion workflow**.
+- These escalations use cooldown guards to avoid noisy repeats while still ensuring unresolved work is actively routed.
+
+Run the full interactive TUI:
+
+```bash
+python3 ./scripts/heartbeat_runner.py --tui --interval 300
+```
+
+TUI controls:
+
+- `q`: quit
+- `r`: run a heartbeat immediately
+- `p`: pause/resume automatic heartbeats
+
+The TUI displays live queue status, PR decision actions, workflow pressure,
+model/auth status, and the actions executed in the latest heartbeat.
+
+The runner prints an in-depth overview each cycle and also writes the latest
+report plus local dedupe state under `.git/heartbeat-runner/`.
+
+For GitHub Models-backed decision inference, export a token that has the
+`models:read` scope before starting it:
+
+```bash
+export MODELS_TOKEN=YOUR_TOKEN_WITH_MODELS_READ
+python3 ./scripts/heartbeat_runner.py --interval 300
+```
+
+Token source policy for the heartbeat runner:
+
+- Local execution (`python3 ./scripts/heartbeat_runner.py ...`): uses `gh auth token` by default for GitHub Models calls.
+- Local fallback: if GitHub CLI auth is unavailable, it falls back to `MODELS_TOKEN` or `GH_MODELS_TOKEN`.
+- GitHub Actions execution: uses `MODELS_TOKEN` (or `GH_MODELS_TOKEN`) from workflow secrets/variables.
+
+If you want local model inference without setting `MODELS_TOKEN`, run:
+
+```bash
+gh auth login
+python3 ./scripts/heartbeat_runner.py --interval 300
+```
+
+If you also want the runner to dispatch workflows itself from local Linux,
+export a user token that has `actions:write` before starting it:
+
+```bash
+export GH_USER_PAT=YOUR_TOKEN_WITH_ACTIONS_WRITE
+python3 ./scripts/heartbeat_runner.py --interval 300
+```
+
+`HEARTBEAT_GH_TOKEN` is also supported for local workflow dispatch auth.
+
+Without local GitHub CLI auth and without `MODELS_TOKEN`/`GH_MODELS_TOKEN`, the
+runner falls back to safe heuristics. It will still merge clearly safe PRs,
+dispatch QA on pending PRs, route feature and planning backlog to the existing
+workflows, and comment on blocked PRs with an `@copilot` handoff.
+
+The heartbeat PR flow is:
+
+1. If a PR (draft or non-draft) has merge conflicts or failing workflow/check
+  signals, post an `@copilot` fix request.
+2. If a draft PR is mergeable with no failing checks/workflow signals, convert
+  it to ready for review.
+3. After conversion, attempt merge using the same safety guard used for
+  non-draft PRs.
 
 ---
 
@@ -469,6 +610,7 @@ Weekdays 09:00 UTC
     └─► project-manager.yml
             ├─► call-github-model (Morgan — grooming)
             ├─► call-github-model (Morgan — milestones)
+    ├─► Uses latest Product + Project Roadmap to guide priority and assignment
             ├─► Labels applied to issues
             └─► Sprint report posted to Discussion/Issue
 

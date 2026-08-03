@@ -1,0 +1,69 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Heartbeat Orchestrator
+#
+# Triggers:  schedule (every 15 minutes around the clock)
+#            workflow_dispatch (manual trigger)
+#
+# What it does each run:
+#   1. Evaluates every open PR for readiness.
+#   2. Converts eligible drafts to ready-for-review.
+#   3. Merges / enables auto-merge for mergeable PRs.
+#   4. Posts @copilot conflict/fix handoffs for blocked PRs.
+#   5. Dispatches backlog-routing agent workflows (task-assignment, pm, po).
+# ──────────────────────────────────────────────────────────────────────────────
+name: Heartbeat Orchestrator
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (no mutations)'
+        type: boolean
+        default: false
+      once:
+        description: 'Run a single heartbeat and exit'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  discussions: write
+  actions: write
+
+jobs:
+  heartbeat:
+    name: Heartbeat Orchestrator
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run heartbeat
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Set MODELS_TOKEN to enable GitHub Models inference for PR decisions.
+          # Falls back to safe heuristics when unset.
+          MODELS_TOKEN: ${{ secrets.MODELS_TOKEN }}
+          # Set GH_USER_PAT (actions:write) to allow workflow dispatch from the heartbeat.
+          HEARTBEAT_GH_TOKEN: ${{ secrets.GH_USER_PAT }}
+        run: |
+          DRY_RUN="${{ inputs.dry_run || 'false' }}"
+          EXTRA_FLAGS=""
+          if [[ "$DRY_RUN" == "true" ]]; then
+            EXTRA_FLAGS="--dry-run"
+          fi
+          python3 scripts/heartbeat_runner.py --once $EXTRA_FLAGS
