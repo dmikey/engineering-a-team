@@ -136,12 +136,15 @@ Settings → Secrets and variables → Variables → New repository variable
 |----------|---------|-------------|
 | `COUNCIL_MODEL` | `gpt-4o` | Model for Council Moderator synthesis |
 | `COUNCIL_DISCUSSION_CATEGORY` | `Team Decisions` | GitHub Discussion category for council decisions |
+| `COUNCIL_ROLE_ADJUSTMENT_ENABLED` | `true` | Enables dynamic role-adjustment reports from the Council Moderator |
+| `COUNCIL_ROLE_ADJUSTMENT_MIN_SCORE` | `80` | Minimum availability score required for an agent to stay in a lead role |
 | `COUNCIL_AGENT_SKILLS` | `discussion-creation` | Comma-separated skill set injected into Casey's moderator prompt at runtime |
 
 Council automation cadence is configured in workflow YAML:
 
 - Weekdays at 14:30 UTC (scheduled product decision sweep)
 - On successful Product Owner workflow completion
+- On successful Task Assignment completion for role-adjustment runs
 - Mondays at 08:00 UTC (council sprint prioritization sweep)
 
 ---
@@ -191,6 +194,8 @@ the GitHub Actions UI.
 For a single entrypoint, use **Manual Agent Runner** from the Actions tab. It
 dispatches to the underlying QA, Project Manager, Product Owner, Council,
 Council Sprint Prioritization, Roadmap Collaboration, Self-Improvement, or Task Assignment workflow and forwards the relevant inputs.
+For Council runs, set `council_mode` to `role-adjustment` to generate a
+metrics-driven role rebalancing report with notifications and an audit log.
 For Product Owner feature suggestion runs, use `feature_prompt` to steer the
 generated GitHub issues.
 

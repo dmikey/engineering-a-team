@@ -275,6 +275,68 @@ class AssignIssuesTests(unittest.TestCase):
         self.assertEqual(recs, [])
 
 
+class RoleAdjustmentTests(unittest.TestCase):
+    def _metrics(self):
+        return {
+            "Quinn (QA Engineer)": {
+                "active_runs": 0,
+                "recent_runs": 1,
+                "perf_runs": 10,
+                "perf_failures": 0,
+                "durations": [2.0] * 10,
+                "last_run": None,
+            },
+            "Morgan (Project Manager)": {
+                "active_runs": 0,
+                "recent_runs": 1,
+                "perf_runs": 10,
+                "perf_failures": 1,
+                "durations": [2.0] * 10,
+                "last_run": None,
+            },
+            "Alex (Product Owner)": {
+                "active_runs": 0,
+                "recent_runs": 1,
+                "perf_runs": 10,
+                "perf_failures": 2,
+                "durations": [2.0] * 10,
+                "last_run": None,
+            },
+        }
+
+    def test_infer_project_focus_prefers_quality_keywords(self):
+        focus = MODULE.infer_project_focus("Security regression bug investigation with QA coverage.")
+        self.assertEqual(focus, "quality")
+
+    def test_recommend_role_adjustments_promotes_quality_lead(self):
+        adjustments = MODULE.recommend_role_adjustments(
+            self._metrics(),
+            "Need urgent test coverage for a bug fix and security review.",
+        )
+        quinn = next(item for item in adjustments if item["agent"] == "Quinn (QA Engineer)")
+        self.assertEqual(quinn["adjusted_role"], "Lead QA Engineer")
+        self.assertTrue(quinn["changed"])
+
+    def test_recommend_role_adjustments_moves_overloaded_agent_to_advisor(self):
+        metrics = self._metrics()
+        metrics["Morgan (Project Manager)"]["active_runs"] = 1
+        adjustments = MODULE.recommend_role_adjustments(metrics, "Sprint planning and milestone coordination.")
+        morgan = next(item for item in adjustments if item["agent"] == "Morgan (Project Manager)")
+        self.assertEqual(morgan["adjusted_role"], "Project Management Advisor")
+        self.assertTrue(morgan["changed"])
+
+    def test_render_role_adjustment_report_contains_audit_log(self):
+        output = MODULE.render_role_adjustment_report(
+            self._metrics(),
+            "2026-07-20",
+            "http://example.com",
+            "Customer feature request with user story and acceptance criteria.",
+        )
+        self.assertIn("Dynamic Agent Role Adjustment", output)
+        self.assertIn("Audit Log", output)
+        self.assertIn("Lead Product Owner", output)
+
+
 class RenderDashboardTests(unittest.TestCase):
     def test_dashboard_contains_headings(self):
         metrics = {

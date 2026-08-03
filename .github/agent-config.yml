@@ -265,6 +265,15 @@ council:
   # Defined in .github/workflows/council-discussion.yml.
   # - Weekdays at 14:30 UTC (scheduled sweep)
   # - On successful completion of Product Owner Agent workflow
+  # - On successful completion of Task Assignment for dynamic role adjustment
+
+  # Enable dynamic role-adjustment reports based on workflow metrics.
+  # Repository variable: COUNCIL_ROLE_ADJUSTMENT_ENABLED (true/false)
+  role_adjustment_enabled: true
+
+  # Availability score below this threshold should move an agent out of the lead role.
+  # Repository variable: COUNCIL_ROLE_ADJUSTMENT_MIN_SCORE
+  role_adjustment_min_score: 80
 
 # ─── Council Sprint Prioritization ───────────────────────────────────────────
 
