@@ -1422,6 +1422,15 @@ def render_tui_lines(
     mergeable = [pr for pr in non_draft if pr.get("mergeable") == "MERGEABLE"]
     conflicting = [pr for pr in non_draft if pr.get("mergeable") == "CONFLICTING" or pr.get("mergeStateStatus") == "DIRTY"]
     unassigned = [issue for issue in issues if not issue.get("assignees")]
+    ok_count = sum(1 for result in results if result.get("status") == "ok")
+    skipped_count = sum(1 for result in results if result.get("status") == "skipped")
+    error_count = sum(1 for result in results if result.get("status") == "error")
+    if results:
+        lines.append(
+            f"Last heartbeat actions: total={len(results)} ok={ok_count} skipped={skipped_count} errors={error_count}"
+        )
+    else:
+        lines.append("Last heartbeat actions: none")
 
     lines.extend(
         [
