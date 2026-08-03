@@ -3,6 +3,8 @@ set -euo pipefail
 
 WORKFLOW_FILE="manual-agent-runner.yml"
 DEFAULT_REF="main"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HEARTBEAT_SCRIPT="$ROOT_DIR/scripts/autonomous-heartbeat.sh"
 
 print_help() {
   cat <<'EOF'
@@ -10,6 +12,7 @@ Local CLI wrapper for the Manual Agent Runner workflow.
 
 Usage:
   scripts/agent-cli.sh run --agent <name> [options]
+  scripts/agent-cli.sh service <status|tui|logs|start|stop|install|uninstall> [options]
 
 Required:
   --agent <qa|pm|po|council|council-sprint|roadmap|self-improvement|task-assignment>
@@ -20,6 +23,17 @@ Common options:
   --extra-context <value>
   --wait                       Wait for completion using `gh run watch`
   --ref <branch-or-tag>        Git ref to run against (default: main)
+
+Service options:
+  status                       Show local supervisor status
+  tui [--tail-lines N] [--refresh N]
+                               Open interactive local TUI for supervisor state/logs
+  logs [--tail-lines N] [--follow]
+                               Show supervisor logs from local state directory
+  start [heartbeat options]    Start local supervisor daemon
+  stop                         Stop local supervisor daemon
+  install [heartbeat options]  Install persistent LaunchAgent supervisor
+  uninstall                    Uninstall persistent LaunchAgent supervisor
 
 Agent-specific options:
   QA:
@@ -41,7 +55,77 @@ Examples:
   scripts/agent-cli.sh run --agent pm --task full-sprint-report
   scripts/agent-cli.sh run --agent po --task run-playwright --base-url https://app.example.com --wait
   scripts/agent-cli.sh run --agent self-improvement --task full-loop --reference-repo acme/get-milk
+  scripts/agent-cli.sh service tui --tail-lines 100 --refresh 2
 EOF
+}
+
+run_service_command() {
+  local action="${1:-}"
+  shift || true
+
+  if [[ ! -x "$HEARTBEAT_SCRIPT" ]]; then
+    echo "Error: missing or non-executable script: $HEARTBEAT_SCRIPT" >&2
+    exit 1
+  fi
+
+  case "$action" in
+    status)
+      "$HEARTBEAT_SCRIPT" status
+      ;;
+    tui)
+      "$HEARTBEAT_SCRIPT" tui "$@"
+      ;;
+    logs)
+      local follow="false"
+      local tail_lines="80"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --follow)
+            follow="true"
+            shift
+            ;;
+          --tail-lines)
+            tail_lines="${2:-}"
+            shift 2
+            ;;
+          -h|--help)
+            print_help
+            exit 0
+            ;;
+          *)
+            echo "Unknown logs option: $1" >&2
+            exit 1
+            ;;
+        esac
+      done
+
+      local log_file="$ROOT_DIR/.autonomous/heartbeat.log"
+      mkdir -p "$ROOT_DIR/.autonomous"
+      touch "$log_file"
+      if [[ "$follow" == "true" ]]; then
+        tail -n "$tail_lines" -f "$log_file"
+      else
+        tail -n "$tail_lines" "$log_file"
+      fi
+      ;;
+    start)
+      "$HEARTBEAT_SCRIPT" start "$@"
+      ;;
+    stop)
+      "$HEARTBEAT_SCRIPT" stop
+      ;;
+    install)
+      "$HEARTBEAT_SCRIPT" install-service "$@"
+      ;;
+    uninstall)
+      "$HEARTBEAT_SCRIPT" uninstall-service
+      ;;
+    *)
+      echo "Error: unknown service action '$action'." >&2
+      print_help
+      exit 1
+      ;;
+  esac
 }
 
 require_gh() {
@@ -71,6 +155,11 @@ main() {
 
   local command="$1"
   shift
+
+  if [[ "$command" == "service" ]]; then
+    run_service_command "$@"
+    exit 0
+  fi
 
   if [[ "$command" != "run" ]]; then
     print_help

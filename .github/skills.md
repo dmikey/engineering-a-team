@@ -233,14 +233,16 @@ GraphQL `createDiscussion`
 identify performance gaps and generate personalized skill development
 suggestions. Surfaces reliability, efficiency, and domain-specific
 improvement areas based on success rate, run frequency, and average
-duration. Respects per-agent opt-in preferences for reminder
+duration. Each completed agent interaction can be captured as a feedback
+submission, aggregated into a shared report, and rolled up into the
+weekly summary. Respects per-agent opt-in preferences for reminder
 notifications stored in the `SKILL_REMINDERS_OPT_IN` repository
 variable.
 
 **Inputs**: Workflow runs JSON (last N days), `SKILL_REMINDERS_OPT_IN`
 repository variable (JSON opt-in map)  
-**Outputs**: Markdown skill development report posted as a Discussion or
-Issue fallback  
+**Outputs**: Markdown cross-agent feedback and skill development report
+posted as a Discussion or Issue fallback  
 **GitHub APIs**: `GET /repos/{owner}/{repo}/actions/runs`,
 GraphQL `createDiscussion`, `POST /repos/{owner}/{repo}/issues`  
 **Used by**: Project Manager
@@ -267,6 +269,23 @@ Discussion or Issue
 `POST /repos/{owner}/{repo}/issues`,
 GraphQL `createDiscussion`, GitHub Models chat completions  
 **Used by**: Agent Skills Training workflow
+
+---
+
+## agent-health-monitoring
+
+**Description**: Collect recent workflow run history for every registered
+agent, compute health metrics (success rate, failure count, average duration,
+time since last run), and classify each agent as HEALTHY, DEGRADED, CRITICAL,
+or INACTIVE.  Publishes a full health dashboard and emits structured alert
+objects for downstream issue creation.
+
+**Inputs**: Workflow runs JSON (last N hours), configurable success-rate and
+inactivity thresholds  
+**Outputs**: Markdown health dashboard; JSON alert array; JSON status map  
+**GitHub APIs**: `GET /repos/{owner}/{repo}/actions/runs`,
+GraphQL `createDiscussion`, `POST /repos/{owner}/{repo}/issues`  
+**Used by**: Agent Health Monitor
 
 ---
 

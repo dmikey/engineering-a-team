@@ -260,6 +260,36 @@ class LoadRemindersOptInTests(unittest.TestCase):
         self.assertEqual(result, {})
 
 
+class LoadLatestInteractionTests(unittest.TestCase):
+    def test_empty_string_returns_none(self):
+        self.assertIsNone(MODULE.load_latest_interaction(""))
+
+    def test_invalid_json_returns_none(self):
+        self.assertIsNone(MODULE.load_latest_interaction("not-json"))
+
+    def test_workflow_name_maps_to_agent(self):
+        raw = json.dumps(
+            {
+                "workflow_name": "Project Manager Agent",
+                "run_number": 12,
+                "conclusion": "success",
+            }
+        )
+        result = MODULE.load_latest_interaction(raw)
+        self.assertEqual(result["agent"], "Morgan (Project Manager)")
+        self.assertEqual(result["workflow_name"], "Project Manager Agent")
+
+    def test_workflow_path_falls_back_to_agent_lookup(self):
+        raw = json.dumps(
+            {
+                "workflow_path": ".github/workflows/product-owner.yml",
+                "workflow_name": "",
+            }
+        )
+        result = MODULE.load_latest_interaction(raw)
+        self.assertEqual(result["agent"], "Alex (Product Owner)")
+
+
 class RenderMarkdownTests(unittest.TestCase):
     def _minimal_metrics(self):
         since = datetime(2026, 7, 1, tzinfo=timezone.utc)
@@ -280,7 +310,7 @@ class RenderMarkdownTests(unittest.TestCase):
             metrics, {}, "2026-07-20", 30, "https://example.com/run/1"
         )
         self.assertIn("2026-07-20", output)
-        self.assertIn("Cross-Agent Skill Development Report", output)
+        self.assertIn("Cross-Agent Feedback & Skill Development Report", output)
 
     def test_reminder_on_badge_shown(self):
         metrics = self._minimal_metrics()
@@ -344,6 +374,29 @@ class RenderMarkdownTests(unittest.TestCase):
         self.assertNotIn("📈 Trend", output)
         self.assertNotIn("📉 Trend", output)
         self.assertNotIn("➡️ Trend", output)
+
+    def test_latest_feedback_submission_section_rendered(self):
+        metrics = self._minimal_metrics()
+        latest_interaction = {
+            "agent": "Morgan (Project Manager)",
+            "workflow_name": "Project Manager Agent",
+            "run_number": 42,
+            "conclusion": "success",
+            "html_url": "https://example.com/run/42",
+            "event": "schedule",
+        }
+        output = MODULE.render_markdown(
+            metrics,
+            {},
+            "2026-07-20",
+            30,
+            "",
+            latest_interaction=latest_interaction,
+        )
+        self.assertIn("Latest Feedback Submission", output)
+        self.assertIn("Project Manager Agent", output)
+        self.assertIn("View workflow run", output)
+        self.assertIn("Aggregated Feedback", output)
 
 
 class CollectTrendTests(unittest.TestCase):

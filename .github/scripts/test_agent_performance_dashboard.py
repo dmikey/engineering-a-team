@@ -58,6 +58,71 @@ class AgentPerformanceDashboardTests(unittest.TestCase):
         sorted_rows = MODULE.sort_rows(rows, "last-run")
         self.assertEqual([r["agent"] for r in sorted_rows], ["B", "A"])
 
+    def test_filter_rows_by_partial_agent_name(self):
+        rows = [
+            {"agent": "Quinn (QA Engineer)"},
+            {"agent": "Morgan (Project Manager)"},
+            {"agent": "Alex (Product Owner)"},
+        ]
+        result = MODULE.filter_rows(rows, "quinn")
+        self.assertEqual([r["agent"] for r in result], ["Quinn (QA Engineer)"])
+
+    def test_filter_rows_case_insensitive(self):
+        rows = [
+            {"agent": "Quinn (QA Engineer)"},
+            {"agent": "Morgan (Project Manager)"},
+        ]
+        result = MODULE.filter_rows(rows, "MORGAN")
+        self.assertEqual([r["agent"] for r in result], ["Morgan (Project Manager)"])
+
+    def test_filter_rows_all_returns_all(self):
+        rows = [
+            {"agent": "Quinn (QA Engineer)"},
+            {"agent": "Morgan (Project Manager)"},
+        ]
+        self.assertEqual(MODULE.filter_rows(rows, "all"), rows)
+        self.assertEqual(MODULE.filter_rows(rows, ""), rows)
+        self.assertEqual(MODULE.filter_rows(rows, None), rows)
+
+    def test_filter_rows_no_match_returns_empty(self):
+        rows = [{"agent": "Quinn (QA Engineer)"}]
+        result = MODULE.filter_rows(rows, "nonexistent")
+        self.assertEqual(result, [])
+
+    def test_render_markdown_includes_filter_agent_line(self):
+        rows = [
+            {
+                "agent": "Quinn (QA Engineer)",
+                "runs": 5,
+                "success_rate": 80.0,
+                "failures": 1,
+                "avg_duration": 2.5,
+                "last_run": "2026-07-30",
+            }
+        ]
+        md = MODULE.render_markdown(rows, "2026-07-31", 30, "success-rate", "http://example.com", "Quinn (QA Engineer)")
+        self.assertIn("**Filtered Agent**: `Quinn (QA Engineer)`", md)
+        self.assertIn("Quinn (QA Engineer)", md)
+
+    def test_render_markdown_no_filter_line_when_all(self):
+        rows = [
+            {
+                "agent": "Quinn (QA Engineer)",
+                "runs": 3,
+                "success_rate": 100.0,
+                "failures": 0,
+                "avg_duration": 1.0,
+                "last_run": "2026-07-30",
+            }
+        ]
+        md = MODULE.render_markdown(rows, "2026-07-31", 30, "success-rate", "", "all")
+        self.assertNotIn("**Filtered Agent**", md)
+
+    def test_render_markdown_empty_rows_shows_no_data_message(self):
+        md = MODULE.render_markdown([], "2026-07-31", 30, "success-rate", "", "nobody")
+        self.assertIn("No workflow runs found", md)
+        self.assertNotIn("| Agent |", md)
+
 
 if __name__ == "__main__":
     unittest.main()
