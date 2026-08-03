@@ -22,6 +22,9 @@ inputs:
   token:
     description: 'GitHub token or Models API token (needs models:read scope)'
     required: true
+  fallback-token:
+    description: 'Optional fallback token used when the primary token is unauthorized'
+    required: false
 
 outputs:
   response:
@@ -44,6 +47,7 @@ runs:
         TEMPERATURE: ${{ inputs.temperature }}
         MAX_TOKENS: ${{ inputs.max-tokens }}
         API_TOKEN: ${{ inputs.token }}
+        FALLBACK_API_TOKEN: ${{ inputs.fallback-token }}
         RULES_FILE: ${{ github.workspace }}/.github/collaboration-rules.md
       run: |
         PROMPT_FILE=$(mktemp)
@@ -136,24 +140,26 @@ runs:
           )
         fi
 
-        CURL_EXIT=0
-        CURL_OUTPUT=$(curl --silent --show-error --retry 3 --retry-connrefused \
-          --connect-timeout 15 --max-time 180 \
-          -X POST \
-          -H "Authorization: Bearer $API_TOKEN" \
-          -H "Content-Type: application/json" \
-          -H "Accept: application/json" \
-          -w "\n__GH_HTTP_STATUS:%{http_code}" \
-          "https://models.github.ai/inference/chat/completions" \
-          -d "$PAYLOAD") || CURL_EXIT=$?
+        call_model() {
+          local token="$1"
+          CURL_EXIT=0
+          CURL_OUTPUT=$(curl --silent --show-error --retry 3 --retry-connrefused \
+            --connect-timeout 15 --max-time 180 \
+            -X POST \
+            -H "$(printf '%s: %s %s' 'Authorization' 'Bearer' "$token")" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -w "\n__GH_HTTP_STATUS:%{http_code}" \
+            "https://models.github.ai/inference/chat/completions" \
+            -d "$PAYLOAD") || CURL_EXIT=$?
 
-        HTTP_STATUS=$(printf '%s\n' "$CURL_OUTPUT" | awk -F: '/__GH_HTTP_STATUS:/{print $2}' | tail -1)
-        export HTTP_STATUS
-        RAW=$(printf '%s\n' "$CURL_OUTPUT" | sed '/__GH_HTTP_STATUS:/d')
+          HTTP_STATUS=$(printf '%s\n' "$CURL_OUTPUT" | awk -F: '/__GH_HTTP_STATUS:/{print $2}' | tail -1)
+          export HTTP_STATUS
+          RAW=$(printf '%s\n' "$CURL_OUTPUT" | sed '/__GH_HTTP_STATUS:/d')
 
-        if [ "$CURL_EXIT" -ne 0 ]; then
-          export CURL_EXIT
-          RAW=$(python3 - <<'PYEOF'
+          if [ "$CURL_EXIT" -ne 0 ]; then
+            export CURL_EXIT
+            RAW=$(python3 - <<'PYEOF'
         import json
         import os
         print(json.dumps({
@@ -164,9 +170,9 @@ runs:
             }
         }))
         PYEOF
-          )
-        elif [ -z "$RAW" ]; then
-          RAW=$(python3 - <<'PYEOF'
+            )
+          elif [ -z "$RAW" ]; then
+            RAW=$(python3 - <<'PYEOF'
         import json
         import os
         print(json.dumps({
@@ -177,11 +183,11 @@ runs:
             }
         }))
         PYEOF
-          )
-        elif [ -n "$HTTP_STATUS" ] && [ "$HTTP_STATUS" -ge 400 ]; then
-          if ! echo "$RAW" | python3 -c "import json,sys; json.load(sys.stdin)" >/dev/null 2>&1; then
-            export HTTP_STATUS RAW
-            RAW=$(python3 - <<'PYEOF'
+            )
+          elif [ -n "$HTTP_STATUS" ] && [ "$HTTP_STATUS" -ge 400 ]; then
+            if ! echo "$RAW" | python3 -c "import json,sys; json.load(sys.stdin)" >/dev/null 2>&1; then
+              export HTTP_STATUS RAW
+              RAW=$(python3 - <<'PYEOF'
         import json
         import os
         body = os.environ.get("RAW", "").strip()
@@ -195,8 +201,33 @@ runs:
             }
         }))
         PYEOF
-            )
+              )
+            fi
           fi
+        }
+
+        call_model "$API_TOKEN"
+
+        UNAUTHORIZED=$(echo "$RAW" | python3 -c "
+        import json, os, sys
+        status = str(os.environ.get('HTTP_STATUS', '')).strip().lower()
+        is_unauthorized_status = status in {'401', 'unauthorized'}
+        try:
+            data = json.load(sys.stdin)
+        except json.JSONDecodeError:
+            print('true' if is_unauthorized_status else 'false')
+            raise SystemExit(0)
+        err = data.get('error') or {}
+        code = str(err.get('code', '')).strip().lower()
+        err_status = str(err.get('status', '')).strip().lower()
+        message = str(err.get('message', '')).strip().lower()
+        is_unauthorized = is_unauthorized_status or code == 'unauthorized' or err_status in {'401', 'unauthorized'} or 'unauthorized' in message
+        print('true' if is_unauthorized else 'false')
+        ")
+
+        if [ "$UNAUTHORIZED" = "true" ] && [ -n "$FALLBACK_API_TOKEN" ] && [ "$FALLBACK_API_TOKEN" != "$API_TOKEN" ]; then
+          echo "Primary model token unauthorized; retrying with fallback token." >&2
+          call_model "$FALLBACK_API_TOKEN"
         fi
 
         # Capture raw JSON
