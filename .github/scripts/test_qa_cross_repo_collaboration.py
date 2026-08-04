@@ -5,6 +5,7 @@ import unittest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 QA_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "qa-engineer.yml"
+MODEL_CALL_ACTION = REPO_ROOT / ".github" / "actions" / "call-github-model" / "action.yml"
 
 
 class QaCrossRepoCollaborationTests(unittest.TestCase):
@@ -50,7 +51,7 @@ class QaRobustnessTests(unittest.TestCase):
         match = re.search(r"DIFF_CONTENT=.*head -(\d+)", self.workflow_text)
         self.assertIsNotNone(match, "DIFF_CONTENT head limit not found in workflow")
         limit = int(match.group(1))
-        self.assertLessEqual(limit, 200, f"DIFF_CONTENT head limit {limit} exceeds 200")
+        self.assertLessEqual(limit, 150, f"DIFF_CONTENT head limit {limit} exceeds 150")
 
     def test_issue_creation_step_has_continue_on_error(self):
         """The issue-creation step must not fail the overall workflow on error."""
@@ -79,6 +80,10 @@ class QaRobustnessTests(unittest.TestCase):
         """Validate step must include guidance about token and API issues."""
         self.assertIn("MODELS_TOKEN", self.workflow_text)
         self.assertIn("Model call failed", self.workflow_text)
+
+    def test_model_call_has_github_token_fallback(self):
+        """Model call should retry with GITHUB_TOKEN if a custom MODELS_TOKEN is unauthorized."""
+        self.assertIn("fallback-token: ${{ secrets.GITHUB_TOKEN }}", self.workflow_text)
 
     def test_model_failures_fall_back_to_manual_review_handoff(self):
         """Model failures should degrade gracefully instead of failing the workflow."""
@@ -110,6 +115,20 @@ class QaRobustnessTests(unittest.TestCase):
             "Warning: Unable to create QA tracking issue in",
             self.workflow_text,
         )
+
+
+class ModelCallActionRobustnessTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.action_text = MODEL_CALL_ACTION.read_text(encoding="utf-8")
+
+    def test_supports_fallback_token_input(self):
+        self.assertIn("fallback-token:", self.action_text)
+        self.assertIn("FALLBACK_API_TOKEN", self.action_text)
+
+    def test_retries_when_primary_token_is_unauthorized(self):
+        self.assertIn("UNAUTHORIZED=", self.action_text)
+        self.assertIn("retrying with fallback token", self.action_text)
 
 
 if __name__ == "__main__":

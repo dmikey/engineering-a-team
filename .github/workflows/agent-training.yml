@@ -1,0 +1,644 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Agent Skills Training Module
+#
+# Runs structured training sessions for each agent based on the curriculum
+# defined in agent_training_module.py. Each session uses the GitHub Models
+# API (via call-github-model) to generate a scenario, model answer, and
+# improvement tips for the next pending training topic. Completed sessions
+# are recorded as labelled GitHub Issues to track per-agent progress.
+# A full progress report is posted weekly as a Discussion (Issue fallback).
+#
+# Triggers:  schedule — every Monday at 08:00 UTC
+#            workflow_dispatch — manual run with optional agent focus
+#            workflow_call — callable from other workflows
+#
+# Skills:    agent-training
+#
+# Labels used:
+#   training-progress       — every training session issue
+#   training-complete       — session issues that passed evaluation
+#   training-needs-review   — session issues needing human review
+# ──────────────────────────────────────────────────────────────────────────────
+name: Agent Skills Training
+
+on:
+  schedule:
+    # Every Monday at 08:00 UTC
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+    inputs:
+      agent_focus:
+        description: 'Run training only for this agent (leave blank for all agents)'
+        required: false
+      period_days:
+        description: 'Look-back window in days for existing training issues'
+        required: false
+        default: '90'
+  workflow_call:
+    inputs:
+      agent_focus:
+        type: string
+        description: 'Agent name to focus training on (optional)'
+        required: false
+      period_days:
+        type: string
+        description: 'Look-back window in days'
+        required: false
+        default: '90'
+    secrets:
+      MODELS_TOKEN:
+        required: false
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  discussions: write
+  models: read
+
+env:
+  TRAINING_MODEL: ${{ vars.PM_MODEL || 'gpt-4o-mini' }}
+  AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
+  AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
+
+jobs:
+  training:
+    name: Agent Skills Training
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Ensure required labels exist ──────────────────────────────────────
+      - name: Create training labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create "training-progress"      --color "0075ca" --force 2>/dev/null || true
+          gh label create "training-complete"      --color "0e8a16" --force 2>/dev/null || true
+          gh label create "training-needs-review"  --color "e4e669" --force 2>/dev/null || true
+
+      # ── Gather existing training progress ─────────────────────────────────
+      - name: Gather training progress
+        id: data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PERIOD_DAYS="${{ inputs.period_days || '90' }}"
+          if [[ ! "$PERIOD_DAYS" =~ ^[0-9]+$ ]] || \
+             [ "$PERIOD_DAYS" -lt 1 ] || [ "$PERIOD_DAYS" -gt 365 ]; then
+            PERIOD_DAYS=90
+          fi
+          echo "period_days=$PERIOD_DAYS" >> "$GITHUB_OUTPUT"
+
+          CURRENT_DATE=$(date -u +"%Y-%m-%d")
+          echo "current_date=$CURRENT_DATE" >> "$GITHUB_OUTPUT"
+
+          # Fetch all training-progress issues (open + closed) within window
+          gh issue list \
+            --state all \
+            --label "training-progress" \
+            --limit 200 \
+            --json number,title,labels,createdAt,body \
+            > /tmp/training-issues.json
+
+          echo "Fetched $(python3 -c \
+            "import json; print(len(json.load(open('/tmp/training-issues.json'))))" \
+            2>/dev/null || echo '?') training issues"
+
+      # ── Identify next topic per agent ─────────────────────────────────────
+      - name: Identify next training topics
+        id: topics
+        env:
+          AGENT_FOCUS: ${{ inputs.agent_focus || '' }}
+        run: |
+          # Build per-agent outputs for use in conditional training steps
+          python3 - <<'PYEOF'
+          import json
+          import os
+          import sys
+
+          sys.path.insert(0, ".github/scripts")
+          from agent_training_module import (
+              TRAINING_CURRICULUM,
+              collect_training_progress,
+              select_next_topics,
+          )
+
+          with open("/tmp/training-issues.json") as fh:
+              issues = json.load(fh)
+
+          progress = collect_training_progress(issues)
+          next_topics = select_next_topics(progress)
+
+          agent_focus = os.environ.get("AGENT_FOCUS", "").strip()
+          if agent_focus:
+              next_topics = [t for t in next_topics if t["agent"] == agent_focus]
+
+          # Write per-agent outputs to GITHUB_OUTPUT
+          output_path = os.environ.get("GITHUB_OUTPUT", "/tmp/gh_output.txt")
+
+          agent_slug = {
+              "Quinn (QA Engineer)":      "quinn",
+              "Morgan (Project Manager)": "morgan",
+              "Alex (Product Owner)":     "alex",
+              "Casey (Council Moderator)":"casey",
+          }
+
+          found = {slug: False for slug in agent_slug.values()}
+          topics_by_agent = {item["agent"]: item["topic"] for item in next_topics}
+
+          with open(output_path, "a") as out:
+              for agent, slug in agent_slug.items():
+                  topic = topics_by_agent.get(agent)
+                  if topic:
+                      found[slug] = True
+                      out.write(f"{slug}_has_topic=true\n")
+                      out.write(f"{slug}_topic_id={topic['id']}\n")
+                      out.write(f"{slug}_topic_name={topic['name']}\n")
+                      out.write(f"{slug}_topic_skill={topic['skill']}\n")
+                      out.write(f"{slug}_topic_difficulty={topic['difficulty']}\n")
+                      # Multi-line description via heredoc syntax
+                      out.write(f"{slug}_topic_description<<TOPIC_DESC_EOF\n")
+                      out.write(topic["description"] + "\n")
+                      out.write("TOPIC_DESC_EOF\n")
+                  else:
+                      out.write(f"{slug}_has_topic=false\n")
+                      for key in ("topic_id","topic_name","topic_skill",
+                                  "topic_difficulty","topic_description"):
+                          out.write(f"{slug}_{key}=\n")
+
+          total = sum(1 for v in found.values() if v)
+          print(f"Identified {total} pending training topics")
+          PYEOF
+
+      # ── Quinn · QA Engineer ───────────────────────────────────────────────
+      - name: Train Quinn · ${{ steps.topics.outputs.quinn_topic_name }}
+        id: quinn_training
+        if: steps.topics.outputs.quinn_has_topic == 'true'
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.TRAINING_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are an expert trainer evaluating the skills of Quinn (QA Engineer),
+            a GitHub Actions AI agent whose role is to review pull requests, run
+            security scans, and file quality issues.
+
+            Conduct a training session on the topic
+            "${{ steps.topics.outputs.quinn_topic_name }}"
+            (skill: ${{ steps.topics.outputs.quinn_topic_skill }},
+            difficulty: ${{ steps.topics.outputs.quinn_topic_difficulty }}).
+
+            Structure your response with these Markdown headings:
+            ## Scenario
+            ## Model Answer
+            ## Improvement Tips
+          user-prompt: |
+            Conduct a training session for Quinn (QA Engineer).
+
+            **Topic**: ${{ steps.topics.outputs.quinn_topic_name }}
+            **Skill**: ${{ steps.topics.outputs.quinn_topic_skill }}
+            **Difficulty**: ${{ steps.topics.outputs.quinn_topic_difficulty }}
+
+            **Training objective**: ${{ steps.topics.outputs.quinn_topic_description }}
+
+      - name: Record Quinn training session
+        if: steps.topics.outputs.quinn_has_topic == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRAINING_CONTENT: ${{ steps.quinn_training.outputs.response }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TOPIC_ID: ${{ steps.topics.outputs.quinn_topic_id }}
+          TOPIC_NAME: ${{ steps.topics.outputs.quinn_topic_name }}
+          TOPIC_SKILL: ${{ steps.topics.outputs.quinn_topic_skill }}
+          TOPIC_DIFFICULTY: ${{ steps.topics.outputs.quinn_topic_difficulty }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, subprocess
+          content = os.environ.get("TRAINING_CONTENT", "")
+          passed = bool(content) and not content.startswith("⚠️")
+          status_emoji = "✅" if passed else "⚠️"
+          labels = ["training-progress",
+                    "training-complete" if passed else "training-needs-review"]
+          body = (
+              f"{status_emoji} **Training Session — Quinn (QA Engineer)**\n\n"
+              f"> **Topic**: {os.environ['TOPIC_NAME']}  \n"
+              f"> **Skill**: `{os.environ['TOPIC_SKILL']}`  \n"
+              f"> **Difficulty**: {os.environ['TOPIC_DIFFICULTY']}  \n"
+              f"> **Date**: {os.environ['CURRENT_DATE']}  \n"
+              f"> **Status**: {'Completed' if passed else 'Needs Review'}\n\n"
+              f"---\n\n{content}\n\n---\n"
+              f"*🤖 Automated training session · "
+              f"[Workflow run]({os.environ['WORKFLOW_URL']})*"
+          )
+          title = f"Training Session: Quinn (QA Engineer) \u2014 {os.environ['TOPIC_ID']}"
+          label_args = [arg for lbl in labels for arg in ["--label", lbl]]
+          result = subprocess.run(
+              ["gh", "issue", "create", "--title", title, "--body", body] + label_args,
+              capture_output=True, text=True,
+          )
+          if result.returncode == 0:
+              print(f"✅ Created Quinn training issue: {result.stdout.strip()}")
+          else:
+              print(f"⚠️ Could not create Quinn training issue: {result.stderr.strip()}")
+          PYEOF
+
+      # ── Morgan · Project Manager ──────────────────────────────────────────
+      - name: Train Morgan · ${{ steps.topics.outputs.morgan_topic_name }}
+        id: morgan_training
+        if: steps.topics.outputs.morgan_has_topic == 'true'
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.TRAINING_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are an expert trainer evaluating the skills of Morgan (Project Manager),
+            a GitHub Actions AI agent whose role is to groom the backlog, manage
+            milestones, and report on team skill development.
+
+            Conduct a training session on the topic
+            "${{ steps.topics.outputs.morgan_topic_name }}"
+            (skill: ${{ steps.topics.outputs.morgan_topic_skill }},
+            difficulty: ${{ steps.topics.outputs.morgan_topic_difficulty }}).
+
+            Structure your response with these Markdown headings:
+            ## Scenario
+            ## Model Answer
+            ## Improvement Tips
+          user-prompt: |
+            Conduct a training session for Morgan (Project Manager).
+
+            **Topic**: ${{ steps.topics.outputs.morgan_topic_name }}
+            **Skill**: ${{ steps.topics.outputs.morgan_topic_skill }}
+            **Difficulty**: ${{ steps.topics.outputs.morgan_topic_difficulty }}
+
+            **Training objective**: ${{ steps.topics.outputs.morgan_topic_description }}
+
+      - name: Record Morgan training session
+        if: steps.topics.outputs.morgan_has_topic == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRAINING_CONTENT: ${{ steps.morgan_training.outputs.response }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TOPIC_ID: ${{ steps.topics.outputs.morgan_topic_id }}
+          TOPIC_NAME: ${{ steps.topics.outputs.morgan_topic_name }}
+          TOPIC_SKILL: ${{ steps.topics.outputs.morgan_topic_skill }}
+          TOPIC_DIFFICULTY: ${{ steps.topics.outputs.morgan_topic_difficulty }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, subprocess
+          content = os.environ.get("TRAINING_CONTENT", "")
+          passed = bool(content) and not content.startswith("⚠️")
+          status_emoji = "✅" if passed else "⚠️"
+          labels = ["training-progress",
+                    "training-complete" if passed else "training-needs-review"]
+          body = (
+              f"{status_emoji} **Training Session — Morgan (Project Manager)**\n\n"
+              f"> **Topic**: {os.environ['TOPIC_NAME']}  \n"
+              f"> **Skill**: `{os.environ['TOPIC_SKILL']}`  \n"
+              f"> **Difficulty**: {os.environ['TOPIC_DIFFICULTY']}  \n"
+              f"> **Date**: {os.environ['CURRENT_DATE']}  \n"
+              f"> **Status**: {'Completed' if passed else 'Needs Review'}\n\n"
+              f"---\n\n{content}\n\n---\n"
+              f"*🤖 Automated training session · "
+              f"[Workflow run]({os.environ['WORKFLOW_URL']})*"
+          )
+          title = f"Training Session: Morgan (Project Manager) \u2014 {os.environ['TOPIC_ID']}"
+          label_args = [arg for lbl in labels for arg in ["--label", lbl]]
+          result = subprocess.run(
+              ["gh", "issue", "create", "--title", title, "--body", body] + label_args,
+              capture_output=True, text=True,
+          )
+          if result.returncode == 0:
+              print(f"✅ Created Morgan training issue: {result.stdout.strip()}")
+          else:
+              print(f"⚠️ Could not create Morgan training issue: {result.stderr.strip()}")
+          PYEOF
+
+      # ── Alex · Product Owner ──────────────────────────────────────────────
+      - name: Train Alex · ${{ steps.topics.outputs.alex_topic_name }}
+        id: alex_training
+        if: steps.topics.outputs.alex_has_topic == 'true'
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.TRAINING_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are an expert trainer evaluating the skills of Alex (Product Owner),
+            a GitHub Actions AI agent whose role is to suggest features, analyse
+            product health, and define acceptance criteria.
+
+            Conduct a training session on the topic
+            "${{ steps.topics.outputs.alex_topic_name }}"
+            (skill: ${{ steps.topics.outputs.alex_topic_skill }},
+            difficulty: ${{ steps.topics.outputs.alex_topic_difficulty }}).
+
+            Structure your response with these Markdown headings:
+            ## Scenario
+            ## Model Answer
+            ## Improvement Tips
+          user-prompt: |
+            Conduct a training session for Alex (Product Owner).
+
+            **Topic**: ${{ steps.topics.outputs.alex_topic_name }}
+            **Skill**: ${{ steps.topics.outputs.alex_topic_skill }}
+            **Difficulty**: ${{ steps.topics.outputs.alex_topic_difficulty }}
+
+            **Training objective**: ${{ steps.topics.outputs.alex_topic_description }}
+
+      - name: Record Alex training session
+        if: steps.topics.outputs.alex_has_topic == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRAINING_CONTENT: ${{ steps.alex_training.outputs.response }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TOPIC_ID: ${{ steps.topics.outputs.alex_topic_id }}
+          TOPIC_NAME: ${{ steps.topics.outputs.alex_topic_name }}
+          TOPIC_SKILL: ${{ steps.topics.outputs.alex_topic_skill }}
+          TOPIC_DIFFICULTY: ${{ steps.topics.outputs.alex_topic_difficulty }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, subprocess
+          content = os.environ.get("TRAINING_CONTENT", "")
+          passed = bool(content) and not content.startswith("⚠️")
+          status_emoji = "✅" if passed else "⚠️"
+          labels = ["training-progress",
+                    "training-complete" if passed else "training-needs-review"]
+          body = (
+              f"{status_emoji} **Training Session — Alex (Product Owner)**\n\n"
+              f"> **Topic**: {os.environ['TOPIC_NAME']}  \n"
+              f"> **Skill**: `{os.environ['TOPIC_SKILL']}`  \n"
+              f"> **Difficulty**: {os.environ['TOPIC_DIFFICULTY']}  \n"
+              f"> **Date**: {os.environ['CURRENT_DATE']}  \n"
+              f"> **Status**: {'Completed' if passed else 'Needs Review'}\n\n"
+              f"---\n\n{content}\n\n---\n"
+              f"*🤖 Automated training session · "
+              f"[Workflow run]({os.environ['WORKFLOW_URL']})*"
+          )
+          title = f"Training Session: Alex (Product Owner) \u2014 {os.environ['TOPIC_ID']}"
+          label_args = [arg for lbl in labels for arg in ["--label", lbl]]
+          result = subprocess.run(
+              ["gh", "issue", "create", "--title", title, "--body", body] + label_args,
+              capture_output=True, text=True,
+          )
+          if result.returncode == 0:
+              print(f"✅ Created Alex training issue: {result.stdout.strip()}")
+          else:
+              print(f"⚠️ Could not create Alex training issue: {result.stderr.strip()}")
+          PYEOF
+
+      # ── Casey · Council Moderator ─────────────────────────────────────────
+      - name: Train Casey · ${{ steps.topics.outputs.casey_topic_name }}
+        id: casey_training
+        if: steps.topics.outputs.casey_has_topic == 'true'
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.TRAINING_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are an expert trainer evaluating the skills of Casey (Council Moderator),
+            a GitHub Actions AI agent whose role is to facilitate multi-agent
+            discussions and synthesise council decisions.
+
+            Conduct a training session on the topic
+            "${{ steps.topics.outputs.casey_topic_name }}"
+            (skill: ${{ steps.topics.outputs.casey_topic_skill }},
+            difficulty: ${{ steps.topics.outputs.casey_topic_difficulty }}).
+
+            Structure your response with these Markdown headings:
+            ## Scenario
+            ## Model Answer
+            ## Improvement Tips
+          user-prompt: |
+            Conduct a training session for Casey (Council Moderator).
+
+            **Topic**: ${{ steps.topics.outputs.casey_topic_name }}
+            **Skill**: ${{ steps.topics.outputs.casey_topic_skill }}
+            **Difficulty**: ${{ steps.topics.outputs.casey_topic_difficulty }}
+
+            **Training objective**: ${{ steps.topics.outputs.casey_topic_description }}
+
+      - name: Record Casey training session
+        if: steps.topics.outputs.casey_has_topic == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRAINING_CONTENT: ${{ steps.casey_training.outputs.response }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TOPIC_ID: ${{ steps.topics.outputs.casey_topic_id }}
+          TOPIC_NAME: ${{ steps.topics.outputs.casey_topic_name }}
+          TOPIC_SKILL: ${{ steps.topics.outputs.casey_topic_skill }}
+          TOPIC_DIFFICULTY: ${{ steps.topics.outputs.casey_topic_difficulty }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, subprocess
+          content = os.environ.get("TRAINING_CONTENT", "")
+          passed = bool(content) and not content.startswith("⚠️")
+          status_emoji = "✅" if passed else "⚠️"
+          labels = ["training-progress",
+                    "training-complete" if passed else "training-needs-review"]
+          body = (
+              f"{status_emoji} **Training Session — Casey (Council Moderator)**\n\n"
+              f"> **Topic**: {os.environ['TOPIC_NAME']}  \n"
+              f"> **Skill**: `{os.environ['TOPIC_SKILL']}`  \n"
+              f"> **Difficulty**: {os.environ['TOPIC_DIFFICULTY']}  \n"
+              f"> **Date**: {os.environ['CURRENT_DATE']}  \n"
+              f"> **Status**: {'Completed' if passed else 'Needs Review'}\n\n"
+              f"---\n\n{content}\n\n---\n"
+              f"*🤖 Automated training session · "
+              f"[Workflow run]({os.environ['WORKFLOW_URL']})*"
+          )
+          title = f"Training Session: Casey (Council Moderator) \u2014 {os.environ['TOPIC_ID']}"
+          label_args = [arg for lbl in labels for arg in ["--label", lbl]]
+          result = subprocess.run(
+              ["gh", "issue", "create", "--title", title, "--body", body] + label_args,
+              capture_output=True, text=True,
+          )
+          if result.returncode == 0:
+              print(f"✅ Created Casey training issue: {result.stdout.strip()}")
+          else:
+              print(f"⚠️ Could not create Casey training issue: {result.stderr.strip()}")
+          PYEOF
+
+      # ── Re-fetch updated progress (includes sessions just recorded) ───────
+      - name: Re-fetch training progress
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue list \
+            --state all \
+            --label "training-progress" \
+            --limit 200 \
+            --json number,title,labels,createdAt,body \
+            > /tmp/training-issues-updated.json
+
+      # ── Generate and post alerts for behind-schedule agents ───────────────
+      - name: Generate training alerts
+        id: alerts
+        env:
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+        run: |
+          python3 .github/scripts/agent_training_module.py \
+            --input /tmp/training-issues-updated.json \
+            --output-format alerts-json \
+            > /tmp/training-alerts.json
+
+          ALERT_COUNT=$(python3 -c "
+          import json
+          alerts = json.load(open('/tmp/training-alerts.json'))
+          print(len(alerts))
+          " 2>/dev/null || echo "0")
+          echo "alert_count=$ALERT_COUNT" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "alerts_json<<TRAINING_ALERTS_EOF"
+            cat /tmp/training-alerts.json
+            echo "TRAINING_ALERTS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create PM alert issues for behind-schedule agents
+        if: steps.alerts.outputs.alert_count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ALERTS_JSON: ${{ steps.alerts.outputs.alerts_json }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create "priority: high"     --color "e4e669" --force 2>/dev/null || true
+          gh label create "priority: critical" --color "d73a4a" --force 2>/dev/null || true
+
+          python3 - <<'PYEOF'
+          import json, os, subprocess
+
+          raw = os.environ.get("ALERTS_JSON", "[]")
+          try:
+              alerts = json.loads(raw)
+          except json.JSONDecodeError:
+              alerts = []
+
+          current_date = os.environ["CURRENT_DATE"]
+          workflow_url = os.environ["WORKFLOW_URL"]
+
+          for alert in alerts:
+              agent           = alert.get("agent", "Unknown")
+              severity        = alert.get("severity", "warning")
+              reason          = alert.get("reason", "")
+              completion_rate = alert.get("completion_rate", 0)
+              completed_count = alert.get("completed_count", 0)
+              total_topics    = alert.get("total_topics", 0)
+              pending_topics  = alert.get("pending_topics", [])
+
+              severity_emoji = "🚨" if severity == "critical" else "⚠️"
+              priority_label = (
+                  "priority: critical" if severity == "critical" else "priority: high"
+              )
+              pending_md = "\n".join(f"- `{t}`" for t in pending_topics)
+
+              body = (
+                  f"{severity_emoji} **Training Alert — {agent}**\n\n"
+                  f"> **Reported by**: Agent Skills Training  \n"
+                  f"> **Date**: {current_date}\n\n"
+                  f"## Summary\n\n{reason}\n\n"
+                  f"| Metric | Value |\n"
+                  f"|--------|-------|\n"
+                  f"| Topics Completed | {completed_count}/{total_topics} |\n"
+                  f"| Completion Rate | {completion_rate:.0f}% |\n"
+                  f"| Severity | {severity.upper()} |\n\n"
+                  f"## Pending Topics\n\n{pending_md}\n\n"
+                  f"## Recommended Actions for Morgan (Project Manager)\n\n"
+                  f"1. Review pending training topics and schedule sessions.\n"
+                  f"2. Check recent workflow run logs for the agent.\n"
+                  f"3. Close this issue once the completion rate is above threshold.\n\n"
+                  f"---\n"
+                  f"*🤖 Automated alert by Agent Skills Training · "
+                  f"[Workflow run]({workflow_url})*"
+              )
+
+              title = f"{severity_emoji} Training Alert: {agent} \u2014 {current_date}"
+              labels = ["training-progress", priority_label]
+              label_args = [arg for lbl in labels for arg in ["--label", lbl]]
+
+              result = subprocess.run(
+                  ["gh", "issue", "create", "--title", title, "--body", body]
+                  + label_args,
+                  capture_output=True, text=True,
+              )
+              if result.returncode == 0:
+                  print(f"✅ Created {severity} alert for {agent}: {result.stdout.strip()}")
+              else:
+                  print(f"⚠️ Could not create alert for {agent}: {result.stderr.strip()}")
+          PYEOF
+
+      # ── Post full progress report as Discussion (Issue fallback) ──────────
+      - name: Post training progress report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_DATE: ${{ steps.data.outputs.current_date }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 .github/scripts/agent_training_module.py \
+            --input /tmp/training-issues-updated.json \
+            > /tmp/training-report.md
+
+          REPORT=$(cat /tmp/training-report.md)
+          OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
+          REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          TITLE="🎓 Agent Skills Training Progress — $CURRENT_DATE"
+
+          REPO_ID=$(gh api "repos/${{ github.repository }}" \
+            --jq '.node_id' 2>/dev/null || echo "")
+          DISCUSSION_CREATED=false
+
+          if [ -n "$REPO_ID" ]; then
+            CATEGORY_ID=$(gh api graphql \
+              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:20){nodes{id name}}}}' \
+              -f o="$OWNER" -f r="$REPO" \
+              --jq '.data.repository.discussionCategories.nodes[] | select(.name=="General") | .id' \
+              2>/dev/null || echo "")
+
+            if [ -z "$CATEGORY_ID" ]; then
+              CATEGORY_ID=$(gh api graphql \
+                -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+                -f o="$OWNER" -f r="$REPO" \
+                --jq '.data.repository.discussionCategories.nodes[0].id' \
+                2>/dev/null || echo "")
+            fi
+
+            if [ -n "$CATEGORY_ID" ]; then
+              DISCUSSION_URL=$(gh api graphql \
+                -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
+                -f ri="$REPO_ID" -f ci="$CATEGORY_ID" \
+                -f t="$TITLE" -f b="$REPORT" \
+                --jq '.data.createDiscussion.discussion.url' \
+                2>/dev/null || echo "")
+
+              if [ -n "$DISCUSSION_URL" ]; then
+                echo "✅ Training report posted as Discussion: $DISCUSSION_URL"
+                DISCUSSION_CREATED=true
+              fi
+            fi
+          fi
+
+          if [ "$DISCUSSION_CREATED" = "false" ]; then
+            gh issue create \
+              --title "$TITLE" \
+              --body "$REPORT" \
+              2>/dev/null || \
+            gh issue create \
+              --title "$TITLE" \
+              --body "$REPORT"
+            echo "✅ Training report posted as Issue (Discussion fallback)"
+          fi

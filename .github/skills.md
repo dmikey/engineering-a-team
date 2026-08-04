@@ -249,6 +249,29 @@ GraphQL `createDiscussion`, `POST /repos/{owner}/{repo}/issues`
 
 ---
 
+## agent-training
+
+**Description**: Run structured training sessions for each agent based on a
+predefined curriculum. For each agent, identifies the next pending topic
+(ordered by difficulty), invokes the GitHub Models API to generate a scenario,
+model answer, and improvement tips, then records the completed session as a
+labelled GitHub Issue. Posts a full per-agent progress report weekly as a
+Discussion or Issue. Creates priority-labelled alert issues for agents whose
+completion rate falls below configured thresholds.
+
+**Inputs**: GitHub Issues with label `training-progress` (fetched via
+`gh issue list`), `TRAINING_MODEL` / `AGENT_MAX_TOKENS` / `AGENT_TEMPERATURE`
+repository variables  
+**Outputs**: Per-session GitHub Issues tagged `training-progress` +
+`training-complete` (or `training-needs-review`); weekly progress report as a
+Discussion or Issue  
+**GitHub APIs**: `GET /repos/{owner}/{repo}/issues`,
+`POST /repos/{owner}/{repo}/issues`,
+GraphQL `createDiscussion`, GitHub Models chat completions  
+**Used by**: Agent Skills Training workflow
+
+---
+
 ## agent-health-monitoring
 
 **Description**: Collect recent workflow run history for every registered
