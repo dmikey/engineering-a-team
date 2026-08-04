@@ -41,6 +41,19 @@ class AgentSkillSetConfigurationTests(unittest.TestCase):
             ):
                 self.assertIn(variable, content, f"{variable} missing from {doc}")
 
+    def test_heartbeat_workflow_stays_non_interactive(self):
+        workflow = REPO_ROOT / ".github" / "workflows" / "heartbeat.yml"
+        content = workflow.read_text(encoding="utf-8")
+
+        # CI fallback workflow must be manual-only and never enter TUI/chat code paths.
+        self.assertIn("workflow_dispatch", content)
+        self.assertNotIn("schedule:", content)
+        self.assertNotIn("push:", content)
+        self.assertIn("python3 scripts/heartbeat_runner.py --once", content)
+        self.assertNotIn("--tui", content)
+        self.assertNotIn("run_tui", content)
+        self.assertNotIn("_send_chat", content)
+
 
 if __name__ == "__main__":
     unittest.main()

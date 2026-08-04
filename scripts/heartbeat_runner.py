@@ -124,9 +124,31 @@ def gh_json(args: list[str], *, default: Any = None, check: bool = True) -> Any:
         return default
 
 
+def repo_root_from_cwd() -> Path:
+    cwd = Path.cwd().resolve()
+    for candidate in [cwd, *cwd.parents]:
+        if (candidate / ".git").exists() or (candidate / ".git").is_dir():
+            return candidate
+    return cwd
+
+
+def script_repo_root() -> Path:
+    script_path = Path(__file__).resolve()
+    for candidate in [script_path.parent, *script_path.parents]:
+        if (candidate / ".git").exists() or (candidate / ".git").is_dir():
+            return candidate
+    return repo_root_from_cwd()
+
+
 def git_dir() -> Path:
-    result = run_command(["git", "rev-parse", "--git-dir"])
-    return Path(result.stdout.strip()).resolve()
+    repo_root = script_repo_root()
+    git_dir_path = repo_root / ".git"
+    if git_dir_path.exists() and git_dir_path.is_dir():
+        return git_dir_path.resolve()
+    result = run_command(["git", "rev-parse", "--git-dir"], check=False)
+    if result.returncode == 0 and result.stdout.strip():
+        return Path(result.stdout.strip()).resolve()
+    return (repo_root / ".git").resolve()
 
 
 def resolve_repo(explicit_repo: str | None) -> dict[str, str]:
@@ -182,14 +204,18 @@ def resolve_gh_command_env() -> tuple[dict[str, str] | None, str]:
     return None, "gh-auth"
 
 
+def repo_root() -> Path:
+    return script_repo_root()
+
+
 def state_paths() -> tuple[Path, Path]:
-    base = git_dir() / "heartbeat-runner"
+    base = repo_root() / ".git" / "heartbeat-runner"
     base.mkdir(parents=True, exist_ok=True)
     return base / "state.json", base / "overview.md"
 
 
 def default_ledger_path() -> Path:
-    base = git_dir() / "heartbeat-runner"
+    base = repo_root() / ".git" / "heartbeat-runner"
     base.mkdir(parents=True, exist_ok=True)
     return base / "decision-ledger.jsonl"
 
@@ -2050,8 +2076,12 @@ def run_tui(
                 messages.append({"role": m["role"], "content": m["content"]})
         messages.append({"role": "user", "content": message})
 
+        model_name = agent["model"]
+        if "/" not in model_name:
+            model_name = f"openai/{model_name}"
+
         payload = json.dumps({
-            "model": agent["model"],
+            "model": model_name,
             "temperature": 0.7,
             "max_tokens": 1000,
             "messages": messages,
@@ -2059,10 +2089,11 @@ def run_tui(
 
         # curl avoids gh api request mangling; token explicitly set so GITHUB_TOKEN is bypassed
         result = subprocess.run(
-            ["curl", "-s", "-X", "POST", MODELS_URL,
+            ["curl", "--silent", "--show-error", "-X", "POST", MODELS_URL,
              "-H", f"Authorization: Bearer {models_token}",
              "-H", "Content-Type: application/json",
              "-H", "Accept: application/json",
+             "-w", "\n__GH_HTTP_STATUS:%{http_code}",
              "-d", "@-"],
             input=payload,
             capture_output=True,
@@ -2080,17 +2111,41 @@ def run_tui(
                     "⚠ 401 Unauthorized — token lacks models:read scope.\n"
                     "Type: /token <your-PAT> to set a new one inline."
                 )
-            return f"⚠ gh api error: {err}"
+            return f"⚠ Model request failed: {err}"
+
+        output_lines = result.stdout.splitlines()
+        http_status = ""
+        raw_body_lines: list[str] = []
+        for line in output_lines:
+            if line.startswith("__GH_HTTP_STATUS:"):
+                http_status = line.split(":", 1)[1].strip()
+            else:
+                raw_body_lines.append(line)
+        raw_body = "\n".join(raw_body_lines).strip()
+
+        if not raw_body:
+            suffix = f" (HTTP {http_status})" if http_status else ""
+            return f"⚠ Empty response from model endpoint{suffix}."
+
+        if http_status and http_status.isdigit() and int(http_status) >= 400:
+            try:
+                error_payload = json.loads(raw_body)
+                error_msg = (error_payload.get("error") or {}).get("message") or "request failed"
+            except json.JSONDecodeError:
+                snippet = raw_body[:180]
+                error_msg = f"non-JSON error body: {snippet}"
+            return f"⚠ Model HTTP {http_status}: {error_msg}"
 
         try:
-            data = json.loads(result.stdout)
+            data = json.loads(raw_body)
             choices = data.get("choices") or []
             if choices:
                 return choices[0]["message"]["content"]
             error = data.get("error", {})
             return f"⚠ Model error: {error.get('message', 'no choices returned')}"
         except (json.JSONDecodeError, KeyError) as exc:
-            return f"⚠ Parse error: {exc}"
+            snippet = raw_body[:180]
+            return f"⚠ Parse error: {exc}. Raw response: {snippet}"
 
 
     def _main(stdscr: Any) -> int:
