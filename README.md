@@ -146,6 +146,9 @@ scripts/agent-cli.sh --help
 
 ### 8. Run local autonomous heartbeat process
 
+Local heartbeat supervision is the primary runtime. The cloud heartbeat workflow
+is manual fallback only.
+
 If you want this repo to run autonomously from your machine, start the local
 heartbeat daemon. It runs as a Scrum Master supervisor on behalf of the user,
 dispatches agent workflows, and keeps a heartbeat status file.
@@ -159,6 +162,18 @@ scripts/autonomous-heartbeat.sh --interval 600
 That one command runs continuously and heartbeats every 10 minutes. The local
 supervisor makes orchestration, prioritization, merge, and throttle decisions;
 GitHub Actions executes the selected agent workflow using GitHub Models.
+
+By default, if no dispatch-capable token is present (`GH_USER_PAT` or
+`HEARTBEAT_GH_TOKEN` with `actions:write`), the local runner automatically
+switches to dry-run mode so the loop continues without failing on workflow
+dispatch permissions.
+
+Enable live workflow dispatch from local mode:
+
+```bash
+export GH_USER_PAT=YOUR_PAT_WITH_ACTIONS_WRITE
+scripts/autonomous-heartbeat.sh --interval 600
+```
 
 For 24/7 operation on macOS, install the user LaunchAgent instead. It starts at
 login and `launchd` restarts it if the process exits:

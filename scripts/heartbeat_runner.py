@@ -12,11 +12,12 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-MODELS_URL = "https://models.inference.ai.azure.com/chat/completions"
+MODELS_URL = "https://api.githubcopilot.com/chat/completions"
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_MODEL_EVERY = 3
 FAILURE_CONCLUSIONS = {
@@ -39,6 +40,7 @@ WORKFLOW_COOLDOWNS = {
     "task-assignment.yml": timedelta(hours=6),
     "project-manager.yml": timedelta(hours=12),
     "product-owner.yml": timedelta(hours=12),
+    "council-discussion.yml": timedelta(hours=24),
 }
 AUTH_FAILURE_COOLDOWN = timedelta(hours=6)
 PR_READY_COOLDOWN = timedelta(hours=6)
@@ -186,6 +188,12 @@ def state_paths() -> tuple[Path, Path]:
     return base / "state.json", base / "overview.md"
 
 
+def default_ledger_path() -> Path:
+    base = git_dir() / "heartbeat-runner"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / "decision-ledger.jsonl"
+
+
 def load_state(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"events": {}, "heartbeats": 0}
@@ -197,6 +205,87 @@ def load_state(path: Path) -> dict[str, Any]:
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
     path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def build_reason_lookup(plan: dict[str, Any]) -> dict[str, str]:
+    reasons: dict[str, str] = {}
+    for repo_action in plan.get("repo_actions", []):
+        action = repo_action.get("action") or ""
+        if action:
+            reasons[f"repo:{action}"] = repo_action.get("reason") or ""
+
+    for pr_action in plan.get("pull_requests", []):
+        number = pr_action.get("number")
+        action = pr_action.get("action") or ""
+        if number is None or not action:
+            continue
+        reasons[f"pr:{number}:{action}"] = pr_action.get("reason") or ""
+    return reasons
+
+
+def _result_pr_number(result: dict[str, Any]) -> int | None:
+    target = str(result.get("target") or "")
+    if not target.startswith("pr#"):
+        return None
+    raw = target[3:]
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def decision_ledger_events(
+    snapshot: dict[str, Any],
+    plan: dict[str, Any],
+    results: list[dict[str, Any]],
+    meta: dict[str, str],
+    dry_run: bool,
+) -> list[dict[str, Any]]:
+    reasons = build_reason_lookup(plan)
+    events: list[dict[str, Any]] = []
+    trace_id = str(uuid.uuid4())
+    repo_name = snapshot.get("repo", {}).get("nameWithOwner", "")
+
+    for idx, result in enumerate(results, start=1):
+        action = str(result.get("action") or "")
+        pr_number = _result_pr_number(result)
+        if pr_number is not None:
+            reason = reasons.get(f"pr:{pr_number}:{action}") or result.get("detail") or ""
+            target_type = "pr"
+            target = f"pr#{pr_number}"
+        else:
+            reason = reasons.get(f"repo:{action}") or result.get("detail") or ""
+            target_type = "repo"
+            target = str(result.get("target") or "")
+
+        events.append(
+            {
+                "event_id": f"{trace_id}:{idx}",
+                "trace_id": trace_id,
+                "timestamp": isoformat(),
+                "repo": repo_name,
+                "decision_source": meta.get("decision_source", "unknown"),
+                "models_status": meta.get("models_status", "unknown"),
+                "target_type": target_type,
+                "target": target,
+                "action": action,
+                "status": str(result.get("status") or "unknown"),
+                "reason": str(reason),
+                "detail": str(result.get("detail") or ""),
+                "dry_run": dry_run,
+            }
+        )
+
+    return events
+
+
+def append_decision_ledger(path: Path, events: list[dict[str, Any]]) -> None:
+    if not events:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        for event in events:
+            handle.write(json.dumps(event, sort_keys=True) + "\n")
 
 
 def read_collaboration_rules(repo_root: Path) -> str:
@@ -629,11 +718,13 @@ def run_stuck_pr_escalations(snapshot: dict[str, Any], state: dict[str, Any], re
             topic = f"Resolve persistently conflicting pull requests: {numbers}"
             context = "Heartbeat escalation: repeated automatic branch sync attempts were unable to clear merge conflicts."
             try:
+                default_branch = snapshot.get("repo", {}).get("defaultBranch", "main")
                 output = dispatch_workflow(
                     repo,
                     "council-discussion.yml",
-                    {"topic": topic, "extra_context": context},
+                    {"topic": topic, "context": context},
                     dry_run,
+                    ref=default_branch,
                 )
                 if not dry_run:
                     record_event(state, council_event_key, {"prs": [item["number"] for item in stuck_council_prs]})
@@ -665,6 +756,19 @@ def heuristic_repo_actions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
         workflow_name = run.get("workflowName") or ""
         if created and workflow_name and workflow_name not in recent_runs_by_workflow:
             recent_runs_by_workflow[workflow_name] = created
+
+    # Periodic council meeting — keep agents aligned even when nothing is "stuck"
+    if not state_event_recent(state, "dispatch:council-periodic", timedelta(hours=24)) \
+            and not state_event_recent(state, "dispatch-blocked:council-discussion.yml", AUTH_FAILURE_COOLDOWN):
+        actions.append({
+            "action": "dispatch_council",
+            "reason": "Scheduled periodic council review to align agents on roadmap and open work.",
+            "workflow": "council-discussion.yml",
+            "inputs": {
+                "topic": "Periodic agent team sync: review open PRs, backlog priorities, and roadmap alignment.",
+                "context": "Heartbeat-triggered daily council sync.",
+            },
+        })
 
     if unassigned:
         blocked_for = event_cooldown_remaining(state, "dispatch-blocked:task-assignment.yml", AUTH_FAILURE_COOLDOWN)
@@ -721,7 +825,6 @@ def heuristic_repo_actions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
                     "workflow": "project-manager.yml",
                     "inputs": {
                         "task": "full-sprint-report",
-                        "extra_context": f"Heartbeat escalation: {len(blocked_or_priority)} blocked/priority issues are open.",
                     },
                 }
             )
@@ -751,7 +854,7 @@ def heuristic_repo_actions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
                     "workflow": "product-owner.yml",
                     "inputs": {
                         "task": "product-health-report",
-                        "extra_context": f"Heartbeat feature backlog review for {len(feature_issues)} open feature issues.",
+                        "feature_prompt": f"Review and prioritize {len(feature_issues)} open feature issues from the backlog.",
                     },
                 }
             )
@@ -868,7 +971,7 @@ def model_prompt(snapshot: dict[str, Any], heuristic: dict[str, Any], rules: str
             "You are Casey, the local heartbeat orchestrator for an autonomous GitHub engineering team.",
             "You must choose only safe actions and return JSON only.",
             "Allowed PR actions: merge, mark_ready, sync_branch, send_back_to_copilot, run_qa, wait.",
-            "Allowed repo actions: dispatch_task_assignment, dispatch_project_manager, dispatch_product_owner, wait.",
+            "Allowed repo actions: dispatch_task_assignment, dispatch_project_manager, dispatch_product_owner, dispatch_council, wait.",
             "Prefer merge only for non-draft PRs that are MERGEABLE, have no failing checks, and no blocking review.",
             "For draft PRs that are mergeable with no failing checks, prefer mark_ready.",
             "For merge conflicts, prefer sync_branch first and then send_back_to_copilot if conflicts remain.",
@@ -953,7 +1056,7 @@ def sanitize_model_plan(raw_text: str, heuristic: dict[str, Any]) -> dict[str, A
         return heuristic
 
     valid_pr_actions = {"merge", "mark_ready", "sync_branch", "send_back_to_copilot", "run_qa", "wait"}
-    valid_repo_actions = {"dispatch_task_assignment", "dispatch_project_manager", "dispatch_product_owner", "wait"}
+    valid_repo_actions = {"dispatch_task_assignment", "dispatch_project_manager", "dispatch_product_owner", "dispatch_council", "wait"}
 
     by_number = {entry["number"]: entry for entry in heuristic["pull_requests"]}
     final_prs: list[dict[str, Any]] = []
@@ -1030,8 +1133,8 @@ def build_plan(
     return sanitize_model_plan(response, heuristic), meta
 
 
-def dispatch_workflow(repo: str, workflow: str, inputs: dict[str, str], dry_run: bool) -> str:
-    command = ["gh", "workflow", "run", workflow, "--repo", repo]
+def dispatch_workflow(repo: str, workflow: str, inputs: dict[str, str], dry_run: bool, ref: str = "main") -> str:
+    command = ["gh", "workflow", "run", workflow, "--repo", repo, "--ref", ref]
     for key, value in inputs.items():
         command.extend(["-f", f"{key}={value}"])
     if dry_run:
@@ -1094,7 +1197,7 @@ def send_back_to_copilot(repo: str, pr: dict[str, Any], reason: str, dry_run: bo
     return result.stdout.strip() or f"Commented on PR #{pr['number']}"
 
 
-def run_qa(repo: str, pr_number: int, dry_run: bool) -> str:
+def run_qa(repo: str, pr_number: int, dry_run: bool, ref: str = "main") -> str:
     return dispatch_workflow(
         repo,
         "qa-engineer.yml",
@@ -1103,30 +1206,38 @@ def run_qa(repo: str, pr_number: int, dry_run: bool) -> str:
             "extra_context": "Heartbeat-triggered QA review for a pending PR decision.",
         },
         dry_run,
+        ref=ref,
     )
 
 
 def execute_plan(snapshot: dict[str, Any], plan: dict[str, Any], state: dict[str, Any], repo: str, dry_run: bool, max_actions: int) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     actions_taken = 0
+    default_branch = snapshot.get("repo", {}).get("defaultBranch", "main")
     pr_by_number = {pr["number"]: pr for pr in snapshot["prs"]}
 
     for repo_action in plan["repo_actions"]:
         if actions_taken >= max_actions:
             break
         workflow = repo_action.get("workflow")
+        action_key = repo_action.get("action", "")
         if not workflow:
             continue
         try:
-            output = dispatch_workflow(repo, workflow, repo_action.get("inputs", {}), dry_run)
+            output = dispatch_workflow(repo, workflow, repo_action.get("inputs", {}), dry_run, ref=default_branch)
             if not dry_run:
-                record_event(state, f"dispatch:{workflow}", {"reason": repo_action.get("reason", "")})
-            results.append({"target": workflow, "action": repo_action["action"], "status": "ok", "detail": output})
+                # Use action-specific event key for council so periodic and stuck-PR cooldowns are independent
+                event_key = "dispatch:council-periodic" if action_key == "dispatch_council" else f"dispatch:{workflow}"
+                record_event(state, event_key, {"reason": repo_action.get("reason", "")})
+            results.append({"target": workflow, "action": action_key, "status": "ok", "detail": output})
             actions_taken += 1
         except RuntimeError as exc:
             if "Resource not accessible by integration" in str(exc) and not dry_run:
                 record_event(state, f"dispatch-blocked:{workflow}", {"reason": str(exc)})
-            results.append({"target": workflow, "action": repo_action["action"], "status": "error", "detail": str(exc)})
+            short = str(exc).split("\n")[0][:80]
+            if "403" in short or "Resource not accessible" in short:
+                short = f"needs actions:write token (GH_USER_PAT) to dispatch {workflow}"
+            results.append({"target": workflow, "action": action_key, "status": "error", "detail": short})
 
     for decision in plan["pull_requests"]:
         if actions_taken >= max_actions:
@@ -1200,7 +1311,7 @@ def execute_plan(snapshot: dict[str, Any], plan: dict[str, Any], state: dict[str
                 results.append({"target": f"pr#{pr['number']}", "action": action, "status": "skipped", "detail": "QA dispatch is still within cooldown."})
                 continue
             try:
-                output = run_qa(repo, pr["number"], dry_run)
+                output = run_qa(repo, pr["number"], dry_run, ref=default_branch)
                 if not dry_run:
                     record_event(state, event_key, {"reason": reason})
                 results.append({"target": f"pr#{pr['number']}", "action": action, "status": "ok", "detail": output})
@@ -1350,6 +1461,7 @@ def run_heartbeat_cycle(
     state: dict[str, Any],
     state_file: Path,
     overview_file: Path,
+    ledger_file: Path,
 ) -> tuple[int, dict[str, Any]]:
     snapshot = {
         "repo": repo_info,
@@ -1367,6 +1479,7 @@ def run_heartbeat_cycle(
     meta["gh_auth_source"] = GH_AUTH_SOURCE
     results = execute_plan(snapshot, plan, state, repo_info["nameWithOwner"], args.dry_run, args.max_actions)
     results.extend(run_stuck_pr_escalations(snapshot, state, repo_info["nameWithOwner"], args.dry_run))
+    append_decision_ledger(ledger_file, decision_ledger_events(snapshot, plan, results, meta, args.dry_run))
     state["heartbeats"] = int(state.get("heartbeats", 0)) + 1
     state["last_heartbeat_at"] = isoformat()
     save_state(state_file, state)
@@ -1384,6 +1497,111 @@ def run_heartbeat_cycle(
     }
 
 
+CHAT_AGENTS: dict[str, dict[str, str]] = {
+    "Casey (Council)": {
+        "model": "gpt-4o-mini",
+        "persona": (
+            "You are Casey, the Council Moderator for an autonomous AI engineering team. "
+            "You facilitate multi-agent discussions, synthesise QA, PM, and PO perspectives, "
+            "and produce clear, actionable consensus decisions. You are impartial, evidence-driven, "
+            "and always tie conclusions back to user value and engineering quality. "
+            "You are being addressed interactively from the team's supervisor TUI."
+        ),
+    },
+    "Quinn (QA)": {
+        "model": "gpt-4o-mini",
+        "persona": (
+            "You are Quinn, the QA Engineer. You have deep expertise in automated testing, "
+            "security review, and code quality. You are methodical, thorough, and risk-aware. "
+            "You give actionable, constructive feedback and always provide specific severity ratings. "
+            "You are being addressed interactively from the team's supervisor TUI."
+        ),
+    },
+    "Morgan (PM)": {
+        "model": "gpt-4o-mini",
+        "persona": (
+            "You are Morgan, the Project Manager. You keep the team focused, on schedule, and "
+            "aligned with business goals. You think in timelines, dependencies, and risk. "
+            "You are data-driven and communicate clearly, grounding decisions in milestone dates "
+            "and team capacity. You are being addressed interactively from the team's supervisor TUI."
+        ),
+    },
+    "Alex (PO)": {
+        "model": "gpt-4o-mini",
+        "persona": (
+            "You are Alex, the Product Owner. You champion the end-user, review the current product "
+            "state, and identify gaps and opportunities. You think in user stories, acceptance criteria, "
+            "and business value. You are creative, empathetic, and always tie features back to customer "
+            "outcomes. You are being addressed interactively from the team's supervisor TUI."
+        ),
+    },
+}
+CHAT_AGENT_NAMES = list(CHAT_AGENTS.keys())
+
+
+def _color(stdscr: Any, pair: int, text: str, bold: bool = False) -> tuple[int, str]:
+    attr = curses.color_pair(pair)
+    if bold:
+        attr |= curses.A_BOLD
+    return attr, text
+
+
+def _init_colors() -> None:
+    curses.start_color()
+    curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_GREEN, -1)    # ok / merged
+    curses.init_pair(2, curses.COLOR_RED, -1)      # error / conflict
+    curses.init_pair(3, curses.COLOR_YELLOW, -1)   # warn / pending
+    curses.init_pair(4, curses.COLOR_CYAN, -1)     # info / header
+    curses.init_pair(5, curses.COLOR_MAGENTA, -1)  # action / dispatch
+    curses.init_pair(6, curses.COLOR_WHITE, -1)    # normal
+    curses.init_pair(7, curses.COLOR_BLUE, -1)     # draft / wait
+
+
+def _safe_addstr(win: Any, y: int, x: int, text: str, attr: int = 0) -> None:
+    h, w = win.getmaxyx()
+    if y < 0 or y >= h or x >= w:
+        return
+    text = text[: max(w - x - 1, 0)]
+    if not text:
+        return
+    try:
+        win.addstr(y, x, text, attr)
+    except curses.error:
+        pass
+
+
+def _pr_action_color(action: str) -> int:
+    if action in ("merge",):
+        return curses.color_pair(1) | curses.A_BOLD
+    if action in ("send_back_to_copilot", "sync_branch"):
+        return curses.color_pair(2)
+    if action in ("mark_ready",):
+        return curses.color_pair(5)
+    if action in ("run_qa",):
+        return curses.color_pair(3)
+    return curses.color_pair(6)
+
+
+def _result_color(status: str) -> int:
+    if status == "ok":
+        return curses.color_pair(1)
+    if status == "error":
+        return curses.color_pair(2) | curses.A_BOLD
+    if status == "skipped":
+        return curses.color_pair(7)
+    return curses.color_pair(6)
+
+
+def _draw_box(win: Any, title: str) -> None:
+    try:
+        win.box()
+    except curses.error:
+        pass
+    if title:
+        _safe_addstr(win, 0, 2, f" {title} ", curses.color_pair(4) | curses.A_BOLD)
+
+
 def render_tui_lines(
     heartbeat_data: dict[str, Any] | None,
     interval: int,
@@ -1392,18 +1610,13 @@ def render_tui_lines(
     next_run_in: int,
     status_message: str,
 ) -> list[str]:
+    """Legacy plain-text render kept for non-interactive fallback."""
     mode = "dry-run" if dry_run else "active"
-    header = f"Heartbeat Runner TUI | mode={mode} | interval={max(interval, 5)}s"
-    lines = [header]
-    lines.append("Controls: q quit | r run now | p pause/resume")
-    if paused:
-        lines.append("State: paused")
-    else:
-        lines.append(f"Next run in: {max(next_run_in, 0)}s")
-
+    header = f"Heartbeat Runner | mode={mode} | interval={max(interval, 5)}s"
+    lines = [header, "Controls: q quit | r run now | p pause/resume | c council | m pm | d draft→ready+merge | a assign | s status"]
+    lines.append("State: PAUSED" if paused else f"Next run in: {max(next_run_in, 0)}s")
     if status_message:
         lines.append(f"Status: {status_message}")
-
     if heartbeat_data is None:
         lines.extend(["", "Waiting for first heartbeat cycle..."])
         return lines
@@ -1415,68 +1628,299 @@ def render_tui_lines(
     prs = snapshot["prs"]
     issues = snapshot["issues"]
     runs = snapshot["runs"]
-
-    active_runs = [run for run in runs if (run.get("status") or "").lower() in ACTIVE_RUN_STATUSES]
-    failing_runs = [run for run in runs if (run.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS]
-    non_draft = [pr for pr in prs if not pr.get("isDraft")]
-    mergeable = [pr for pr in non_draft if pr.get("mergeable") == "MERGEABLE"]
-    conflicting = [pr for pr in non_draft if pr.get("mergeable") == "CONFLICTING" or pr.get("mergeStateStatus") == "DIRTY"]
-    unassigned = [issue for issue in issues if not issue.get("assignees")]
-    ok_count = sum(1 for result in results if result.get("status") == "ok")
-    skipped_count = sum(1 for result in results if result.get("status") == "skipped")
-    error_count = sum(1 for result in results if result.get("status") == "error")
-    if results:
-        lines.append(
-            f"Last heartbeat actions: total={len(results)} ok={ok_count} skipped={skipped_count} errors={error_count}"
-        )
-    else:
-        lines.append("Last heartbeat actions: none")
-
-    lines.extend(
-        [
-            "",
-            "Summary",
-            f"- Repo: {snapshot['repo']['nameWithOwner']} | branch: {snapshot['repo']['defaultBranch']}",
-            f"- Decision source: {meta['decision_source']}",
-            f"- Models: {meta['models_status']} | cadence={meta.get('model_cadence', 'n/a')} | GH auth: {meta['gh_auth_source']}",
-            f"- PRs: total={len(prs)} non-draft={len(non_draft)} mergeable={len(mergeable)} conflicting={len(conflicting)}",
-            f"- Issues: total={len(issues)} unassigned={len(unassigned)}",
-            f"- Workflow pressure: active={len(active_runs)} failing/action-required={len(failing_runs)}",
-            "",
-            "PR Decision Queue",
-        ]
-    )
-
-    if plan["pull_requests"]:
-        for decision in plan["pull_requests"][:12]:
-            pr = next((candidate for candidate in prs if candidate.get("number") == decision["number"]), None)
-            if not pr:
-                continue
-            checks = checks_summary(pr)
-            lines.append(
-                f"- #{pr['number']} action={decision['action']} mergeable={pr.get('mergeable', 'UNKNOWN')} review={pr.get('reviewDecision', '') or 'none'} checks(p={checks['pending']},f={checks['failing']})"
-            )
-    else:
-        lines.append("- None")
-
-    lines.extend(["", "Actions This Heartbeat"])
-    if results:
-        for result in results[:12]:
-            lines.append(f"- {result['target']} | {result['action']} | {result['status']}")
-    else:
-        lines.append("- No actions executed")
-
+    active_runs = [r for r in runs if (r.get("status") or "").lower() in ACTIVE_RUN_STATUSES]
+    failing_runs = [r for r in runs if (r.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS]
+    non_draft = [p for p in prs if not p.get("isDraft")]
+    mergeable = [p for p in non_draft if p.get("mergeable") == "MERGEABLE"]
+    conflicting = [p for p in non_draft if p.get("mergeable") == "CONFLICTING" or p.get("mergeStateStatus") == "DIRTY"]
+    unassigned = [i for i in issues if not i.get("assignees")]
+    ok_c = sum(1 for r in results if r.get("status") == "ok")
+    err_c = sum(1 for r in results if r.get("status") == "error")
+    lines.extend([
+        "",
+        f"Repo: {snapshot['repo']['nameWithOwner']} | Models: {meta.get('models_status','?')} | Auth: {meta.get('gh_auth_source','?')}",
+        f"PRs: total={len(prs)} draft={len(prs)-len(non_draft)} mergeable={len(mergeable)} conflicting={len(conflicting)}",
+        f"Issues: total={len(issues)} unassigned={len(unassigned)}",
+        f"Runs: active={len(active_runs)} failing={len(failing_runs)}",
+        f"Last cycle: ok={ok_c} errors={err_c}",
+        "",
+        "PR Queue:",
+    ])
+    for dec in (plan.get("pull_requests") or [])[:15]:
+        pr = next((p for p in prs if p.get("number") == dec["number"]), None)
+        if not pr:
+            continue
+        ch = checks_summary(pr)
+        tag = "[DRAFT] " if pr.get("isDraft") else ""
+        lines.append(f"  #{pr['number']} {tag}{dec['action']:18} mergeable={pr.get('mergeable','?'):12} checks(p={ch['pending']},f={ch['failing']}) {pr.get('title','')[:40]}")
+    lines.extend(["", "Dispatches:"])
+    for a in (plan.get("repo_actions") or [])[:8]:
+        lines.append(f"  {a['action']:30} {a.get('reason','')[:60]}")
+    lines.extend(["", "Last actions:"])
+    for r in (results or [])[:15]:
+        lines.append(f"  {r['target']:25} {r['action']:25} [{r['status']}]")
     return lines
 
 
-def draw_tui(stdscr: curses.window, lines: list[str]) -> None:
+def draw_tui(stdscr: Any, lines: list[str]) -> None:
+    """Legacy single-pane draw kept for terminals that fail color init."""
     stdscr.erase()
-    height, width = stdscr.getmaxyx()
-    max_lines = max(height - 1, 1)
-    for idx, line in enumerate(lines[:max_lines]):
-        truncated = line[: max(width - 1, 1)]
-        stdscr.addstr(idx, 0, truncated)
+    h, w = stdscr.getmaxyx()
+    for idx, line in enumerate(lines[: max(h - 1, 1)]):
+        _safe_addstr(stdscr, idx, 0, line[: max(w - 1, 1)])
     stdscr.refresh()
+
+
+def _draw_full_tui(
+    stdscr: Any,
+    heartbeat_data: dict[str, Any] | None,
+    interval: int,
+    dry_run: bool,
+    paused: bool,
+    next_run_in: int,
+    status_msg: str,
+    log_scroll: int,
+    action_log: list[str],
+    heartbeat_count: int,
+) -> None:
+    stdscr.erase()
+    H, W = stdscr.getmaxyx()
+    if H < 20 or W < 60:
+        # Too small — fall back to single-pane
+        lines = render_tui_lines(heartbeat_data, interval, dry_run, paused, next_run_in, status_msg)
+        draw_tui(stdscr, lines)
+        return
+
+    # ── Layout ───────────────────────────────────────────────────────────────
+    # Row 0     : header bar (full width)
+    # Row 1     : controls bar
+    # Row 2..H-log_h-2 : left panel (PRs) | right panel (dispatches)
+    # Row H-log_h-1..H-2 : action log panel
+    # Row H-1   : status bar
+
+    log_h = min(12, H // 3)
+    body_top = 2
+    body_bot = H - log_h - 1
+    body_h = max(body_bot - body_top, 2)
+    mid = W // 2
+
+    mode = "DRY-RUN" if dry_run else "ACTIVE"
+    state_str = "⏸ PAUSED" if paused else f"next in {max(next_run_in,0)}s"
+
+    # Header
+    header = f" ◆ Engineering Team Heartbeat  mode={mode}  {state_str}  beat #{heartbeat_count} "
+    _safe_addstr(stdscr, 0, 0, header.ljust(W - 1), curses.color_pair(4) | curses.A_BOLD | curses.A_REVERSE)
+
+    # Controls
+    controls = " q=quit  r=run  p=pause  /=chat  c=council  m=pm  d=draft→ready  a=assign  ↑↓=scroll "
+    _safe_addstr(stdscr, 1, 0, controls[:W - 1], curses.color_pair(7))
+
+    # ── Left panel: PR queue ─────────────────────────────────────────────────
+    pr_win = curses.newwin(body_h, mid - 1, body_top, 0)
+    _draw_box(pr_win, "PR Decision Queue")
+    row = 1
+    if heartbeat_data is None:
+        _safe_addstr(pr_win, row, 1, "Waiting for first cycle...", curses.color_pair(3))
+    else:
+        plan = heartbeat_data["plan"]
+        snapshot = heartbeat_data["snapshot"]
+        prs = snapshot["prs"]
+        pr_by_num = {p["number"]: p for p in prs}
+        non_draft = [p for p in prs if not p.get("isDraft")]
+        mergeable_list = [p for p in non_draft if p.get("mergeable") == "MERGEABLE"]
+        conflicting_list = [p for p in non_draft if p.get("mergeable") == "CONFLICTING" or p.get("mergeStateStatus") == "DIRTY"]
+        drafts = [p for p in prs if p.get("isDraft")]
+
+        summary = f" {len(prs)} open | {len(drafts)} draft | {len(mergeable_list)} mergeable | {len(conflicting_list)} conflict"
+        _safe_addstr(pr_win, row, 1, summary[:mid - 3], curses.color_pair(6))
+        row += 1
+
+        for dec in (plan.get("pull_requests") or []):
+            if row >= body_h - 1:
+                break
+            pr = pr_by_num.get(dec["number"])
+            if not pr:
+                continue
+            action = dec["action"]
+            ch = checks_summary(pr)
+            is_draft = pr.get("isDraft", False)
+            draft_tag = "✎" if is_draft else " "
+            m = pr.get("mergeable", "?")[:7]
+            num_str = f"#{pr['number']:4}"
+            action_str = f"{action:17}"
+            title = pr.get("title", "")[:mid - 40]
+
+            _safe_addstr(pr_win, row, 1, num_str, curses.color_pair(4) | curses.A_BOLD)
+            _safe_addstr(pr_win, row, 6, draft_tag, curses.color_pair(7))
+            _safe_addstr(pr_win, row, 8, action_str, _pr_action_color(action))
+            _safe_addstr(pr_win, row, 26, f"m={m}", curses.color_pair(3) if m == "UNKNOWN" else (curses.color_pair(1) if m == "MERGEAB" else curses.color_pair(2)))
+            _safe_addstr(pr_win, row, 35, f"c={ch['failing']}", curses.color_pair(2) if ch["failing"] else curses.color_pair(6))
+            _safe_addstr(pr_win, row, 39, title, curses.color_pair(6))
+            row += 1
+    pr_win.refresh()
+
+    # ── Right panel: dispatches + issues + runs ───────────────────────────────
+    rp_win = curses.newwin(body_h, W - mid - 1, body_top, mid)
+    _draw_box(rp_win, "Repo Actions & Status")
+    row = 1
+    if heartbeat_data is not None:
+        plan = heartbeat_data["plan"]
+        meta = heartbeat_data["meta"]
+        snapshot = heartbeat_data["snapshot"]
+        issues = snapshot["issues"]
+        runs = snapshot["runs"]
+        active_runs = [r for r in runs if (r.get("status") or "").lower() in ACTIVE_RUN_STATUSES]
+        failing_runs = [r for r in runs if (r.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS]
+        unassigned = [i for i in issues if not i.get("assignees")]
+
+        _safe_addstr(rp_win, row, 1, f"Models: {meta.get('models_status','?')[:W-mid-6]}", curses.color_pair(1) if "ready" in meta.get("models_status","") else curses.color_pair(3))
+        row += 1
+        _safe_addstr(rp_win, row, 1, f"Auth:   {meta.get('gh_auth_source','?')[:W-mid-6]}", curses.color_pair(6))
+        row += 1
+        _safe_addstr(rp_win, row, 1, f"Issues: {len(issues)} total  {len(unassigned)} unassigned", curses.color_pair(6))
+        row += 1
+        _safe_addstr(rp_win, row, 1, f"Runs:   {len(active_runs)} active  {len(failing_runs)} failing", curses.color_pair(2) if failing_runs else curses.color_pair(6))
+        row += 1
+        _safe_addstr(rp_win, row, 1, "─" * (W - mid - 3), curses.color_pair(7))
+        row += 1
+        _safe_addstr(rp_win, row, 1, "Scheduled dispatches:", curses.color_pair(4))
+        row += 1
+        for ra in (plan.get("repo_actions") or []):
+            if row >= body_h - 1:
+                break
+            act = ra["action"]
+            col = curses.color_pair(5) if act != "wait" else curses.color_pair(7)
+            _safe_addstr(rp_win, row, 2, f"• {act:30}", col)
+            row += 1
+        if not plan.get("repo_actions"):
+            _safe_addstr(rp_win, row, 2, "  none pending", curses.color_pair(7))
+            row += 1
+        if active_runs:
+            _safe_addstr(rp_win, row, 1, "─" * (W - mid - 3), curses.color_pair(7))
+            row += 1
+            _safe_addstr(rp_win, row, 1, "Active workflows:", curses.color_pair(4))
+            row += 1
+            for r in active_runs[:4]:
+                if row >= body_h - 1:
+                    break
+                _safe_addstr(rp_win, row, 2, f"⟳ {r.get('workflowName','?')[:W-mid-5]}", curses.color_pair(3))
+                row += 1
+    rp_win.refresh()
+
+    # ── Action log panel ──────────────────────────────────────────────────────
+    log_win = curses.newwin(log_h, W, body_bot, 0)
+    _draw_box(log_win, f"Action Log  ({len(action_log)} entries, ↑↓ scroll)")
+    visible = log_win.getmaxyx()[0] - 2
+    total = len(action_log)
+    start = max(0, min(log_scroll, total - visible)) if total > visible else 0
+    for li, entry in enumerate(action_log[start: start + visible]):
+        if "| ok" in entry or "✓" in entry:
+            col = curses.color_pair(1)
+        elif "| error" in entry or "✗" in entry:
+            col = curses.color_pair(2) | curses.A_BOLD
+        elif "| skipped" in entry or "–" in entry:
+            col = curses.color_pair(7)
+        else:
+            col = curses.color_pair(6)
+        _safe_addstr(log_win, li + 1, 1, entry[: W - 2], col)
+    log_win.refresh()
+
+    # Status bar
+    _safe_addstr(stdscr, H - 1, 0, f" {status_msg}"[: W - 1].ljust(W - 1), curses.color_pair(3) | curses.A_REVERSE)
+    stdscr.refresh()
+
+
+def _draw_chat_panel(stdscr: Any, messages: list[dict[str, str]], agent_name: str, input_buf: str, thinking: bool) -> None:
+    """Draw a full-screen chat overlay over the TUI."""
+    H, W = stdscr.getmaxyx()
+    stdscr.erase()
+    title = f" ◆ Chat with {agent_name}  (Esc=close  Tab=switch agent  Enter=send) "
+    _safe_addstr(stdscr, 0, 0, title.ljust(W - 1), curses.color_pair(4) | curses.A_BOLD | curses.A_REVERSE)
+
+    # Message area: rows 1 .. H-3
+    msg_h = H - 3
+    row = 1
+    for msg in messages:
+        if row >= msg_h:
+            break
+        role = msg["role"]
+        content = msg["content"]
+        if role == "user":
+            prefix = "You: "
+            col = curses.color_pair(6) | curses.A_BOLD
+        elif role == "assistant":
+            prefix = f"{agent_name}: "
+            col = curses.color_pair(1)
+        else:
+            prefix = "  "
+            col = curses.color_pair(7)
+
+        # Word-wrap each message into the available width
+        max_w = max(W - 2, 10)
+        line = prefix + content
+        while line and row < msg_h:
+            chunk = line[:max_w]
+            _safe_addstr(stdscr, row, 1, chunk, col)
+            line = line[max_w:]
+            row += 1
+        # blank separator
+        row += 1
+
+    # Thinking indicator
+    if thinking:
+        _safe_addstr(stdscr, H - 3, 1, f"  {agent_name} is thinking…", curses.color_pair(3))
+
+    # Input bar
+    prompt = f" > {input_buf}"
+    _safe_addstr(stdscr, H - 2, 0, prompt[: W - 1].ljust(W - 1), curses.color_pair(5) | curses.A_REVERSE)
+    # cursor position
+    try:
+        curses.curs_set(1)
+        stdscr.move(H - 2, min(len(prompt), W - 2))
+    except curses.error:
+        pass
+
+    # Footer hint
+    hint = " Tab=switch agent  Enter=send  Esc=close  /token <PAT> to set models token inline "
+    _safe_addstr(stdscr, H - 1, 0, hint.ljust(W - 1), curses.color_pair(7))
+    stdscr.refresh()
+
+
+def _post_discussion(repo: str, title: str, body: str) -> str | None:
+    """Post chat exchange as a GitHub Discussion; returns URL or None."""
+    repo_parts = repo.split("/")
+    if len(repo_parts) != 2:
+        return None
+    owner, name = repo_parts
+    # Fetch repo node id + first discussion category id
+    repo_info_raw = gh_json(
+        ["api", "graphql", "-f",
+         f"query=query{{repository(owner:\"{owner}\",name:\"{name}\"){{id discussions(first:1){{nodes{{id}}}} discussionCategories(first:5){{nodes{{id name}}}}}}}}"],
+        default=None, check=False,
+    )
+    if not repo_info_raw:
+        return None
+    try:
+        repo_data = repo_info_raw["data"]["repository"]
+        repo_id = repo_data["id"]
+        categories = repo_data.get("discussionCategories", {}).get("nodes", [])
+        cat_id = next(
+            (c["id"] for c in categories if "general" in c.get("name", "").lower()),
+            categories[0]["id"] if categories else None,
+        )
+    except (KeyError, IndexError, TypeError):
+        return None
+    if not cat_id:
+        return None
+    result = gh_json(
+        ["api", "graphql", "-f",
+         f"query=mutation{{createDiscussion(input:{{repositoryId:\"{repo_id}\",categoryId:\"{cat_id}\",title:\"{title}\",body:\"{body.replace(chr(34), chr(39))}\"}}){{discussion{{url}}}}}}"],
+        default=None, check=False,
+    )
+    try:
+        return result["data"]["createDiscussion"]["discussion"]["url"]
+    except (KeyError, TypeError):
+        return None
 
 
 def run_tui(
@@ -1486,15 +1930,179 @@ def run_tui(
     state: dict[str, Any],
     state_file: Path,
     overview_file: Path,
+    ledger_file: Path,
 ) -> int:
     interval = max(args.interval, 5)
     heartbeat_data: dict[str, Any] | None = None
     paused = False
     next_run_at = time.monotonic()
-    status_message = ""
+    status_message = "Starting up…"
+    log_scroll = 0
+    action_log: list[str] = []
+    heartbeat_count = 0
 
-    def _main(stdscr: curses.window) -> int:
+    # Chat state
+    chat_open = False
+    chat_agent_idx = 0
+    chat_input: list[str] = []          # current input buffer as char list
+    chat_messages: list[dict[str, str]] = []   # [{role, content}, ...]
+    chat_thinking = False
+    _token_file = git_dir() / "heartbeat-runner" / "models_token"
+
+    def _append_log(results: list[dict[str, Any]]) -> None:
+        ts = isoformat()
+        for r in results:
+            status_sym = "✓" if r["status"] == "ok" else ("✗" if r["status"] == "error" else "–")
+            action_log.append(f"{ts}  {r['target']:25} {r['action']:22} | {r['status']} {status_sym}  {r.get('detail','')[:60]}")
+
+    def _trigger_dispatch(workflow: str, inputs: dict[str, str], label: str) -> None:
+        nonlocal status_message
+        try:
+            out = dispatch_workflow(repo_info["nameWithOwner"], workflow, inputs, args.dry_run, ref=repo_info.get("defaultBranch", "main"))
+            if not args.dry_run:
+                record_event(state, f"dispatch:{workflow}", {"reason": label})
+                save_state(state_file, state)
+            action_log.append(f"{isoformat()}  {workflow:30} dispatch_manual      | ok ✓  {out[:50]}")
+            status_message = f"Dispatched {label}"
+        except RuntimeError as exc:
+            short = str(exc).split("\n")[0][:80]
+            if "403" in short or "Resource not accessible" in short:
+                short = f"Auth error dispatching {label} — export GH_USER_PAT with actions:write"
+            action_log.append(f"{isoformat()}  {workflow:30} dispatch_manual      | error ✗  {short}")
+            status_message = f"✗ {short}"
+
+    def _force_draft_ready() -> None:
+        """Mark every open draft PR ready and queue merge."""
+        nonlocal status_message
+        if heartbeat_data is None:
+            status_message = "No snapshot yet — run a heartbeat first"
+            return
+        prs = heartbeat_data["snapshot"]["prs"]
+        for pr in prs:
+            if not pr.get("isDraft"):
+                continue
+            try:
+                out = mark_pr_ready(repo_info["nameWithOwner"], pr["number"], args.dry_run)
+                action_log.append(f"{isoformat()}  pr#{pr['number']:5}                    mark_ready           | ok ✓  {out[:50]}")
+                if not args.dry_run:
+                    # immediate merge attempt after promoting
+                    refreshed = gh_json(
+                        ["pr", "view", str(pr["number"]), "--repo", repo_info["nameWithOwner"],
+                         "--json", "number,title,isDraft,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,headRefName"],
+                        default=pr, check=False,
+                    )
+                    allowed, detail = mergeable_guard(refreshed, heartbeat_data["snapshot"]["runs"])
+                    if allowed:
+                        mout = merge_pr(repo_info["nameWithOwner"], pr["number"], False)
+                        action_log.append(f"{isoformat()}  pr#{pr['number']:5}                    merge                | ok ✓  {mout[:50]}")
+                    else:
+                        action_log.append(f"{isoformat()}  pr#{pr['number']:5}                    merge                | skipped –  {detail}")
+            except RuntimeError as exc:
+                action_log.append(f"{isoformat()}  pr#{pr['number']:5}                    mark_ready           | error ✗  {exc}")
+        status_message = "Draft → ready pass complete"
+
+    def _send_chat(message: str, agent_name: str) -> str:
+        """Send a chat message via gh api, using the best available token."""
+        # /token <value> — save token to file and confirm without calling the API
+        stripped = message.strip()
+        if stripped.startswith("/token "):
+            token_val = stripped[7:].strip()
+            if token_val:
+                _token_file.write_text(token_val, encoding="utf-8")
+                return f"✓ Token saved to {_token_file}. Send any message to test it."
+            return "Usage: /token <your-PAT-with-models:read>"
+
+        agent = CHAT_AGENTS[agent_name]
+
+        # Token file and gh oauth config take priority over GITHUB_TOKEN (codespace token lacks models scope)
+        models_token = (
+            os.environ.get("MODELS_TOKEN", "").strip()
+            or os.environ.get("GH_MODELS_TOKEN", "").strip()
+        )
+        if not models_token and _token_file.exists():
+            models_token = _token_file.read_text(encoding="utf-8").strip()
+        if not models_token:
+            try:
+                models_token = subprocess.run(
+                    ["gh", "config", "get", "oauth_token", "-h", "github.com"],
+                    capture_output=True, text=True, env=GH_COMMAND_ENV,
+                ).stdout.strip()
+            except Exception:
+                pass
+        if not models_token:
+            return "⚠ No token. Type: /token <PAT-with-models:read> to set one inline."
+
+        context_note = ""
+        if heartbeat_data:
+            snap = heartbeat_data["snapshot"]
+            prs, issues, runs = snap["prs"], snap["issues"], snap["runs"]
+            active = [r for r in runs if (r.get("status") or "").lower() in ACTIVE_RUN_STATUSES]
+            context_note = (
+                f"\n\nRepo snapshot: {snap['repo']['nameWithOwner']} — "
+                f"{len(prs)} open PRs ({sum(1 for p in prs if p.get('isDraft'))} drafts, "
+                f"{sum(1 for p in prs if p.get('mergeable')=='CONFLICTING')} conflicting), "
+                f"{len(issues)} open issues, {len(active)} active runs."
+            )
+
+        messages = [{"role": "system", "content": agent["persona"] + context_note}]
+        for m in chat_messages[-10:]:
+            if m["role"] in ("user", "assistant"):
+                messages.append({"role": m["role"], "content": m["content"]})
+        messages.append({"role": "user", "content": message})
+
+        payload = json.dumps({
+            "model": agent["model"],
+            "temperature": 0.7,
+            "max_tokens": 1000,
+            "messages": messages,
+        })
+
+        # curl avoids gh api request mangling; token explicitly set so GITHUB_TOKEN is bypassed
+        result = subprocess.run(
+            ["curl", "-s", "-X", "POST", MODELS_URL,
+             "-H", f"Authorization: Bearer {models_token}",
+             "-H", "Content-Type: application/json",
+             "-H", "Accept: application/json",
+             "-d", "@-"],
+            input=payload,
+            capture_output=True,
+            text=True,
+            env=GH_COMMAND_ENV,
+        )
+
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout).strip().split("\n")[0][:120]
+            if "401" in err or "unauthorized" in err.lower():
+                # Clear the token file if it caused the 401 so we don't keep retrying it
+                if _token_file.exists():
+                    _token_file.unlink(missing_ok=True)
+                return (
+                    "⚠ 401 Unauthorized — token lacks models:read scope.\n"
+                    "Type: /token <your-PAT> to set a new one inline."
+                )
+            return f"⚠ gh api error: {err}"
+
+        try:
+            data = json.loads(result.stdout)
+            choices = data.get("choices") or []
+            if choices:
+                return choices[0]["message"]["content"]
+            error = data.get("error", {})
+            return f"⚠ Model error: {error.get('message', 'no choices returned')}"
+        except (json.JSONDecodeError, KeyError) as exc:
+            return f"⚠ Parse error: {exc}"
+
+
+    def _main(stdscr: Any) -> int:
         nonlocal heartbeat_data, paused, next_run_at, status_message
+        nonlocal log_scroll, heartbeat_count
+        nonlocal chat_open, chat_agent_idx, chat_input, chat_messages, chat_thinking
+        try:
+            _init_colors()
+            colors_ok = True
+        except Exception:
+            colors_ok = False
+
         try:
             curses.curs_set(0)
         except curses.error:
@@ -1504,37 +2112,130 @@ def run_tui(
 
         while True:
             now = time.monotonic()
-            if not paused and (heartbeat_data is None or now >= next_run_at):
-                errors, heartbeat_data = run_heartbeat_cycle(repo_root, repo_info, args, state, state_file, overview_file)
-                if errors:
-                    status_message = f"Completed with {errors} action errors"
-                else:
-                    status_message = "Completed successfully"
+
+            # ── Heartbeat cycle (skipped when chat is blocking) ──────────────
+            if not chat_open and not paused and (heartbeat_data is None or now >= next_run_at):
+                errors, heartbeat_data = run_heartbeat_cycle(repo_root, repo_info, args, state, state_file, overview_file, ledger_file)
+                heartbeat_count += 1
+                _append_log(heartbeat_data["results"])
+                log_scroll = max(0, len(action_log) - 10)
+                status_message = (
+                    f"Beat #{heartbeat_count} complete — {errors} errors" if errors
+                    else f"Beat #{heartbeat_count} complete ✓"
+                )
                 next_run_at = time.monotonic() + interval
 
             remaining = int(next_run_at - time.monotonic()) if not paused else interval
-            lines = render_tui_lines(heartbeat_data, args.interval, args.dry_run, paused, remaining, status_message)
-            draw_tui(stdscr, lines)
+            agent_name = CHAT_AGENT_NAMES[chat_agent_idx % len(CHAT_AGENT_NAMES)]
 
+            # ── Draw ─────────────────────────────────────────────────────────
+            if chat_open:
+                _draw_chat_panel(stdscr, chat_messages, agent_name, "".join(chat_input), chat_thinking)
+            elif colors_ok:
+                _draw_full_tui(stdscr, heartbeat_data, args.interval, args.dry_run, paused, remaining, status_message, log_scroll, action_log, heartbeat_count)
+            else:
+                lines = render_tui_lines(heartbeat_data, args.interval, args.dry_run, paused, remaining, status_message)
+                draw_tui(stdscr, lines)
+
+            # ── Input ────────────────────────────────────────────────────────
             key = stdscr.getch()
             if key == -1:
                 continue
 
-            if key in (ord("q"), ord("Q")):
-                return 0
-            if key in (ord("r"), ord("R")):
-                next_run_at = time.monotonic()
-                paused = False
-                status_message = "Manual run requested"
-            if key in (ord("p"), ord("P")):
-                paused = not paused
-                status_message = "Paused" if paused else "Resumed"
+            if chat_open:
+                if key == 27:                             # Esc — close chat
+                    chat_open = False
+                    chat_input.clear()
+                    try:
+                        curses.curs_set(0)
+                    except curses.error:
+                        pass
+                elif key == 9:                            # Tab — cycle agent
+                    chat_agent_idx = (chat_agent_idx + 1) % len(CHAT_AGENT_NAMES)
+                    agent_name = CHAT_AGENT_NAMES[chat_agent_idx]
+                    chat_messages.append({"role": "system", "content": f"[switched to {agent_name}]"})
+                elif key in (curses.KEY_BACKSPACE, 127, 8):
+                    if chat_input:
+                        chat_input.pop()
+                elif key in (10, 13):                     # Enter — send
+                    user_text = "".join(chat_input).strip()
+                    chat_input.clear()
+                    if user_text:
+                        chat_messages.append({"role": "user", "content": user_text})
+                        # Redraw with thinking indicator
+                        chat_thinking = True
+                        _draw_chat_panel(stdscr, chat_messages, agent_name, "", True)
+                        # Blocking call — TUI pauses during model call
+                        reply = _send_chat(user_text, agent_name)
+                        chat_thinking = False
+                        chat_messages.append({"role": "assistant", "content": reply})
+                        action_log.append(f"{isoformat()}  chat:{agent_name[:20]:20}             | ok ✓  {reply[:60]}")
+                        # Offer to post as Discussion (non-blocking, fire and forget)
+                        try:
+                            disc_title = f"Team chat: {user_text[:60]}"
+                            disc_body = "\n\n".join(
+                                f"**{'You' if m['role']=='user' else agent_name}**: {m['content']}"
+                                for m in chat_messages
+                                if m["role"] in ("user", "assistant")
+                            )
+                            _post_discussion(repo_info["nameWithOwner"], disc_title, disc_body)
+                        except Exception:
+                            pass
+                elif 32 <= key <= 126:                    # printable
+                    chat_input.append(chr(key))
+            else:
+                # Normal TUI keys
+                if key in (ord("q"), ord("Q"), 27):
+                    return 0
+                elif key == ord("/"):                     # open chat
+                    chat_open = True
+                    chat_input.clear()
+                    status_message = f"Chat open — talking to {agent_name}  (Tab to switch, Esc to close)"
+                elif key in (ord("r"), ord("R")):
+                    next_run_at = time.monotonic()
+                    paused = False
+                    status_message = "Manual run triggered…"
+                elif key in (ord("p"), ord("P")):
+                    paused = not paused
+                    status_message = "Paused" if paused else "Resumed"
+                elif key in (ord("c"), ord("C")):
+                    _trigger_dispatch(
+                        "council-discussion.yml",
+                        {"topic": "Manual agent council: review open PRs, priorities, and team alignment.", "context": "Supervisor TUI manual dispatch."},
+                        "Council meeting",
+                    )
+                elif key in (ord("m"), ord("M")):
+                    _trigger_dispatch(
+                        "project-manager.yml",
+                        {"task": "full-sprint-report"},
+                        "PM sprint report",
+                    )
+                elif key in (ord("a"), ord("A")):
+                    _trigger_dispatch(
+                        "task-assignment.yml",
+                        {"task": "assign-tasks", "extra_context": "Supervisor TUI manual task assignment."},
+                        "Task assignment",
+                    )
+                elif key in (ord("d"), ord("D")):
+                    _force_draft_ready()
+                elif key in (curses.KEY_UP, ord("k")):
+                    log_scroll = max(0, log_scroll - 1)
+                elif key in (curses.KEY_DOWN, ord("j")):
+                    log_scroll = min(max(0, len(action_log) - 1), log_scroll + 1)
 
     return curses.wrapper(_main)
 
 
-def heartbeat(repo_root: Path, repo_info: dict[str, str], args: argparse.Namespace, state: dict[str, Any], state_file: Path, overview_file: Path) -> int:
-    errors, heartbeat_data = run_heartbeat_cycle(repo_root, repo_info, args, state, state_file, overview_file)
+def heartbeat(
+    repo_root: Path,
+    repo_info: dict[str, str],
+    args: argparse.Namespace,
+    state: dict[str, Any],
+    state_file: Path,
+    overview_file: Path,
+    ledger_file: Path,
+) -> int:
+    errors, heartbeat_data = run_heartbeat_cycle(repo_root, repo_info, args, state, state_file, overview_file, ledger_file)
     print(heartbeat_data["overview"], end="")
     return errors
 
@@ -1551,6 +2252,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-limit", type=int, default=100, help="Number of recent workflow runs to inspect per heartbeat. Default: 100")
     parser.add_argument("--max-actions", type=int, default=25, help="Maximum actions to execute per heartbeat. Default: 25")
     parser.add_argument("--max-retries", type=int, default=2, help="Retry attempts for transient CLI/API errors. Default: 2")
+    parser.add_argument("--ledger-file", help="Optional path for decision ledger JSONL output.")
     parser.add_argument("--dry-run", action="store_true", help="Compute and print the queue without mutating GitHub state.")
     parser.add_argument("--once", action="store_true", help="Run a single heartbeat instead of looping forever.")
     parser.add_argument("--tui", action="store_true", help="Run an interactive terminal UI with live heartbeat status.")
@@ -1564,19 +2266,20 @@ def main() -> int:
     GH_MAX_RETRIES = max(1, args.max_retries)
     repo_root = Path.cwd()
     state_file, overview_file = state_paths()
+    ledger_file = Path(args.ledger_file).expanduser() if args.ledger_file else default_ledger_path()
     state = load_state(state_file)
     repo_info = resolve_repo(args.repo)
     GH_COMMAND_ENV, GH_AUTH_SOURCE = resolve_gh_command_env()
 
     try:
         if args.tui:
-            return run_tui(repo_root, repo_info, args, state, state_file, overview_file)
+            return run_tui(repo_root, repo_info, args, state, state_file, overview_file, ledger_file)
 
         if args.once:
-            return heartbeat(repo_root, repo_info, args, state, state_file, overview_file)
+            return heartbeat(repo_root, repo_info, args, state, state_file, overview_file, ledger_file)
 
         while True:
-            errors = heartbeat(repo_root, repo_info, args, state, state_file, overview_file)
+            errors = heartbeat(repo_root, repo_info, args, state, state_file, overview_file, ledger_file)
             if errors:
                 print(f"Heartbeat completed with {errors} action errors. Sleeping until next interval.", file=sys.stderr)
             time.sleep(max(args.interval, 5))

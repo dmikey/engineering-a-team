@@ -1,10 +1,9 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # Heartbeat Orchestrator
 #
-# Triggers:  schedule (every 15 minutes around the clock)
-#            workflow_dispatch (manual trigger)
+# Triggers:  workflow_dispatch (manual fallback only)
 #
-# What it does each run:
+# What it does when manually triggered:
 #   1. Evaluates every open PR for readiness.
 #   2. Converts eligible drafts to ready-for-review.
 #   3. Merges / enables auto-merge for mergeable PRs.
@@ -14,10 +13,6 @@
 name: Heartbeat Orchestrator
 
 on:
-  schedule:
-    - cron: '*/15 * * * *'
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -62,6 +57,10 @@ jobs:
           HEARTBEAT_GH_TOKEN: ${{ secrets.GH_USER_PAT }}
         run: |
           DRY_RUN="${{ inputs.dry_run || 'false' }}"
+          if [[ "$DRY_RUN" != "true" && -z "${HEARTBEAT_GH_TOKEN:-}" ]]; then
+            echo "::warning::GH_USER_PAT is not configured; forcing --dry-run. Local scripts/autonomous-heartbeat.sh is the primary runtime."
+            DRY_RUN="true"
+          fi
           EXTRA_FLAGS=""
           if [[ "$DRY_RUN" == "true" ]]; then
             EXTRA_FLAGS="--dry-run"

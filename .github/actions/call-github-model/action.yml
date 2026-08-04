@@ -144,7 +144,7 @@ runs:
           -H "Content-Type: application/json" \
           -H "Accept: application/json" \
           -w "\n__GH_HTTP_STATUS:%{http_code}" \
-          "https://models.github.ai/inference/chat/completions" \
+          "https://api.githubcopilot.com/chat/completions" \
           -d "$PAYLOAD") || CURL_EXIT=$?
 
         HTTP_STATUS=$(printf '%s\n' "$CURL_OUTPUT" | awk -F: '/__GH_HTTP_STATUS:/{print $2}' | tail -1)

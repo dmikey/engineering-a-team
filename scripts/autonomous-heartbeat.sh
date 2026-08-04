@@ -14,6 +14,7 @@ trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 CLI_SCRIPT="$ROOT_DIR/scripts/agent-cli.sh"
+HEARTBEAT_RUNNER="$ROOT_DIR/scripts/heartbeat_runner.py"
 STATE_DIR="$ROOT_DIR/.autonomous"
 PID_FILE="$STATE_DIR/heartbeat.pid"
 LOG_FILE="$STATE_DIR/heartbeat.log"
@@ -1248,16 +1249,44 @@ run_loop() {
   local ref="$2"
   local max_cycles="$3"
 
-  local cycle=0
-  local slot=0
-  local seq_len="${#SEQUENCE[@]}"
-
   echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Heartbeat loop started interval=${interval}s ref=$ref" | tee -a "$LOG_FILE"
 
+  if [[ ! -f "$HEARTBEAT_RUNNER" ]]; then
+    echo "Error: missing heartbeat runner at $HEARTBEAT_RUNNER" >&2
+    return 1
+  fi
+
+  local repo_name
+  repo_name="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)"
+
+  local auto_dry_run="false"
+  local dry_run_notice_shown="false"
+  if [[ -z "${HEARTBEAT_GH_TOKEN:-}" && -z "${GH_USER_PAT:-}" && "${LOCAL_HEARTBEAT_ALLOW_NO_PAT:-false}" != "true" ]]; then
+    auto_dry_run="true"
+  fi
+
+  local cycle=0
   while true; do
     cycle=$((cycle + 1))
-    dispatch_slot "$ref" "$cycle" "$slot"
-    slot=$(((slot + 1) % seq_len))
+    echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Running heartbeat cycle $cycle" | tee -a "$LOG_FILE"
+
+    local runner_args=(--interval "$interval" --once)
+    if [[ -n "$repo_name" ]]; then
+      runner_args+=(--repo "$repo_name")
+    fi
+    if [[ "$auto_dry_run" == "true" ]]; then
+      runner_args+=(--dry-run)
+      if [[ "$dry_run_notice_shown" == "false" ]]; then
+        echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] No HEARTBEAT_GH_TOKEN/GH_USER_PAT detected; forcing local dry-run mode. Set GH_USER_PAT (actions:write) for live dispatch." | tee -a "$LOG_FILE"
+        dry_run_notice_shown="true"
+      fi
+    fi
+
+    if python3 "$HEARTBEAT_RUNNER" "${runner_args[@]}"; then
+      :
+    else
+      echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Heartbeat cycle $cycle exited with a non-zero status" | tee -a "$LOG_FILE"
+    fi
 
     if [[ "$max_cycles" -gt 0 && "$cycle" -ge "$max_cycles" ]]; then
       echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Max cycles reached ($max_cycles), exiting." | tee -a "$LOG_FILE"
@@ -1472,6 +1501,12 @@ doctor() {
     echo "gh_auth: ok"
   else
     echo "gh_auth: not-authenticated"
+  fi
+
+  if [[ -n "${HEARTBEAT_GH_TOKEN:-}" || -n "${GH_USER_PAT:-}" ]]; then
+    echo "dispatch_token: present (live workflow dispatch enabled)"
+  else
+    echo "dispatch_token: missing (local runner auto-falls back to dry-run)"
   fi
 
   if gh repo view --json nameWithOwner --jq '.nameWithOwner' >/dev/null 2>&1; then
