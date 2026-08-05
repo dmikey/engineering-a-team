@@ -1595,11 +1595,12 @@ CHAT_AGENTS: dict[str, dict[str, str]] = {
         ),
     },
     "Quinn (QA)": {
-        "model": "gpt-4o-mini",
+        "model": "gpt-5.3-codex",
         "persona": (
             "You are Quinn, the QA Engineer. You have deep expertise in automated testing, "
             "security review, and code quality. You are methodical, thorough, and risk-aware. "
             "You give actionable, constructive feedback and always provide specific severity ratings. "
+            "You can use tools and internet sources to verify claims before answering. "
             "You are being addressed interactively from the team's supervisor TUI."
         ),
     },
@@ -2086,8 +2087,24 @@ def run_tui(
         env.pop("GH_TOKEN", None)
         env.pop("GITHUB_TOKEN", None)
 
+        # Quinn is configured for maximum capability and internet/tool access by default.
+        # Env overrides:
+        # - HEARTBEAT_CHAT_ALLOW_ALL_TOOLS=false
+        # - HEARTBEAT_CHAT_ALLOW_ALL_URLS=false
+        # - HEARTBEAT_CHAT_MODEL=<model>
+        model = os.environ.get("HEARTBEAT_CHAT_MODEL", agent.get("model") or "gpt-5.3-codex")
+        allow_all_tools = os.environ.get("HEARTBEAT_CHAT_ALLOW_ALL_TOOLS", "true").lower() == "true"
+        allow_all_urls = os.environ.get("HEARTBEAT_CHAT_ALLOW_ALL_URLS", "true").lower() == "true"
+
+        command = ["gh", "copilot", "--model", model, "--no-alt-screen"]
+        if allow_all_tools:
+            command.append("--allow-all-tools")
+        if allow_all_urls:
+            command.append("--allow-all-urls")
+        command.extend(["-p", prompt])
+
         result = subprocess.run(
-            ["gh", "copilot", "-p", prompt],
+            command,
             capture_output=True,
             text=True,
             env=env,
