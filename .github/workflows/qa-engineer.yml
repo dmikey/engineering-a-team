@@ -10,7 +10,7 @@
 # Skills:    code-review · issue-creation · pr-feedback · security-scan
 #
 # Reads persona from .github/agents.md (QA Engineer section).
-# Model defaults to gpt-4o-mini; override with repository variable QA_MODEL.
+# Model defaults to gpt-5.3-codex; override with repository variable QA_MODEL.
 # ──────────────────────────────────────────────────────────────────────────────
 name: QA Engineer Agent
 
@@ -69,7 +69,7 @@ jobs:
       github.event_name == 'pull_request' ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'workflow_call' ||
-      (github.event_name == 'schedule' && env.QA_AUTONOMOUS_ENABLED == 'true') ||
+      (github.event_name == 'schedule' && vars.QA_AUTONOMOUS_ENABLED != 'false') ||
       (github.event_name == 'issues' &&
        contains(github.event.issue.labels.*.name, 'needs-qa'))
 
