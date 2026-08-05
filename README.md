@@ -117,6 +117,7 @@ tasks that are awkward to trigger only from cloud UI flows.
 Prerequisites:
 
 - `gh` installed and authenticated (`gh auth login`)
+- `gh copilot` command available for best local TUI Copilot fallback experience
 - Execute permission on the script (already set in this repository):
 
 ```bash
@@ -151,6 +152,13 @@ To see all options:
 ```bash
 scripts/agent-cli.sh --help
 ```
+
+When launching `service tui` or dispatching runs, the CLI now performs a
+preflight check to verify:
+
+- Manual Agent Runner workflow is accessible
+- Discussions capability is available (or warns if it will fall back to issues)
+- Copilot CLI command availability for local TUI Copilot integration
 
 ### 8. Run local autonomous heartbeat process
 
@@ -480,6 +488,10 @@ TUI controls:
 
 The TUI displays live queue status, PR decision actions, workflow pressure,
 model/auth status, and the actions executed in the latest heartbeat.
+
+When chat is used in TUI mode, relay publication now dispatches the council
+workflow so discussion outcomes are posted through GitHub Actions instead of
+direct local GraphQL calls.
 
 The runner prints an in-depth overview each cycle and also writes the latest
 report plus local dedupe state under `.git/heartbeat-runner/`.

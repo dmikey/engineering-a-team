@@ -139,6 +139,31 @@ require_gh() {
   fi
 }
 
+check_actions_preflight() {
+  local has_discussions="unknown"
+
+  if ! gh workflow view "$WORKFLOW_FILE" >/dev/null 2>&1; then
+    echo "Error: cannot access workflow '$WORKFLOW_FILE' in this repo." >&2
+    echo "Ensure GitHub Actions is enabled and your token has actions:read/write." >&2
+    exit 1
+  fi
+
+  has_discussions="$(gh repo view --json hasDiscussionsEnabled --jq '.hasDiscussionsEnabled' 2>/dev/null || echo "unknown")"
+  if [[ "$has_discussions" != "true" ]]; then
+    echo "Warning: Discussions appear disabled or unavailable; workflows will fall back to issues." >&2
+  fi
+}
+
+check_tui_preflight() {
+  check_actions_preflight
+
+  if gh copilot --help >/dev/null 2>&1; then
+    echo "copilot_cli: available"
+  else
+    echo "Warning: gh copilot command not available. Install/enable Copilot CLI for best TUI experience." >&2
+  fi
+}
+
 add_field() {
   local key="$1"
   local value="$2"
@@ -157,6 +182,10 @@ main() {
   shift
 
   if [[ "$command" == "service" ]]; then
+    if [[ "${1:-}" == "tui" ]]; then
+      require_gh
+      check_tui_preflight
+    fi
     run_service_command "$@"
     exit 0
   fi
@@ -257,6 +286,7 @@ main() {
   esac
 
   require_gh
+  check_actions_preflight
 
   GH_FIELDS=()
   add_field "agent" "$agent"

@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-MODELS_URL = "https://api.githubcopilot.com/chat/completions"
+MODELS_URL = "https://models.github.ai/inference/chat/completions"
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_MODEL_EVERY = 3
 FAILURE_CONCLUSIONS = {
@@ -179,18 +179,19 @@ def resolve_models_token() -> tuple[str | None, str]:
                 return value, env_name
         return None, "actions-unconfigured"
 
-    # Local runs default to GitHub CLI auth token.
+    # Local runs prefer explicit model token env vars when present.
+    for env_name in ("MODELS_TOKEN", "GH_MODELS_TOKEN"):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value, env_name
+
+    # Local fallback to GitHub CLI auth token.
     gh_token_result = run_command(["gh", "auth", "token"], check=False)
     if gh_token_result.returncode == 0:
         value = gh_token_result.stdout.strip()
         if value:
             return value, "gh-auth-token"
 
-    # Local fallback to explicit env vars when CLI auth is unavailable.
-    for env_name in ("MODELS_TOKEN", "GH_MODELS_TOKEN"):
-        value = os.environ.get(env_name, "").strip()
-        if value:
-            return value, env_name
     return None, "local-unconfigured"
 
 
@@ -325,8 +326,9 @@ def read_collaboration_rules(repo_root: Path) -> str:
 
 
 def call_github_model(model: str, system_prompt: str, user_prompt: str, token: str) -> tuple[bool, str]:
+    model_name = model if "/" in model else f"openai/{model}"
     payload = {
-        "model": model,
+        "model": model_name,
         "temperature": 0,
         "max_tokens": 1200,
         "messages": [
@@ -365,6 +367,40 @@ def call_github_model(model: str, system_prompt: str, user_prompt: str, token: s
 
     error = data.get("error", {})
     return False, error.get("message", "No model choices returned")
+
+
+def call_copilot_cli_model(system_prompt: str, user_prompt: str) -> tuple[bool, str]:
+    if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+        return False, "copilot-cli fallback disabled in GitHub Actions"
+
+    prompt = (
+        f"{system_prompt}\n\n"
+        "Respond using JSON only with this schema:\n"
+        "{\"pull_requests\": [{\"number\": 123, \"action\": \"merge\", \"reason\": \"...\"}], "
+        "\"repo_actions\": [{\"action\": \"dispatch_task_assignment\", \"reason\": \"...\"}]}\n\n"
+        "Request context:\n"
+        f"{user_prompt}\n"
+    )
+
+    env = os.environ.copy()
+    # Ensure Copilot CLI uses the logged-in OAuth session instead of dispatch PAT overrides.
+    env.pop("GH_TOKEN", None)
+    env.pop("GITHUB_TOKEN", None)
+
+    result = subprocess.run(
+        ["gh", "copilot", "-p", prompt],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "gh copilot command failed"
+        return False, detail.splitlines()[0][:240]
+
+    output = result.stdout.strip()
+    if not output:
+        return False, "gh copilot returned empty output"
+    return True, output
 
 
 def fetch_open_prs(repo: str, limit: int) -> list[dict[str, Any]]:
@@ -1138,9 +1174,8 @@ def build_plan(
     }
     meta = {"decision_source": "heuristic", "models_status": "disabled"}
 
-    if not models_token:
-        meta["models_status"] = "disabled: MODELS_TOKEN or GH_MODELS_TOKEN not set"
-        return heuristic, meta
+    in_actions = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+    use_github_models = os.environ.get("HEARTBEAT_USE_GITHUB_MODELS", "false").lower() == "true"
 
     cadence = max(1, model_every)
     upcoming_heartbeat = int(state.get("heartbeats", 0)) + 1
@@ -1149,8 +1184,33 @@ def build_plan(
         return heuristic, meta
 
     system_prompt, user_prompt = model_prompt(snapshot, heuristic, read_collaboration_rules(repo_root))
+
+    # Local runs default to Copilot CLI now that GitHub Models endpoint is retired.
+    if not in_actions and not use_github_models:
+        copilot_ok, copilot_response = call_copilot_cli_model(system_prompt, user_prompt)
+        if copilot_ok:
+            meta["decision_source"] = f"copilot-cli:{model}"
+            meta["models_status"] = "ready via gh copilot"
+            return sanitize_model_plan(copilot_response, heuristic), meta
+        meta["models_status"] = f"degraded: copilot-cli unavailable: {copilot_response}"
+        return heuristic, meta
+
+    if not models_token:
+        meta["models_status"] = "disabled: MODELS_TOKEN or GH_MODELS_TOKEN not set"
+        return heuristic, meta
+
     ok, response = call_github_model(model, system_prompt, user_prompt, models_token)
     if not ok:
+        use_copilot_fallback = os.environ.get("HEARTBEAT_COPILOT_FALLBACK", "true").lower() != "false"
+        if use_copilot_fallback:
+            copilot_ok, copilot_response = call_copilot_cli_model(system_prompt, user_prompt)
+            if copilot_ok:
+                meta["decision_source"] = f"copilot-cli:{model}"
+                meta["models_status"] = "fallback-ready via gh copilot"
+                return sanitize_model_plan(copilot_response, heuristic), meta
+            meta["models_status"] = f"degraded: {response} | copilot-fallback failed: {copilot_response}"
+            return heuristic, meta
+
         meta["models_status"] = f"degraded: {response}"
         return heuristic, meta
 
@@ -1912,43 +1972,6 @@ def _draw_chat_panel(stdscr: Any, messages: list[dict[str, str]], agent_name: st
     stdscr.refresh()
 
 
-def _post_discussion(repo: str, title: str, body: str) -> str | None:
-    """Post chat exchange as a GitHub Discussion; returns URL or None."""
-    repo_parts = repo.split("/")
-    if len(repo_parts) != 2:
-        return None
-    owner, name = repo_parts
-    # Fetch repo node id + first discussion category id
-    repo_info_raw = gh_json(
-        ["api", "graphql", "-f",
-         f"query=query{{repository(owner:\"{owner}\",name:\"{name}\"){{id discussions(first:1){{nodes{{id}}}} discussionCategories(first:5){{nodes{{id name}}}}}}}}"],
-        default=None, check=False,
-    )
-    if not repo_info_raw:
-        return None
-    try:
-        repo_data = repo_info_raw["data"]["repository"]
-        repo_id = repo_data["id"]
-        categories = repo_data.get("discussionCategories", {}).get("nodes", [])
-        cat_id = next(
-            (c["id"] for c in categories if "general" in c.get("name", "").lower()),
-            categories[0]["id"] if categories else None,
-        )
-    except (KeyError, IndexError, TypeError):
-        return None
-    if not cat_id:
-        return None
-    result = gh_json(
-        ["api", "graphql", "-f",
-         f"query=mutation{{createDiscussion(input:{{repositoryId:\"{repo_id}\",categoryId:\"{cat_id}\",title:\"{title}\",body:\"{body.replace(chr(34), chr(39))}\"}}){{discussion{{url}}}}}}"],
-        default=None, check=False,
-    )
-    try:
-        return result["data"]["createDiscussion"]["discussion"]["url"]
-    except (KeyError, TypeError):
-        return None
-
-
 def run_tui(
     repo_root: Path,
     repo_info: dict[str, str],
@@ -2225,15 +2248,31 @@ def run_tui(
                         chat_thinking = False
                         chat_messages.append({"role": "assistant", "content": reply})
                         action_log.append(f"{isoformat()}  chat:{agent_name[:20]:20}             | ok ✓  {reply[:60]}")
-                        # Offer to post as Discussion (non-blocking, fire and forget)
+                        # Relay chat context through the council workflow so
+                        # discussion publishing flows through GitHub Actions.
                         try:
-                            disc_title = f"Team chat: {user_text[:60]}"
-                            disc_body = "\n\n".join(
+                            chat_transcript = "\n\n".join(
                                 f"**{'You' if m['role']=='user' else agent_name}**: {m['content']}"
                                 for m in chat_messages
                                 if m["role"] in ("user", "assistant")
                             )
-                            _post_discussion(repo_info["nameWithOwner"], disc_title, disc_body)
+                            if len(chat_transcript) > 6000:
+                                chat_transcript = chat_transcript[-6000:]
+
+                            _trigger_dispatch(
+                                "council-discussion.yml",
+                                {
+                                    "mode": "discussion",
+                                    "topic": f"TUI Chat Relay: {user_text[:80]}",
+                                    "context": (
+                                        "Heartbeat TUI chat relay. Use this transcript as"
+                                        " context and post outcomes to Discussions via the"
+                                        " existing council workflow.\n\n"
+                                        f"{chat_transcript}"
+                                    ),
+                                },
+                                "Council chat relay",
+                            )
                         except Exception:
                             pass
                 elif 32 <= key <= 126:                    # printable

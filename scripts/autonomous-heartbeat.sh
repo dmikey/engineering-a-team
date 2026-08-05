@@ -1503,6 +1503,12 @@ doctor() {
     echo "gh_auth: not-authenticated"
   fi
 
+  if gh copilot --help >/dev/null 2>&1; then
+    echo "gh_copilot_cli: available"
+  else
+    echo "gh_copilot_cli: missing"
+  fi
+
   if [[ -n "${HEARTBEAT_GH_TOKEN:-}" || -n "${GH_USER_PAT:-}" ]]; then
     echo "dispatch_token: present (live workflow dispatch enabled)"
   else
@@ -1513,6 +1519,27 @@ doctor() {
     echo "gh_repo_context: ok"
   else
     echo "gh_repo_context: unavailable"
+  fi
+
+  if gh repo view --json hasDiscussionsEnabled --jq '.hasDiscussionsEnabled' 2>/dev/null | grep -q '^true$'; then
+    echo "discussions_enabled: true"
+  else
+    echo "discussions_enabled: false-or-unknown"
+  fi
+
+  if gh api graphql -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:5){nodes{name}}}}' \
+      -f o="$(gh repo view --json owner --jq '.owner.login' 2>/dev/null || echo '')" \
+      -f r="$(gh repo view --json name --jq '.name' 2>/dev/null || echo '')" \
+      --jq '.data.repository.discussionCategories.nodes | length' 2>/dev/null | grep -Eq '^[1-9][0-9]*$'; then
+    echo "discussion_categories: ok"
+  else
+    echo "discussion_categories: missing-or-unavailable"
+  fi
+
+  if gh workflow view "$WORKFLOW_FILE" >/dev/null 2>&1; then
+    echo "workflow_access:$WORKFLOW_FILE ok"
+  else
+    echo "workflow_access:$WORKFLOW_FILE unavailable"
   fi
 
   echo "state_dir: $STATE_DIR"
