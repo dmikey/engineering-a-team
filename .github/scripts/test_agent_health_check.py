@@ -87,6 +87,16 @@ class TestCollectMetrics(unittest.TestCase):
         expected = NOW - timedelta(hours=2)
         self.assertEqual(last, expected)
 
+    def test_last_run_kept_even_if_outside_since_window(self):
+        """A run outside the period should still populate last_run for inactivity checks."""
+        runs = [
+            _make_run(".github/workflows/qa-engineer.yml", created_offset_h=30),
+        ]
+        metrics = MODULE.collect_metrics(runs, SINCE)
+        data = metrics["Quinn (QA Engineer)"]
+        self.assertEqual(data["runs"], 0)
+        self.assertIsNotNone(data["last_run"])
+
 
 class TestClassifyStatus(unittest.TestCase):
     def _classify(self, runs=1, failures=0, hours_since_last=1):
@@ -135,6 +145,17 @@ class TestClassifyStatus(unittest.TestCase):
             self._classify(runs=5, failures=0, hours_since_last=1),
             MODULE.STATUS_HEALTHY,
         )
+
+    def test_healthy_when_no_runs_in_window_but_recent_last_run(self):
+        data = {
+            "runs": 0,
+            "failures": 0,
+            "durations": [],
+            "last_run": NOW - timedelta(hours=10),
+            "last_conclusion": "success",
+        }
+        status = MODULE.classify_status(data, NOW, WARN, CRIT, INACTIVITY)
+        self.assertEqual(status, MODULE.STATUS_HEALTHY)
 
 
 class TestBuildRows(unittest.TestCase):
@@ -232,31 +253,31 @@ class TestRenderAlertsJson(unittest.TestCase):
 
     def test_healthy_excluded(self):
         rows = [self._row(MODULE.STATUS_HEALTHY, success_rate=100.0, failures=0)]
-        result = json.loads(MODULE.render_alerts_json(rows, "2026-07-31", 24, WARN, CRIT))
+        result = json.loads(MODULE.render_alerts_json(rows, "2026-07-31", 24, INACTIVITY, WARN, CRIT))
         self.assertEqual(result, [])
 
     def test_critical_alert_included(self):
         rows = [self._row(MODULE.STATUS_CRITICAL, success_rate=60.0)]
-        result = json.loads(MODULE.render_alerts_json(rows, "2026-07-31", 24, WARN, CRIT))
+        result = json.loads(MODULE.render_alerts_json(rows, "2026-07-31", 24, INACTIVITY, WARN, CRIT))
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["status"], MODULE.STATUS_CRITICAL)
         self.assertEqual(result[0]["severity"], "critical")
 
     def test_degraded_alert_included(self):
         rows = [self._row(MODULE.STATUS_DEGRADED, success_rate=80.0, failures=2)]
-        result = json.loads(MODULE.render_alerts_json(rows, "2026-07-31", 24, WARN, CRIT))
+        result = json.loads(MODULE.render_alerts_json(rows, "2026-07-31", 24, INACTIVITY, WARN, CRIT))
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["severity"], "medium")
 
     def test_inactive_alert_included(self):
         rows = [self._row(MODULE.STATUS_INACTIVE, success_rate=0.0, runs=0, failures=0)]
-        result = json.loads(MODULE.render_alerts_json(rows, "2026-07-31", 24, WARN, CRIT))
+        result = json.loads(MODULE.render_alerts_json(rows, "2026-07-31", 24, INACTIVITY, WARN, CRIT))
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["severity"], "high")
 
     def test_alert_has_required_fields(self):
         rows = [self._row(MODULE.STATUS_CRITICAL)]
-        result = json.loads(MODULE.render_alerts_json(rows, "2026-07-31", 24, WARN, CRIT))
+        result = json.loads(MODULE.render_alerts_json(rows, "2026-07-31", 24, INACTIVITY, WARN, CRIT))
         alert = result[0]
         for field in ("agent", "status", "severity", "title", "description", "date"):
             self.assertIn(field, alert)

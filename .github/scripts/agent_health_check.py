@@ -96,8 +96,6 @@ def collect_metrics(
         if not created_raw:
             continue
         created_at = parse_ts(created_raw)
-        if created_at < since:
-            continue
 
         matched_agent = None
         for agent, workflow_path in workflows.items():
@@ -108,11 +106,16 @@ def collect_metrics(
             continue
 
         data = metrics[matched_agent]
-        data["runs"] += 1
-
+        # Track most recent run from all fetched history so inactivity checks
+        # are based on true recency, not only the short analysis window.
         if data["last_run"] is None or created_at > data["last_run"]:
             data["last_run"] = created_at
             data["last_conclusion"] = conclusion
+
+        if created_at < since:
+            continue
+
+        data["runs"] += 1
 
         if status == "completed" and conclusion and conclusion != "success":
             data["failures"] += 1
@@ -136,20 +139,26 @@ def classify_status(
 ) -> str:
     """Return a STATUS_* constant for a single agent."""
     total = data["runs"]
-    if total == 0:
-        return STATUS_INACTIVE
 
     failures = data["failures"]
     successes = max(total - failures, 0)
     success_rate = (successes / total * 100.0) if total else 0.0
 
     last_run: datetime | None = data["last_run"]
+    if last_run is None:
+        return STATUS_INACTIVE
+
     hours_since_last = (
         (now - last_run).total_seconds() / 3600.0 if last_run else float("inf")
     )
 
     if hours_since_last >= inactivity_hours:
         return STATUS_INACTIVE
+
+    # If the agent ran recently enough but had no executions inside the short
+    # reporting window, do not mark it inactive.
+    if total == 0:
+        return STATUS_HEALTHY
 
     if success_rate < crit_threshold:
         return STATUS_CRITICAL
@@ -321,6 +330,7 @@ def render_alerts_json(
     rows: list[dict],
     current_date: str,
     period_hours: int,
+    inactivity_hours: int,
     warn_threshold: float,
     crit_threshold: float,
 ) -> str:
@@ -333,7 +343,7 @@ def render_alerts_json(
         if r["status"] == STATUS_INACTIVE:
             title = f"🚨 Agent Health Alert: {r['agent']} is INACTIVE"
             description = (
-                f"{r['agent']} has not executed in the last {period_hours} hours. "
+                f"{r['agent']} has not executed in the last {inactivity_hours} hours. "
                 "The agent may be disabled, misconfigured, or encountering trigger failures."
             )
             severity = "high"
@@ -414,7 +424,7 @@ def main() -> None:
     rows = build_rows(metrics, now, warn_threshold, crit_threshold, inactivity_hours)
 
     if args.output_format == "alerts-json":
-        print(render_alerts_json(rows, current_date, period_hours, warn_threshold, crit_threshold))
+        print(render_alerts_json(rows, current_date, period_hours, inactivity_hours, warn_threshold, crit_threshold))
     elif args.output_format == "status-json":
         print(render_status_json(rows))
     else:
