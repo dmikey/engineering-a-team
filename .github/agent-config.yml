@@ -49,7 +49,12 @@ qa_engineer:
 
   # Model override for QA Engineer.
   # Repository variable: QA_MODEL
-  model: gpt-4o-mini
+  model: gpt-5.3-codex
+
+  # Enable scheduled autonomous QA sweeps that review open PRs even when
+  # no direct PR event is fired.
+  # Repository variable: QA_AUTONOMOUS_ENABLED (true/false)
+  autonomous_enabled: true
 
   # Minimum severity that triggers an Issue being opened.
   # Repository variable: QA_SEVERITY_THRESHOLD (LOW/MEDIUM/HIGH/CRITICAL)

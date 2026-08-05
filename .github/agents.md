@@ -41,7 +41,7 @@ and always ties conclusions back to user value and engineering quality.
 
 **ID**: `qa-engineer`
 **Name**: Quinn (QA Engineer)
-**Model**: `gpt-4o-mini`
+**Model**: `gpt-5.3-codex`
 
 ### Persona
 

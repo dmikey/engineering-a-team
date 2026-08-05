@@ -3,6 +3,7 @@
 #
 # Triggers:  pull_request (opened / synchronize / reopened)
 #            issues labeled "needs-qa"
+#            schedule (continuous autonomous review)
 #            workflow_dispatch
 #            workflow_call (from council-discussion or agent-router)
 #
@@ -18,6 +19,9 @@ on:
     types: [opened, synchronize, reopened]
   issues:
     types: [labeled]
+  schedule:
+    # Keep Quinn continuously active even when no fresh PR event fires.
+    - cron: '0 */4 * * *'
   workflow_dispatch:
     inputs:
       pr_number:
@@ -47,10 +51,11 @@ permissions:
   pull-requests: write
 
 env:
-  QA_MODEL: ${{ vars.QA_MODEL || 'gpt-4o-mini' }}
+  QA_MODEL: ${{ vars.QA_MODEL || 'gpt-5.3-codex' }}
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
   QA_SEVERITY_THRESHOLD: ${{ vars.QA_SEVERITY_THRESHOLD || 'HIGH' }}
+  QA_AUTONOMOUS_ENABLED: ${{ vars.QA_AUTONOMOUS_ENABLED || 'true' }}
   QA_COLLAB_REPOSITORIES: ${{ vars.QA_COLLAB_REPOSITORIES || '' }}
   QA_AGENT_SKILLS: ${{ vars.QA_AGENT_SKILLS || 'code-review,issue-creation,pr-feedback,security-scan' }}
 
@@ -64,6 +69,7 @@ jobs:
       github.event_name == 'pull_request' ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'workflow_call' ||
+      (github.event_name == 'schedule' && env.QA_AUTONOMOUS_ENABLED == 'true') ||
       (github.event_name == 'issues' &&
        contains(github.event.issue.labels.*.name, 'needs-qa'))
 
@@ -106,14 +112,30 @@ jobs:
             DIFF_CONTENT=$(gh pr diff "$PR_NUMBER" 2>/dev/null | head -150 || echo "N/A")
 
           else
-            # No PR — review the issue body or extra context
-            PR_NUMBER="N/A"
-            PR_TITLE="Manual QA Review"
-            PR_AUTHOR=""
-            PR_BODY="${{ inputs.extra_context }}"
-            DIFF_STAT="N/A"
-            FILES="N/A"
-            DIFF_CONTENT="N/A"
+            # Autonomous/manual fallback: pick the highest-priority open PR.
+            PR_NUMBER=$(gh pr list \
+              --state open \
+              --limit 1 \
+              --json number \
+              --jq '.[0].number' 2>/dev/null || echo "")
+
+            if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
+              PR_INFO=$(gh pr view "$PR_NUMBER" --json title,author,body 2>/dev/null || echo '{}')
+              PR_TITLE=$(echo "$PR_INFO" | python3 -c "import json,sys; print(json.load(sys.stdin).get('title',''))" 2>/dev/null || echo "PR #$PR_NUMBER")
+              PR_AUTHOR=$(echo "$PR_INFO" | python3 -c "import json,sys; print(json.load(sys.stdin).get('author',{}).get('login',''))" 2>/dev/null || echo "")
+              PR_BODY=$(echo "$PR_INFO" | python3 -c "import json,sys; print(json.load(sys.stdin).get('body',''))" 2>/dev/null || echo "")
+              DIFF_STAT=$(gh pr diff "$PR_NUMBER" --stat 2>/dev/null | head -80 || echo "N/A")
+              FILES=$(gh pr diff "$PR_NUMBER" --name-only 2>/dev/null | head -50 || echo "N/A")
+              DIFF_CONTENT=$(gh pr diff "$PR_NUMBER" 2>/dev/null | head -150 || echo "N/A")
+            else
+              PR_NUMBER="N/A"
+              PR_TITLE="Autonomous QA Review (no open PRs found)"
+              PR_AUTHOR=""
+              PR_BODY="${{ inputs.extra_context }}"
+              DIFF_STAT="N/A"
+              FILES="N/A"
+              DIFF_CONTENT="N/A"
+            fi
           fi
 
           CROSS_REPO_CONTEXT="No cross-repository issue sources configured."
