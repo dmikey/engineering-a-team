@@ -1792,7 +1792,7 @@ def _draw_full_tui(
 ) -> None:
     stdscr.erase()
     H, W = stdscr.getmaxyx()
-    if H < 20 or W < 60:
+    if H < 14 or W < 50:
         # Too small — fall back to single-pane
         lines = render_tui_lines(heartbeat_data, interval, dry_run, paused, next_run_in, status_msg)
         draw_tui(stdscr, lines)
@@ -1805,7 +1805,7 @@ def _draw_full_tui(
     # Row H-log_h-1..H-2 : action log panel
     # Row H-1   : status bar
 
-    log_h = min(12, H // 3)
+    log_h = min(10, max(5, H // 4))
     body_top = 2
     body_bot = H - log_h - 1
     body_h = max(body_bot - body_top, 2)
@@ -2144,6 +2144,7 @@ def run_tui(
         nonlocal log_scroll, heartbeat_count
         nonlocal chat_open, chat_agent_idx, chat_input, chat_messages, chat_thinking
         force_plain = args.tui_plain or os.environ.get("HEARTBEAT_TUI_PLAIN", "false").lower() == "true"
+        use_full_layout = not force_plain
         try:
             if force_plain or not curses.has_colors():
                 colors_ok = False
@@ -2190,7 +2191,7 @@ def run_tui(
             # ── Draw ─────────────────────────────────────────────────────────
             if chat_open:
                 _draw_chat_panel(stdscr, chat_messages, agent_name, "".join(chat_input), chat_thinking)
-            elif colors_ok:
+            elif use_full_layout:
                 _draw_full_tui(stdscr, heartbeat_data, args.interval, args.dry_run, paused, remaining, status_message, log_scroll, action_log, heartbeat_count)
             else:
                 lines = render_tui_lines(heartbeat_data, args.interval, args.dry_run, paused, remaining, status_message)
