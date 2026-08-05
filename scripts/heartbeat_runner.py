@@ -792,9 +792,20 @@ def run_stuck_pr_escalations(snapshot: dict[str, Any], state: dict[str, Any], re
                     record_event(state, council_event_key, {"prs": [item["number"] for item in stuck_council_prs]})
                 results.append({"target": "council-discussion.yml", "action": "dispatch_council", "status": "ok", "detail": output})
             except RuntimeError as exc:
-                if "Resource not accessible by integration" in str(exc) and not dry_run:
-                    record_event(state, "dispatch-blocked:council-discussion.yml", {"reason": str(exc)})
-                results.append({"target": "council-discussion.yml", "action": "dispatch_council", "status": "error", "detail": str(exc)})
+                detail = str(exc)
+                if "Resource not accessible by integration" in detail and not dry_run:
+                    record_event(state, "dispatch-blocked:council-discussion.yml", {"reason": detail})
+                if "Resource not accessible by integration" in detail or "403" in detail:
+                    results.append(
+                        {
+                            "target": "council-discussion.yml",
+                            "action": "dispatch_council",
+                            "status": "skipped",
+                            "detail": "Council escalation dispatch requires actions:write token (GH_USER_PAT or HEARTBEAT_GH_TOKEN).",
+                        }
+                    )
+                else:
+                    results.append({"target": "council-discussion.yml", "action": "dispatch_council", "status": "error", "detail": detail})
 
     return results
 
@@ -1318,12 +1329,21 @@ def execute_plan(snapshot: dict[str, Any], plan: dict[str, Any], state: dict[str
             results.append({"target": workflow, "action": action_key, "status": "ok", "detail": output})
             actions_taken += 1
         except RuntimeError as exc:
-            if "Resource not accessible by integration" in str(exc) and not dry_run:
-                record_event(state, f"dispatch-blocked:{workflow}", {"reason": str(exc)})
-            short = str(exc).split("\n")[0][:80]
+            detail = str(exc)
+            if "Resource not accessible by integration" in detail and not dry_run:
+                record_event(state, f"dispatch-blocked:{workflow}", {"reason": detail})
+            short = detail.split("\n")[0][:120]
             if "403" in short or "Resource not accessible" in short:
-                short = f"needs actions:write token (GH_USER_PAT) to dispatch {workflow}"
-            results.append({"target": workflow, "action": action_key, "status": "error", "detail": short})
+                results.append(
+                    {
+                        "target": workflow,
+                        "action": action_key,
+                        "status": "skipped",
+                        "detail": f"auth blocked: set GH_USER_PAT or HEARTBEAT_GH_TOKEN with actions:write to dispatch {workflow}",
+                    }
+                )
+            else:
+                results.append({"target": workflow, "action": action_key, "status": "error", "detail": short})
 
     for decision in plan["pull_requests"]:
         if actions_taken >= max_actions:
