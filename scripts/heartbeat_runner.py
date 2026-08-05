@@ -2106,9 +2106,13 @@ def run_tui(
         nonlocal heartbeat_data, paused, next_run_at, status_message
         nonlocal log_scroll, heartbeat_count
         nonlocal chat_open, chat_agent_idx, chat_input, chat_messages, chat_thinking
+        force_plain = args.tui_plain or os.environ.get("HEARTBEAT_TUI_PLAIN", "false").lower() == "true"
         try:
-            _init_colors()
-            colors_ok = True
+            if force_plain or not curses.has_colors():
+                colors_ok = False
+            else:
+                _init_colors()
+                colors_ok = True
         except Exception:
             colors_ok = False
 
@@ -2116,8 +2120,17 @@ def run_tui(
             curses.curs_set(0)
         except curses.error:
             pass
+        try:
+            stdscr.keypad(True)
+        except curses.error:
+            pass
         stdscr.nodelay(True)
         stdscr.timeout(200)
+
+        # Draw immediately so startup is visible while the first heartbeat cycle gathers data.
+        status_message = "Initializing heartbeat..."
+        lines = render_tui_lines(None, args.interval, args.dry_run, paused, interval, status_message)
+        draw_tui(stdscr, lines)
 
         while True:
             now = time.monotonic()
@@ -2281,6 +2294,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Compute and print the queue without mutating GitHub state.")
     parser.add_argument("--once", action="store_true", help="Run a single heartbeat instead of looping forever.")
     parser.add_argument("--tui", action="store_true", help="Run an interactive terminal UI with live heartbeat status.")
+    parser.add_argument("--tui-plain", action="store_true", help="Force plain-text TUI rendering without colors or panel layout.")
     return parser.parse_args()
 
 

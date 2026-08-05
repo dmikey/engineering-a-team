@@ -215,7 +215,7 @@ jobs:
 
       # ── Create PM alert issues for underperforming agents ─────────────────
       - name: Create PM alert issues for underperforming agents
-        if: steps.alerts.outputs.alert_count != '0'
+        if: steps.alerts.outputs.alert_count != '0' && vars.SKILL_DEVELOPMENT_ALERT_ISSUES_ENABLED == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ALERTS_JSON: ${{ steps.alerts.outputs.alerts_json }}
