@@ -1967,7 +1967,7 @@ def _draw_chat_panel(stdscr: Any, messages: list[dict[str, str]], agent_name: st
         pass
 
     # Footer hint
-    hint = " Tab=switch agent  Enter=send  Esc=close  /token <PAT> to set models token inline "
+    hint = " Tab=switch agent  Enter=send  Esc=close "
     _safe_addstr(stdscr, H - 1, 0, hint.ljust(W - 1), curses.color_pair(7))
     stdscr.refresh()
 
@@ -1996,7 +1996,6 @@ def run_tui(
     chat_input: list[str] = []          # current input buffer as char list
     chat_messages: list[dict[str, str]] = []   # [{role, content}, ...]
     chat_thinking = False
-    _token_file = git_dir() / "heartbeat-runner" / "models_token"
 
     def _append_log(results: list[dict[str, Any]]) -> None:
         ts = isoformat()
@@ -2051,35 +2050,8 @@ def run_tui(
         status_message = "Draft → ready pass complete"
 
     def _send_chat(message: str, agent_name: str) -> str:
-        """Send a chat message via gh api, using the best available token."""
-        # /token <value> — save token to file and confirm without calling the API
-        stripped = message.strip()
-        if stripped.startswith("/token "):
-            token_val = stripped[7:].strip()
-            if token_val:
-                _token_file.write_text(token_val, encoding="utf-8")
-                return f"✓ Token saved to {_token_file}. Send any message to test it."
-            return "Usage: /token <your-PAT-with-models:read>"
-
+        """Send a chat message via gh copilot CLI."""
         agent = CHAT_AGENTS[agent_name]
-
-        # Token file and gh oauth config take priority over GITHUB_TOKEN (codespace token lacks models scope)
-        models_token = (
-            os.environ.get("MODELS_TOKEN", "").strip()
-            or os.environ.get("GH_MODELS_TOKEN", "").strip()
-        )
-        if not models_token and _token_file.exists():
-            models_token = _token_file.read_text(encoding="utf-8").strip()
-        if not models_token:
-            try:
-                models_token = subprocess.run(
-                    ["gh", "config", "get", "oauth_token", "-h", "github.com"],
-                    capture_output=True, text=True, env=GH_COMMAND_ENV,
-                ).stdout.strip()
-            except Exception:
-                pass
-        if not models_token:
-            return "⚠ No token. Type: /token <PAT-with-models:read> to set one inline."
 
         context_note = ""
         if heartbeat_data:
@@ -2099,76 +2071,35 @@ def run_tui(
                 messages.append({"role": m["role"], "content": m["content"]})
         messages.append({"role": "user", "content": message})
 
-        model_name = agent["model"]
-        if "/" not in model_name:
-            model_name = f"openai/{model_name}"
-
-        payload = json.dumps({
-            "model": model_name,
-            "temperature": 0.7,
-            "max_tokens": 1000,
-            "messages": messages,
-        })
-
-        # curl avoids gh api request mangling; token explicitly set so GITHUB_TOKEN is bypassed
-        result = subprocess.run(
-            ["curl", "--silent", "--show-error", "-X", "POST", MODELS_URL,
-             "-H", f"Authorization: Bearer {models_token}",
-             "-H", "Content-Type: application/json",
-             "-H", "Accept: application/json",
-             "-w", "\n__GH_HTTP_STATUS:%{http_code}",
-             "-d", "@-"],
-            input=payload,
-            capture_output=True,
-            text=True,
-            env=GH_COMMAND_ENV,
+        prompt = "\n\n".join(
+            [
+                f"You are {agent_name}.",
+                "Persona and context:",
+                messages[0]["content"],
+                "Conversation:",
+                "\n".join(f"{m['role']}: {m['content']}" for m in messages[1:]),
+                "Respond clearly and concisely.",
+            ]
         )
 
+        env = os.environ.copy()
+        env.pop("GH_TOKEN", None)
+        env.pop("GITHUB_TOKEN", None)
+
+        result = subprocess.run(
+            ["gh", "copilot", "-p", prompt],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
         if result.returncode != 0:
-            err = (result.stderr or result.stdout).strip().split("\n")[0][:120]
-            if "401" in err or "unauthorized" in err.lower():
-                # Clear the token file if it caused the 401 so we don't keep retrying it
-                if _token_file.exists():
-                    _token_file.unlink(missing_ok=True)
-                return (
-                    "⚠ 401 Unauthorized — token lacks models:read scope.\n"
-                    "Type: /token <your-PAT> to set a new one inline."
-                )
-            return f"⚠ Model request failed: {err}"
+            detail = result.stderr.strip() or result.stdout.strip() or "gh copilot command failed"
+            return f"⚠ Copilot CLI failed: {detail.splitlines()[0][:220]}"
 
-        output_lines = result.stdout.splitlines()
-        http_status = ""
-        raw_body_lines: list[str] = []
-        for line in output_lines:
-            if line.startswith("__GH_HTTP_STATUS:"):
-                http_status = line.split(":", 1)[1].strip()
-            else:
-                raw_body_lines.append(line)
-        raw_body = "\n".join(raw_body_lines).strip()
-
-        if not raw_body:
-            suffix = f" (HTTP {http_status})" if http_status else ""
-            return f"⚠ Empty response from model endpoint{suffix}."
-
-        if http_status and http_status.isdigit() and int(http_status) >= 400:
-            try:
-                error_payload = json.loads(raw_body)
-                error_msg = (error_payload.get("error") or {}).get("message") or "request failed"
-            except json.JSONDecodeError:
-                snippet = raw_body[:180]
-                error_msg = f"non-JSON error body: {snippet}"
-            return f"⚠ Model HTTP {http_status}: {error_msg}"
-
-        try:
-            data = json.loads(raw_body)
-            choices = data.get("choices") or []
-            if choices:
-                return choices[0]["message"]["content"]
-            error = data.get("error", {})
-            return f"⚠ Model error: {error.get('message', 'no choices returned')}"
-        except (json.JSONDecodeError, KeyError) as exc:
-            snippet = raw_body[:180]
-            return f"⚠ Parse error: {exc}. Raw response: {snippet}"
+        output = result.stdout.strip()
+        if not output:
+            return "⚠ Copilot CLI returned empty output"
+        return output
 
 
     def _main(stdscr: Any) -> int:
