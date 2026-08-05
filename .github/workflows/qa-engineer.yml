@@ -67,6 +67,7 @@ jobs:
     # Run on PRs, manual dispatch, workflow_call, or issues labeled "needs-qa"
     if: |
       github.event_name == 'pull_request' ||
+      github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'workflow_call' ||
       (github.event_name == 'schedule' && vars.QA_AUTONOMOUS_ENABLED != 'false') ||
