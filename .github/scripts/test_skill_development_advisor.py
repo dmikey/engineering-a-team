@@ -368,6 +368,19 @@ Needs clearer updates.
         self.assertEqual(target["constructive"], 1)
         self.assertAlmostEqual(target["avg_rating"], 3.5)
 
+    def test_unknown_collaborated_with_falls_back_to_cross_agent_team(self):
+        body = """## Collaboration Feedback Submission
+- **Submitted By**: Morgan (Project Manager)
+- **Anonymous**: false
+- **Collaborated With**: Unknown Agent Alias
+- **Collaboration Rating**: 4
+### Feedback
+Good collaboration overall.
+"""
+        parsed = MODULE.parse_collaboration_feedback(body)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["collaborated_with"], "Cross-Agent Team")
+
 
 class RenderMarkdownTests(unittest.TestCase):
     def _minimal_metrics(self):

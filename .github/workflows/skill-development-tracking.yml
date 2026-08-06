@@ -88,13 +88,13 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.submit_feedback == 'true' && inputs.feedback != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUBMITTING_AGENT: ${{ inputs.submitting_agent }}
+          COLLAB_WITH: ${{ inputs.collaborated_with }}
+          FEEDBACK_TEXT: ${{ inputs.feedback }}
+          ANON_INPUT: ${{ inputs.anonymous_submission }}
+          RATING_INPUT: ${{ inputs.collaboration_rating }}
         run: |
           CURRENT_DATE=$(date -u +"%Y-%m-%d")
-          SUBMITTING_AGENT="${{ inputs.submitting_agent }}"
-          COLLAB_WITH="${{ inputs.collaborated_with }}"
-          FEEDBACK_TEXT="${{ inputs.feedback }}"
-          ANON_INPUT="${{ inputs.anonymous_submission }}"
-          RATING_INPUT="${{ inputs.collaboration_rating }}"
 
           if [[ ! "$RATING_INPUT" =~ ^[1-5]$ ]]; then
             RATING_INPUT=3
@@ -116,21 +116,35 @@ jobs:
             DISPLAY_AGENT="$SUBMITTING_AGENT"
           fi
 
-          ISSUE_BODY="## Collaboration Feedback Submission
+          CURRENT_DATE="$CURRENT_DATE" \
+          DISPLAY_AGENT="$DISPLAY_AGENT" \
+          ANON_INPUT="$ANON_INPUT" \
+          COLLAB_WITH="$COLLAB_WITH" \
+          RATING_INPUT="$RATING_INPUT" \
+          FEEDBACK_TEXT="$FEEDBACK_TEXT" \
+          python3 - <<'PYEOF'
+          import os
+          import textwrap
+          from pathlib import Path
 
-          - **Submitted By**: $DISPLAY_AGENT
-          - **Anonymous**: $ANON_INPUT
-          - **Collaborated With**: $COLLAB_WITH
-          - **Collaboration Rating**: $RATING_INPUT
-          - **Submitted On**: $CURRENT_DATE
+          body = textwrap.dedent(f"""\
+          ## Collaboration Feedback Submission
+
+          - **Submitted By**: {os.environ['DISPLAY_AGENT']}
+          - **Anonymous**: {os.environ['ANON_INPUT']}
+          - **Collaborated With**: {os.environ['COLLAB_WITH']}
+          - **Collaboration Rating**: {os.environ['RATING_INPUT']}
+          - **Submitted On**: {os.environ['CURRENT_DATE']}
 
           ### Feedback
-          $FEEDBACK_TEXT
-          "
+          {os.environ['FEEDBACK_TEXT']}
+          """)
+          Path("/tmp/collaboration-feedback.md").write_text(body, encoding="utf-8")
+          PYEOF
 
           gh issue create \
             --title "🤝 Collaboration Feedback Submission — $CURRENT_DATE" \
-            --body "$ISSUE_BODY" \
+            --body-file /tmp/collaboration-feedback.md \
             --label "agent-feedback" \
             --label "collaboration-feedback"
 
@@ -183,11 +197,8 @@ jobs:
             --label "agent-feedback" \
             --limit 100 \
             --json title,body,createdAt 2>/dev/null || echo "[]")
-          {
-            echo "feedback_issues<<SD_FEEDBACK_EOF"
-            echo "$FEEDBACK_ISSUES"
-            echo "SD_FEEDBACK_EOF"
-          } >> "$GITHUB_OUTPUT"
+          FEEDBACK_ISSUES_B64=$(printf '%s' "$FEEDBACK_ISSUES" | base64 -w 0)
+          echo "feedback_issues_b64=$FEEDBACK_ISSUES_B64" >> "$GITHUB_OUTPUT"
 
           echo "Fetched $(python3 -c "import json; print(len(json.load(open('/tmp/sd-runs-all.json')).get('workflow_runs', [])))" 2>/dev/null || echo '?') runs"
 
@@ -200,8 +211,11 @@ jobs:
           WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SKILL_REMINDERS_OPT_IN: ${{ vars.SKILL_REMINDERS_OPT_IN || '{}' }}
           LATEST_INTERACTION: ${{ github.event_name == 'workflow_run' && toJson(github.event.workflow_run) || '' }}
-          COLLABORATION_FEEDBACK_SUBMISSIONS: ${{ steps.data.outputs.feedback_issues }}
+          COLLABORATION_FEEDBACK_SUBMISSIONS_B64: ${{ steps.data.outputs.feedback_issues_b64 }}
         run: |
+          COLLABORATION_FEEDBACK_SUBMISSIONS="$(printf '%s' "$COLLABORATION_FEEDBACK_SUBMISSIONS_B64" | base64 -d 2>/dev/null || echo '[]')"
+          export COLLABORATION_FEEDBACK_SUBMISSIONS
+
           # Generate full report with trend badges
           # The script computes current and prior period internally when both
           # runs files are the same (it uses PERIOD_DAYS to split the window).

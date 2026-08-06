@@ -73,6 +73,9 @@ WORKFLOW_NAME_TO_AGENT: dict[str, str] = {
     "Product Owner Agent": "Alex (Product Owner)",
     "Council Discussion": "Casey (Council Moderator)",
 }
+AGENT_NAME_LOOKUP: dict[str, str] = {
+    agent.lower(): agent for agent in AGENT_WORKFLOWS
+}
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
 
@@ -436,7 +439,10 @@ def parse_collaboration_feedback(body: str) -> dict | None:
     if anonymous:
         submitted_by = "Anonymous Agent"
 
-    if collaborated_with not in AGENT_WORKFLOWS:
+    normalized_collaborated_with = collaborated_with.lower()
+    if normalized_collaborated_with in AGENT_NAME_LOOKUP:
+        collaborated_with = AGENT_NAME_LOOKUP[normalized_collaborated_with]
+    else:
         collaborated_with = "Cross-Agent Team"
 
     return {
@@ -516,8 +522,12 @@ def aggregate_collaboration_feedback(feedback_submissions: list[dict]) -> dict:
             data["samples"].append(feedback)
 
     for data in summary.values():
-        count = data["count"] or 1
-        data["avg_rating"] = round(data["rating_total"] / count, 1)
+        count = data["count"]
+        if count == 0:
+            data["avg_rating"] = 0.0
+        else:
+            data["avg_rating"] = round(data["rating_total"] / count, 1)
+        del data["rating_total"]
 
     return {
         "total_submissions": len(feedback_submissions),
