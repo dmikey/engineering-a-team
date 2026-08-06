@@ -69,6 +69,32 @@ TRANSIENT_ERROR_MARKERS = (
     "rate limit",
 )
 
+COPILOT_CHAT_MODEL_ALIASES = {
+    "gpt-4o": "gpt-5.4",
+    "gpt-4o-mini": "gpt-5-mini",
+}
+
+COPILOT_CHAT_ALLOWED_MODELS = {
+    "claude-sonnet-4.6",
+    "claude-sonnet-4.5",
+    "claude-haiku-4.5",
+    "claude-opus-4.6",
+    "claude-opus-4.6-fast",
+    "claude-opus-4.5",
+    "claude-sonnet-4",
+    "gemini-3-pro-preview",
+    "gpt-5.4",
+    "gpt-5.3-codex",
+    "gpt-5.2-codex",
+    "gpt-5.2",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex",
+    "gpt-5.1",
+    "gpt-5.1-codex-mini",
+    "gpt-5-mini",
+    "gpt-4.1",
+}
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -87,6 +113,16 @@ def parse_ts(raw: str | None) -> datetime | None:
 def is_transient_error(text: str) -> bool:
     lowered = text.lower()
     return any(marker in lowered for marker in TRANSIENT_ERROR_MARKERS)
+
+
+def normalize_copilot_chat_model(raw_model: str | None, fallback: str = "gpt-5-mini") -> str:
+    model = (raw_model or "").strip()
+    if not model:
+        return fallback
+    normalized = COPILOT_CHAT_MODEL_ALIASES.get(model, model)
+    if normalized in COPILOT_CHAT_ALLOWED_MODELS:
+        return normalized
+    return fallback
 
 
 def run_command(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -1621,7 +1657,7 @@ def run_heartbeat_cycle(
 
 CHAT_AGENTS: dict[str, dict[str, str]] = {
     "Casey (Council)": {
-        "model": "gpt-4o-mini",
+        "model": "gpt-5.4",
         "persona": (
             "You are Casey, the Council Moderator for an autonomous AI engineering team. "
             "You facilitate multi-agent discussions, synthesise QA, PM, and PO perspectives, "
@@ -1641,7 +1677,7 @@ CHAT_AGENTS: dict[str, dict[str, str]] = {
         ),
     },
     "Morgan (PM)": {
-        "model": "gpt-4o-mini",
+        "model": "gpt-5-mini",
         "persona": (
             "You are Morgan, the Project Manager. You keep the team focused, on schedule, and "
             "aligned with business goals. You think in timelines, dependencies, and risk. "
@@ -1650,7 +1686,7 @@ CHAT_AGENTS: dict[str, dict[str, str]] = {
         ),
     },
     "Alex (PO)": {
-        "model": "gpt-4o-mini",
+        "model": "gpt-5-mini",
         "persona": (
             "You are Alex, the Product Owner. You champion the end-user, review the current product "
             "state, and identify gaps and opportunities. You think in user stories, acceptance criteria, "
@@ -2128,7 +2164,8 @@ def run_tui(
         # - HEARTBEAT_CHAT_ALLOW_ALL_TOOLS=false
         # - HEARTBEAT_CHAT_ALLOW_ALL_URLS=false
         # - HEARTBEAT_CHAT_MODEL=<model>
-        model = os.environ.get("HEARTBEAT_CHAT_MODEL", agent.get("model") or "gpt-5.3-codex")
+        requested_model = os.environ.get("HEARTBEAT_CHAT_MODEL", agent.get("model") or "gpt-5.3-codex")
+        model = normalize_copilot_chat_model(requested_model, fallback=normalize_copilot_chat_model(agent.get("model"), "gpt-5-mini"))
         allow_all_tools = os.environ.get("HEARTBEAT_CHAT_ALLOW_ALL_TOOLS", "true").lower() == "true"
         allow_all_urls = os.environ.get("HEARTBEAT_CHAT_ALLOW_ALL_URLS", "true").lower() == "true"
 

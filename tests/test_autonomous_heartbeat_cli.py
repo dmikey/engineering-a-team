@@ -90,6 +90,22 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
         self.assertEqual(env.get("GH_TOKEN"), "good-token")
         self.assertEqual(source, "GH_USER_PAT")
 
+    def test_normalize_copilot_chat_model_maps_legacy_model_names(self):
+        self.assertEqual(
+            heartbeat_runner.normalize_copilot_chat_model("gpt-4o-mini"),
+            "gpt-5-mini",
+        )
+        self.assertEqual(
+            heartbeat_runner.normalize_copilot_chat_model("gpt-4o"),
+            "gpt-5.4",
+        )
+
+    def test_normalize_copilot_chat_model_falls_back_for_unknown_models(self):
+        self.assertEqual(
+            heartbeat_runner.normalize_copilot_chat_model("not-a-real-model", fallback="gpt-5.4"),
+            "gpt-5.4",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
