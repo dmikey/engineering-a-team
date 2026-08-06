@@ -438,17 +438,74 @@ jobs:
         # Non-critical step — a failure to create the tracking issue must not
         # block the overall QA workflow run.
         continue-on-error: true
-        if: |
-          contains(steps.qa_response.outputs.response, 'CRITICAL') ||
-          (env.QA_SEVERITY_THRESHOLD != 'CRITICAL' &&
-           contains(steps.qa_response.outputs.response, 'HIGH'))
+        if: steps.ctx.outputs.pr_number != 'N/A'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           QA_RESPONSE: ${{ steps.qa_response.outputs.response }}
           PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
           PR_TITLE: ${{ steps.ctx.outputs.pr_title }}
+          QA_SEVERITY_THRESHOLD: ${{ env.QA_SEVERITY_THRESHOLD }}
           QA_COLLAB_REPOSITORIES: ${{ steps.ctx.outputs.collab_repos }}
         run: |
+          if ! python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          response = os.environ.get("QA_RESPONSE", "")
+          threshold = os.environ.get("QA_SEVERITY_THRESHOLD", "HIGH").strip().upper() or "HIGH"
+          rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+
+          if threshold not in rank:
+              threshold = "HIGH"
+
+          recommendation_match = re.search(
+              r"^\s*\*\*Recommendation\*\*:\s*\[(.*?)\]\s*$",
+              response,
+              re.MULTILINE | re.IGNORECASE,
+          )
+          if recommendation_match:
+              recommendation = recommendation_match.group(1).upper()
+          else:
+              recommendation_match = re.search(
+                  r"^\s*\*\*Recommendation\*\*:\s*(.*?)\s*$",
+                  response,
+                  re.MULTILINE | re.IGNORECASE,
+              )
+              recommendation = recommendation_match.group(1).upper() if recommendation_match else ""
+
+          if "REQUEST CHANGES" not in recommendation and "BLOCK" not in recommendation:
+              print(
+                  "Skipping QA tracking issue: recommendation does not request changes or block."
+              )
+              sys.exit(1)
+
+          risk_match = re.search(
+              r"^\s*\*\*Risk Level\*\*:\s*(?:\[(.*?)\]|(.*?))\s*$",
+              response,
+              re.MULTILINE | re.IGNORECASE,
+          )
+          risk_value = ((risk_match.group(1) or risk_match.group(2)) if risk_match else "").strip().upper()
+          if risk_value not in rank:
+              print(
+                  "Skipping QA tracking issue: unable to determine risk level from QA response."
+              )
+              sys.exit(1)
+
+          if rank[risk_value] < rank[threshold]:
+              print(
+                  f"Skipping QA tracking issue: risk level {risk_value} is below threshold {threshold}."
+              )
+              sys.exit(1)
+
+          print(
+              f"Proceeding with QA tracking issue: recommendation={recommendation}, risk={risk_value}, threshold={threshold}."
+          )
+          PY
+          then
+            exit 0
+          fi
+
           ISSUE_BODY="## 🔍 QA Finding
 
           QA Engineer agent (Quinn) flagged serious issues in PR #$PR_NUMBER.

@@ -99,6 +99,14 @@ class QaRobustnessTests(unittest.TestCase):
         self.assertIn("steps.qa_response.outputs.response", self.workflow_text)
         self.assertIn("**Recommendation**: [🔄 REQUEST CHANGES]", self.workflow_text)
 
+    def test_serious_issue_creation_uses_structured_risk_and_recommendation_checks(self):
+        self.assertIn("recommendation does not request changes or block", self.workflow_text)
+        self.assertIn(r"^\s*\*\*Recommendation\*\*:\s*(.*?)\s*$", self.workflow_text)
+        self.assertIn("unable to determine risk level from QA response", self.workflow_text)
+        self.assertIn("risk level {risk_value} is below threshold {threshold}", self.workflow_text)
+        self.assertNotIn("contains(steps.qa_response.outputs.response, 'CRITICAL')", self.workflow_text)
+        self.assertNotIn("contains(steps.qa_response.outputs.response, 'HIGH')", self.workflow_text)
+
     def test_needs_qa_issue_comment_handles_errors_gracefully(self):
         """The needs-qa issue comment step must not fail the workflow on transient API errors."""
         self.assertIn(
