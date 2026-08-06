@@ -1,0 +1,268 @@
+name: Cross-Agent Mentorship Program
+
+on:
+  schedule:
+    - cron: '0 16 * * 5'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'apply, match, progress, outcome, report, or all'
+        required: false
+        default: 'all'
+      agent_name:
+        description: 'Applying agent name'
+        required: false
+      role:
+        description: 'mentor or mentee (for apply action)'
+        required: false
+      skills_offered:
+        description: 'Comma-separated skills offered'
+        required: false
+      skills_needed:
+        description: 'Comma-separated skills needed'
+        required: false
+      goals:
+        description: 'Mentorship goals'
+        required: false
+      max_mentees:
+        description: 'Mentor capacity (default 1)'
+        required: false
+      mentor:
+        description: 'Mentor agent name (for progress/outcome)'
+        required: false
+      mentee:
+        description: 'Mentee agent name (for progress/outcome)'
+        required: false
+      progress_update:
+        description: 'Progress update text (for progress action)'
+        required: false
+      outcome_summary:
+        description: 'Outcome summary text (for outcome action)'
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+  discussions: write
+
+jobs:
+  mentorship:
+    runs-on: ubuntu-latest
+    env:
+      WORKFLOW_ACTION: ${{ inputs.action || 'all' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure mentorship labels exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create "mentorship-application" --color "1d76db" --force 2>/dev/null || true
+          gh label create "mentorship-mentor" --color "5319e7" --force 2>/dev/null || true
+          gh label create "mentorship-mentee" --color "fbca04" --force 2>/dev/null || true
+          gh label create "mentorship-relationship" --color "0e8a16" --force 2>/dev/null || true
+          gh label create "mentorship-progress" --color "0052cc" --force 2>/dev/null || true
+          gh label create "mentorship-outcome" --color "0e8a16" --force 2>/dev/null || true
+
+      - name: Create mentorship application issue
+        if: env.WORKFLOW_ACTION == 'apply' || env.WORKFLOW_ACTION == 'all'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AGENT_NAME: ${{ inputs.agent_name || '' }}
+          ROLE_INPUT: ${{ inputs.role || '' }}
+          SKILLS_OFFERED: ${{ inputs.skills_offered || '' }}
+          SKILLS_NEEDED: ${{ inputs.skills_needed || '' }}
+          GOALS: ${{ inputs.goals || '' }}
+          MAX_MENTEES: ${{ inputs.max_mentees || '1' }}
+        run: |
+          if [ -z "$AGENT_NAME" ] || [ -z "$ROLE_INPUT" ]; then
+            echo "No application payload provided; skipping apply step."
+            exit 0
+          fi
+
+          ROLE_LOWER=$(echo "$ROLE_INPUT" | tr '[:upper:]' '[:lower:]')
+          if [ "$ROLE_LOWER" != "mentor" ] && [ "$ROLE_LOWER" != "mentee" ]; then
+            echo "Role must be mentor or mentee"
+            exit 1
+          fi
+
+          TITLE="Mentorship Application: $AGENT_NAME — ${ROLE_LOWER^}"
+          BODY=$(cat <<EOF
+          ## Mentorship Application
+
+          - **Agent**: $AGENT_NAME
+          - **Role**: ${ROLE_LOWER^}
+          - **Skills Offered**: $SKILLS_OFFERED
+          - **Skills Needed**: $SKILLS_NEEDED
+          - **Goals**: $GOALS
+          - **Max Mentees**: $MAX_MENTEES
+          EOF
+          )
+
+          gh issue create \
+            --title "$TITLE" \
+            --body "$BODY" \
+            --label "mentorship-application" \
+            --label "mentorship-$ROLE_LOWER"
+
+      - name: Collect issue data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue list \
+            --state all \
+            --limit 300 \
+            --json number,title,labels,body,createdAt \
+            > /tmp/mentorship-issues.json
+
+      - name: Build skill-based matches
+        if: env.WORKFLOW_ACTION == 'match' || env.WORKFLOW_ACTION == 'all'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .github/scripts/agent_mentorship_program.py \
+            --input /tmp/mentorship-issues.json \
+            --output-format matches-json \
+            > /tmp/mentorship-matches.json
+
+          python3 - <<'PYEOF'
+          import json
+          import subprocess
+
+          with open('/tmp/mentorship-matches.json', encoding='utf-8') as fh:
+              matches = json.load(fh)
+          with open('/tmp/mentorship-issues.json', encoding='utf-8') as fh:
+              issues = json.load(fh)
+
+          existing_titles = {
+              issue.get('title', '') for issue in issues
+              if 'mentorship-relationship' in {lbl.get('name', '') for lbl in issue.get('labels', [])}
+          }
+
+          for match in matches:
+              title = f"Mentorship Relationship: {match['mentor']} -> {match['mentee']}"
+              if title in existing_titles:
+                  continue
+
+              body = (
+                  "## Mentorship Match\n\n"
+                  f"- **Mentor**: {match['mentor']}\n"
+                  f"- **Mentee**: {match['mentee']}\n"
+                  f"- **Match Score**: {match['score']:.1f}%\n"
+                  f"- **Matched Skills**: {', '.join(match.get('matched_skills', [])) or 'None'}\n"
+              )
+
+              subprocess.run(
+                  [
+                      'gh', 'issue', 'create',
+                      '--title', title,
+                      '--body', body,
+                      '--label', 'mentorship-relationship',
+                  ],
+                  check=False,
+              )
+          PYEOF
+
+      - name: Create mentorship progress update
+        if: env.WORKFLOW_ACTION == 'progress'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MENTOR: ${{ inputs.mentor || '' }}
+          MENTEE: ${{ inputs.mentee || '' }}
+          PROGRESS_UPDATE: ${{ inputs.progress_update || '' }}
+        run: |
+          if [ -z "$MENTOR" ] || [ -z "$MENTEE" ] || [ -z "$PROGRESS_UPDATE" ]; then
+            echo "Incomplete progress payload; skipping."
+            exit 0
+          fi
+
+          gh issue create \
+            --title "Mentorship Progress: $MENTOR -> $MENTEE" \
+            --body "$PROGRESS_UPDATE" \
+            --label "mentorship-progress"
+
+      - name: Create mentorship outcome update
+        if: env.WORKFLOW_ACTION == 'outcome'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MENTOR: ${{ inputs.mentor || '' }}
+          MENTEE: ${{ inputs.mentee || '' }}
+          OUTCOME_SUMMARY: ${{ inputs.outcome_summary || '' }}
+        run: |
+          if [ -z "$MENTOR" ] || [ -z "$MENTEE" ] || [ -z "$OUTCOME_SUMMARY" ]; then
+            echo "Incomplete outcome payload; skipping."
+            exit 0
+          fi
+
+          gh issue create \
+            --title "Mentorship Outcome: $MENTOR -> $MENTEE" \
+            --body "$OUTCOME_SUMMARY" \
+            --label "mentorship-outcome"
+
+      - name: Refresh issue data for report
+        if: env.WORKFLOW_ACTION == 'report' || env.WORKFLOW_ACTION == 'all' || github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue list \
+            --state all \
+            --limit 300 \
+            --json number,title,labels,body,createdAt \
+            > /tmp/mentorship-issues.json
+
+      - name: Post mentorship report
+        if: env.WORKFLOW_ACTION == 'report' || env.WORKFLOW_ACTION == 'all' || github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          DATE_UTC=$(date -u +"%Y-%m-%d")
+          export CURRENT_DATE="$DATE_UTC"
+
+          python3 .github/scripts/agent_mentorship_program.py \
+            --input /tmp/mentorship-issues.json \
+            > /tmp/mentorship-report.md
+
+          REPORT=$(cat /tmp/mentorship-report.md)
+          OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
+          REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          TITLE="🤝 Cross-Agent Mentorship Report — $DATE_UTC"
+
+          REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
+          DISCUSSION_CREATED=false
+
+          if [ -n "$REPO_ID" ]; then
+            CATEGORY_ID=$(gh api graphql \
+              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:20){nodes{id name}}}}' \
+              -f o="$OWNER" -f r="$REPO" \
+              --jq '.data.repository.discussionCategories.nodes[] | select(.name=="General") | .id' \
+              2>/dev/null || echo "")
+
+            if [ -z "$CATEGORY_ID" ]; then
+              CATEGORY_ID=$(gh api graphql \
+                -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+                -f o="$OWNER" -f r="$REPO" \
+                --jq '.data.repository.discussionCategories.nodes[0].id' \
+                2>/dev/null || echo "")
+            fi
+
+            if [ -n "$CATEGORY_ID" ]; then
+              DISCUSSION_URL=$(gh api graphql \
+                -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
+                -f ri="$REPO_ID" -f ci="$CATEGORY_ID" -f t="$TITLE" -f b="$REPORT" \
+                --jq '.data.createDiscussion.discussion.url' \
+                2>/dev/null || echo "")
+
+              if [ -n "$DISCUSSION_URL" ]; then
+                echo "✅ Mentorship report posted as Discussion: $DISCUSSION_URL"
+                DISCUSSION_CREATED=true
+              fi
+            fi
+          fi
+
+          if [ "$DISCUSSION_CREATED" = "false" ]; then
+            gh issue create --title "$TITLE" --body "$REPORT"
+            echo "✅ Mentorship report posted as Issue (Discussion fallback)"
+          fi
