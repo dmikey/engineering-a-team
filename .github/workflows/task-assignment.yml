@@ -49,7 +49,7 @@ on:
         required: false
 
 permissions:
-  actions: read
+  actions: write
   contents: read
   issues: write
   discussions: write
@@ -59,6 +59,8 @@ env:
   TA_MODEL: ${{ vars.TA_MODEL || vars.PM_MODEL || 'gpt-4o-mini' }}
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
+  TA_AUTO_DISPATCH_ENABLED: ${{ vars.TA_AUTO_DISPATCH_ENABLED || 'true' }}
+  TA_AUTO_DISPATCH_MAX: ${{ vars.TA_AUTO_DISPATCH_MAX || '3' }}
 
 jobs:
   task-assignment:
@@ -206,8 +208,10 @@ jobs:
       - name: Post assignment recommendations on issues
         if: steps.data.outputs.task == 'assign-tasks' && steps.data.outputs.issue_count != '0'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_USER_PAT || secrets.GITHUB_TOKEN }}
           RECOMMENDATIONS: ${{ steps.assign.outputs.recommendations }}
+          TA_AUTO_DISPATCH_ENABLED: ${{ env.TA_AUTO_DISPATCH_ENABLED }}
+          TA_AUTO_DISPATCH_MAX: ${{ env.TA_AUTO_DISPATCH_MAX }}
           WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           python3 - <<'PYEOF'
@@ -222,6 +226,19 @@ jobs:
               recs = []
 
           workflow_url = os.environ.get("WORKFLOW_URL", "")
+            auto_dispatch = os.environ.get("TA_AUTO_DISPATCH_ENABLED", "true").lower() == "true"
+            try:
+              auto_dispatch_max = int(os.environ.get("TA_AUTO_DISPATCH_MAX", "3"))
+            except ValueError:
+              auto_dispatch_max = 3
+            dispatch_count = 0
+
+            # Map recommendation output to Manual Agent Runner inputs.
+            dispatch_map = {
+              "Quinn (QA Engineer)": {"agent": "qa", "task": ""},
+              "Morgan (Project Manager)": {"agent": "pm", "task": "groom-backlog"},
+              "Alex (Product Owner)": {"agent": "po", "task": "suggest-features"},
+            }
 
           for r in recs:
               issue_num = r.get("issue_number")
@@ -235,6 +252,7 @@ jobs:
 
               body = (
                   f"🎯 **Task Assignment Recommendation** (confidence: {confidence})\n\n"
+                  f"@copilot Please take point on this issue with **{agent}** context and report back with a concrete plan.\n\n"
                   f"Based on real-time availability and performance metrics, "
                   f"**{agent}** (score: {score:.0f}/100) is recommended for this issue.\n\n"
                   f"To dispatch: `{cmd}`\n\n"
@@ -250,6 +268,40 @@ jobs:
                   print(f"✅ Commented on issue #{issue_num} → {agent}")
               else:
                   print(f"⚠️ Could not comment on issue #{issue_num}: {result.stderr.strip()}")
+
+                if not auto_dispatch or dispatch_count >= auto_dispatch_max:
+                  continue
+
+                target = dispatch_map.get(agent)
+                if not target:
+                  continue
+
+                dispatch_cmd = [
+                  "gh",
+                  "workflow",
+                  "run",
+                  "manual-agent-runner.yml",
+                  "-f",
+                  f"agent={target['agent']}",
+                  "-f",
+                  f"task={target['task']}",
+                  "-f",
+                  f"issue_number={issue_num}",
+                  "-f",
+                  (
+                    "extra_context="
+                    f"Auto-dispatched by Task Assignment from issue #{issue_num}. "
+                    f"Confidence={confidence}; availability_score={score:.1f}."
+                  ),
+                ]
+
+                dispatched = subprocess.run(dispatch_cmd, capture_output=True, text=True)
+                if dispatched.returncode == 0:
+                  dispatch_count += 1
+                  print(f"✅ Auto-dispatched {target['agent']} for issue #{issue_num}")
+                else:
+                  err = dispatched.stderr.strip() or dispatched.stdout.strip()
+                  print(f"⚠️ Auto-dispatch failed for issue #{issue_num}: {err}")
           PYEOF
 
       # ── Compose final dashboard ───────────────────────────────────────────
