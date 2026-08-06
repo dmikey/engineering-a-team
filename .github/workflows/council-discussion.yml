@@ -321,6 +321,17 @@ jobs:
             echo "ROLE_ADJUSTMENT_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Initialize real-time collaboration log
+        if: steps.resolve.outputs.mode != 'role-adjustment'
+        run: |
+          {
+            echo "# Real-Time Collaboration Log"
+            echo ""
+            echo "- Topic: ${{ steps.resolve.outputs.topic }}"
+            echo "- Started: ${{ steps.resolve.outputs.current_date }}"
+            echo ""
+          } > /tmp/council-collaboration-log.md
+
       - name: Quinn — QA perspective
         if: steps.resolve.outputs.mode != 'role-adjustment'
         id: qa-perspective
@@ -349,7 +360,36 @@ jobs:
           user-prompt: |
             Council topic: ${{ steps.resolve.outputs.topic }}
 
+            New real-time messages available: none yet.
+
             ${{ steps.resolve.outputs.base_context }}
+
+      - name: Log and notify — Quinn message
+        if: steps.resolve.outputs.mode != 'role-adjustment'
+        id: log-qa
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NUMBER: ${{ steps.resolve.outputs.ref_number }}
+          QA_RESP: ${{ steps.qa-perspective.outputs.response }}
+        run: |
+          {
+            echo "## $(date -u +'%Y-%m-%dT%H:%M:%SZ') — Quinn (QA Engineer)"
+            echo ""
+            echo "$QA_RESP"
+            echo ""
+          } >> /tmp/council-collaboration-log.md
+
+          {
+            echo "current_log<<COUNCIL_LOG_EOF"
+            cat /tmp/council-collaboration-log.md
+            echo "COUNCIL_LOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ -n "$REF_NUMBER" ] && [ "${{ github.event_name }}" = "issues" ]; then
+            gh issue comment "$REF_NUMBER" --body "🔔 New council message from **Quinn (QA Engineer)** has been logged and shared with Morgan and Alex."
+          elif [ -n "$REF_NUMBER" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+            gh pr comment "$REF_NUMBER" --body "🔔 New council message from **Quinn (QA Engineer)** has been logged and shared with Morgan and Alex."
+          fi
 
       - name: Morgan — PM perspective
         if: steps.resolve.outputs.mode != 'role-adjustment'
@@ -379,7 +419,37 @@ jobs:
           user-prompt: |
             Council topic: ${{ steps.resolve.outputs.topic }}
 
+            New real-time messages available from council participants:
+            ${{ steps.log-qa.outputs.current_log }}
+
             ${{ steps.resolve.outputs.base_context }}
+
+      - name: Log and notify — Morgan message
+        if: steps.resolve.outputs.mode != 'role-adjustment'
+        id: log-pm
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NUMBER: ${{ steps.resolve.outputs.ref_number }}
+          PM_RESP: ${{ steps.pm-perspective.outputs.response }}
+        run: |
+          {
+            echo "## $(date -u +'%Y-%m-%dT%H:%M:%SZ') — Morgan (Project Manager)"
+            echo ""
+            echo "$PM_RESP"
+            echo ""
+          } >> /tmp/council-collaboration-log.md
+
+          {
+            echo "current_log<<COUNCIL_LOG_EOF"
+            cat /tmp/council-collaboration-log.md
+            echo "COUNCIL_LOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ -n "$REF_NUMBER" ] && [ "${{ github.event_name }}" = "issues" ]; then
+            gh issue comment "$REF_NUMBER" --body "🔔 New council message from **Morgan (Project Manager)** has been logged and shared with Quinn and Alex."
+          elif [ -n "$REF_NUMBER" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+            gh pr comment "$REF_NUMBER" --body "🔔 New council message from **Morgan (Project Manager)** has been logged and shared with Quinn and Alex."
+          fi
 
       - name: Alex — PO perspective
         if: steps.resolve.outputs.mode != 'role-adjustment'
@@ -409,7 +479,37 @@ jobs:
           user-prompt: |
             Council topic: ${{ steps.resolve.outputs.topic }}
 
+            New real-time messages available from council participants:
+            ${{ steps.log-pm.outputs.current_log }}
+
             ${{ steps.resolve.outputs.base_context }}
+
+      - name: Log and notify — Alex message
+        if: steps.resolve.outputs.mode != 'role-adjustment'
+        id: log-po
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NUMBER: ${{ steps.resolve.outputs.ref_number }}
+          PO_RESP: ${{ steps.po-perspective.outputs.response }}
+        run: |
+          {
+            echo "## $(date -u +'%Y-%m-%dT%H:%M:%SZ') — Alex (Product Owner)"
+            echo ""
+            echo "$PO_RESP"
+            echo ""
+          } >> /tmp/council-collaboration-log.md
+
+          {
+            echo "current_log<<COUNCIL_LOG_EOF"
+            cat /tmp/council-collaboration-log.md
+            echo "COUNCIL_LOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ -n "$REF_NUMBER" ] && [ "${{ github.event_name }}" = "issues" ]; then
+            gh issue comment "$REF_NUMBER" --body "🔔 New council message from **Alex (Product Owner)** has been logged and shared with Quinn and Morgan."
+          elif [ -n "$REF_NUMBER" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+            gh pr comment "$REF_NUMBER" --body "🔔 New council message from **Alex (Product Owner)** has been logged and shared with Quinn and Morgan."
+          fi
 
       # ══════════════════════════════════════════════════════════════════════
       # Round 2 — Council Moderator synthesises
@@ -495,6 +595,7 @@ jobs:
           QA_RESP: ${{ steps.qa-perspective.outputs.response }}
           PM_RESP: ${{ steps.pm-perspective.outputs.response }}
           PO_RESP: ${{ steps.po-perspective.outputs.response }}
+          REALTIME_LOG: ${{ steps.log-po.outputs.current_log }}
           MODERATOR_RESP: ${{ steps.moderator.outputs.response }}
           TOPIC: ${{ steps.resolve.outputs.topic }}
           DATE: ${{ steps.resolve.outputs.current_date }}
@@ -519,6 +620,11 @@ jobs:
           $PO_RESP
 
           </details>
+
+          ---
+          ## Real-Time Message Log
+
+          $REALTIME_LOG
 
           ---
           *🤖 Council facilitated by Casey (Council Moderator) · Date: $DATE · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
