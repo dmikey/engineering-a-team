@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -68,6 +69,26 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
 
             self.assertTrue(str(state_file.resolve()).startswith(str(REPO_ROOT.resolve())))
             self.assertTrue(str(overview_file.resolve()).startswith(str(REPO_ROOT.resolve())))
+
+    def test_resolve_gh_command_env_falls_back_when_explicit_token_is_invalid(self):
+        invalid = subprocess.CompletedProcess(["gh", "api", "user"], 1, "", "HTTP 401: Bad credentials")
+        with mock.patch.dict(os.environ, {"GH_USER_PAT": "bad-token"}, clear=False):
+            with mock.patch.object(heartbeat_runner.subprocess, "run", return_value=invalid):
+                env, source = heartbeat_runner.resolve_gh_command_env()
+
+        self.assertIsNone(env)
+        self.assertEqual(source, "gh-auth")
+
+    def test_resolve_gh_command_env_uses_explicit_token_when_valid(self):
+        valid = subprocess.CompletedProcess(["gh", "api", "user"], 0, '{"login":"octocat"}', "")
+        with mock.patch.dict(os.environ, {"GH_USER_PAT": "good-token"}, clear=False):
+            with mock.patch.object(heartbeat_runner.subprocess, "run", return_value=valid):
+                env, source = heartbeat_runner.resolve_gh_command_env()
+
+        self.assertIsNotNone(env)
+        assert env is not None
+        self.assertEqual(env.get("GH_TOKEN"), "good-token")
+        self.assertEqual(source, "GH_USER_PAT")
 
 
 if __name__ == "__main__":

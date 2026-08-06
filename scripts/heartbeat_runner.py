@@ -195,12 +195,28 @@ def resolve_models_token() -> tuple[str | None, str]:
     return None, "local-unconfigured"
 
 
+def _explicit_gh_token_is_unauthorized(env: dict[str, str]) -> bool:
+    result = subprocess.run(
+        ["gh", "api", "user"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if result.returncode == 0:
+        return False
+
+    detail = (result.stderr.strip() or result.stdout.strip() or "").lower()
+    return "bad credentials" in detail or "401" in detail or "unauthorized" in detail
+
+
 def resolve_gh_command_env() -> tuple[dict[str, str] | None, str]:
     for env_name in ("HEARTBEAT_GH_TOKEN", "GH_USER_PAT"):
         value = os.environ.get(env_name, "").strip()
         if value:
             env = os.environ.copy()
             env["GH_TOKEN"] = value
+            if _explicit_gh_token_is_unauthorized(env):
+                continue
             return env, env_name
     return None, "gh-auth"
 
