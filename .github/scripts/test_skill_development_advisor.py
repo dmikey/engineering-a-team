@@ -290,6 +290,85 @@ class LoadLatestInteractionTests(unittest.TestCase):
         self.assertEqual(result["agent"], "Alex (Product Owner)")
 
 
+class CollaborationFeedbackTests(unittest.TestCase):
+    def test_parse_collaboration_feedback_anonymous_submission(self):
+        body = """## Collaboration Feedback Submission
+
+- **Submitted By**: Anonymous Agent
+- **Anonymous**: true
+- **Collaborated With**: Quinn (QA Engineer)
+- **Collaboration Rating**: 4
+- **Submitted On**: 2026-07-20
+
+### Feedback
+Strong collaboration during handoff.
+"""
+        parsed = MODULE.parse_collaboration_feedback(body)
+        self.assertIsNotNone(parsed)
+        self.assertTrue(parsed["anonymous"])
+        self.assertEqual(parsed["submitted_by"], "Anonymous Agent")
+        self.assertEqual(parsed["collaborated_with"], "Quinn (QA Engineer)")
+        self.assertEqual(parsed["rating"], 4)
+
+    def test_load_collaboration_feedback_filters_by_period(self):
+        since = datetime(2026, 7, 10, tzinfo=timezone.utc)
+        payload = json.dumps(
+            [
+                {
+                    "createdAt": "2026-07-11T10:00:00Z",
+                    "body": """## Collaboration Feedback Submission
+- **Submitted By**: Morgan (Project Manager)
+- **Anonymous**: false
+- **Collaborated With**: Quinn (QA Engineer)
+- **Collaboration Rating**: 5
+### Feedback
+Excellent response times.
+""",
+                },
+                {
+                    "createdAt": "2026-07-01T10:00:00Z",
+                    "body": """## Collaboration Feedback Submission
+- **Submitted By**: Alex (Product Owner)
+- **Anonymous**: false
+- **Collaborated With**: Quinn (QA Engineer)
+- **Collaboration Rating**: 2
+### Feedback
+Needs clearer updates.
+""",
+                },
+            ]
+        )
+        feedback = MODULE.load_collaboration_feedback(payload, since)
+        self.assertEqual(len(feedback), 1)
+        self.assertEqual(feedback[0]["rating"], 5)
+
+    def test_aggregate_collaboration_feedback_builds_summary(self):
+        summary = MODULE.aggregate_collaboration_feedback(
+            [
+                {
+                    "submitted_by": "Anonymous Agent",
+                    "anonymous": True,
+                    "collaborated_with": "Quinn (QA Engineer)",
+                    "rating": 5,
+                    "feedback": "Great communication.",
+                },
+                {
+                    "submitted_by": "Morgan (Project Manager)",
+                    "anonymous": False,
+                    "collaborated_with": "Quinn (QA Engineer)",
+                    "rating": 2,
+                    "feedback": "Need clearer timelines.",
+                },
+            ]
+        )
+        self.assertEqual(summary["total_submissions"], 2)
+        self.assertEqual(summary["anonymous_submissions"], 1)
+        target = summary["by_target"]["Quinn (QA Engineer)"]
+        self.assertEqual(target["positive"], 1)
+        self.assertEqual(target["constructive"], 1)
+        self.assertAlmostEqual(target["avg_rating"], 3.5)
+
+
 class RenderMarkdownTests(unittest.TestCase):
     def _minimal_metrics(self):
         since = datetime(2026, 7, 1, tzinfo=timezone.utc)
@@ -397,6 +476,34 @@ class RenderMarkdownTests(unittest.TestCase):
         self.assertIn("Project Manager Agent", output)
         self.assertIn("View workflow run", output)
         self.assertIn("Aggregated Feedback", output)
+
+    def test_collaboration_feedback_summary_rendered(self):
+        metrics = self._minimal_metrics()
+        summary = {
+            "total_submissions": 1,
+            "anonymous_submissions": 1,
+            "by_target": {
+                "Quinn (QA Engineer)": {
+                    "count": 1,
+                    "avg_rating": 4.0,
+                    "positive": 1,
+                    "neutral": 0,
+                    "constructive": 0,
+                    "samples": ["Great async collaboration."],
+                }
+            },
+        }
+        output = MODULE.render_markdown(
+            metrics,
+            {},
+            "2026-07-20",
+            30,
+            "",
+            collaboration_feedback_summary=summary,
+        )
+        self.assertIn("Collaboration Feedback Summary", output)
+        self.assertIn("Anonymous submissions", output)
+        self.assertIn("Great async collaboration.", output)
 
 
 class CollectTrendTests(unittest.TestCase):

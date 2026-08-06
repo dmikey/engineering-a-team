@@ -38,6 +38,30 @@ on:
         description: 'Analysis window in days'
         required: false
         default: '30'
+      submit_feedback:
+        description: 'Set to true to submit collaboration feedback before generating the report'
+        required: false
+        default: 'false'
+      submitting_agent:
+        description: 'Agent submitting collaboration feedback'
+        required: false
+        default: ''
+      collaborated_with:
+        description: 'Agent being reviewed for collaboration'
+        required: false
+        default: ''
+      collaboration_rating:
+        description: 'Collaboration rating from 1 (needs improvement) to 5 (excellent)'
+        required: false
+        default: '3'
+      feedback:
+        description: 'Collaboration feedback details'
+        required: false
+        default: ''
+      anonymous_submission:
+        description: 'Set to true to hide submitting agent identity in reports'
+        required: false
+        default: 'true'
 
 permissions:
   actions: read
@@ -59,6 +83,56 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Capture collaboration feedback submission
+        if: github.event_name == 'workflow_dispatch' && inputs.submit_feedback == 'true' && inputs.feedback != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CURRENT_DATE=$(date -u +"%Y-%m-%d")
+          SUBMITTING_AGENT="${{ inputs.submitting_agent }}"
+          COLLAB_WITH="${{ inputs.collaborated_with }}"
+          FEEDBACK_TEXT="${{ inputs.feedback }}"
+          ANON_INPUT="${{ inputs.anonymous_submission }}"
+          RATING_INPUT="${{ inputs.collaboration_rating }}"
+
+          if [[ ! "$RATING_INPUT" =~ ^[1-5]$ ]]; then
+            RATING_INPUT=3
+          fi
+
+          if [ -z "$SUBMITTING_AGENT" ]; then
+            SUBMITTING_AGENT="Unspecified Agent"
+          fi
+          if [ -z "$COLLAB_WITH" ]; then
+            COLLAB_WITH="Cross-Agent Team"
+          fi
+
+          gh label create "agent-feedback" --color "5319e7" --force 2>/dev/null || true
+          gh label create "collaboration-feedback" --color "1d76db" --force 2>/dev/null || true
+
+          if [ "$ANON_INPUT" = "true" ]; then
+            DISPLAY_AGENT="Anonymous Agent"
+          else
+            DISPLAY_AGENT="$SUBMITTING_AGENT"
+          fi
+
+          ISSUE_BODY="## Collaboration Feedback Submission
+
+          - **Submitted By**: $DISPLAY_AGENT
+          - **Anonymous**: $ANON_INPUT
+          - **Collaborated With**: $COLLAB_WITH
+          - **Collaboration Rating**: $RATING_INPUT
+          - **Submitted On**: $CURRENT_DATE
+
+          ### Feedback
+          $FEEDBACK_TEXT
+          "
+
+          gh issue create \
+            --title "🤝 Collaboration Feedback Submission — $CURRENT_DATE" \
+            --body "$ISSUE_BODY" \
+            --label "agent-feedback" \
+            --label "collaboration-feedback"
 
       # ── Gather current and prior-period workflow run data ─────────────────
       - name: Gather workflow run data
@@ -104,6 +178,17 @@ jobs:
               json.dump({"workflow_runs": combined}, f)
           PYEOF
 
+          FEEDBACK_ISSUES=$(gh issue list \
+            --state all \
+            --label "agent-feedback" \
+            --limit 100 \
+            --json title,body,createdAt 2>/dev/null || echo "[]")
+          {
+            echo "feedback_issues<<SD_FEEDBACK_EOF"
+            echo "$FEEDBACK_ISSUES"
+            echo "SD_FEEDBACK_EOF"
+          } >> "$GITHUB_OUTPUT"
+
           echo "Fetched $(python3 -c "import json; print(len(json.load(open('/tmp/sd-runs-all.json')).get('workflow_runs', [])))" 2>/dev/null || echo '?') runs"
 
       # ── Generate skill development report with trend data ─────────────────
@@ -115,6 +200,7 @@ jobs:
           WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SKILL_REMINDERS_OPT_IN: ${{ vars.SKILL_REMINDERS_OPT_IN || '{}' }}
           LATEST_INTERACTION: ${{ github.event_name == 'workflow_run' && toJson(github.event.workflow_run) || '' }}
+          COLLABORATION_FEEDBACK_SUBMISSIONS: ${{ steps.data.outputs.feedback_issues }}
         run: |
           # Generate full report with trend badges
           # The script computes current and prior period internally when both
