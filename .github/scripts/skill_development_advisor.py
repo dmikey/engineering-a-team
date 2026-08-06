@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from statistics import mean
 
@@ -71,6 +72,9 @@ WORKFLOW_NAME_TO_AGENT: dict[str, str] = {
     "Project Manager Agent": "Morgan (Project Manager)",
     "Product Owner Agent": "Alex (Product Owner)",
     "Council Discussion": "Casey (Council Moderator)",
+}
+AGENT_NAME_LOOKUP: dict[str, str] = {
+    agent.lower(): agent for agent in AGENT_WORKFLOWS
 }
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
@@ -399,6 +403,139 @@ def load_latest_interaction(raw: str) -> dict | None:
     }
 
 
+def _extract_feedback_field(body: str, field: str) -> str:
+    match = re.search(rf"- \*\*{re.escape(field)}\*\*:\s*(.+)", body)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def parse_collaboration_feedback(body: str) -> dict | None:
+    """Parse a collaboration feedback issue body into a normalized object."""
+    if not body:
+        return None
+
+    submitted_by = _extract_feedback_field(body, "Submitted By")
+    anonymous_raw = _extract_feedback_field(body, "Anonymous")
+    collaborated_with = _extract_feedback_field(body, "Collaborated With")
+    rating_raw = _extract_feedback_field(body, "Collaboration Rating")
+
+    feedback_match = re.search(r"### Feedback\s*(.*?)(?:\n### |\Z)", body, re.DOTALL)
+    feedback = feedback_match.group(1).strip() if feedback_match else ""
+    feedback = " ".join(feedback.split())
+    if len(feedback) > 280:
+        feedback = feedback[:277].rstrip() + "..."
+
+    if not feedback:
+        return None
+
+    try:
+        rating = int(rating_raw)
+    except (TypeError, ValueError):
+        rating = 3
+    rating = min(max(rating, 1), 5)
+
+    anonymous = anonymous_raw.lower() in {"true", "yes", "1"}
+    if anonymous:
+        submitted_by = "Anonymous Agent"
+
+    normalized_collaborated_with = collaborated_with.lower()
+    if normalized_collaborated_with in AGENT_NAME_LOOKUP:
+        collaborated_with = AGENT_NAME_LOOKUP[normalized_collaborated_with]
+    else:
+        collaborated_with = "Cross-Agent Team"
+
+    return {
+        "submitted_by": submitted_by or "Unknown Agent",
+        "anonymous": anonymous,
+        "collaborated_with": collaborated_with,
+        "rating": rating,
+        "feedback": feedback,
+    }
+
+
+def load_collaboration_feedback(raw: str, since: datetime) -> list[dict]:
+    """Parse and filter collaboration feedback issue payloads by analysis period."""
+    if not raw:
+        return []
+    try:
+        issues = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(issues, list):
+        return []
+
+    feedback_submissions: list[dict] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        created_raw = issue.get("createdAt") or issue.get("created_at")
+        if not created_raw:
+            continue
+        try:
+            created_at = parse_ts(str(created_raw))
+        except ValueError:
+            continue
+        if created_at < since:
+            continue
+
+        parsed = parse_collaboration_feedback(str(issue.get("body") or ""))
+        if not parsed:
+            continue
+        feedback_submissions.append(parsed)
+
+    return feedback_submissions
+
+
+def aggregate_collaboration_feedback(feedback_submissions: list[dict]) -> dict:
+    """Aggregate feedback submissions into report-ready summary data."""
+    summary: dict[str, dict] = {}
+    anonymous_count = 0
+
+    for submission in feedback_submissions:
+        target = submission["collaborated_with"]
+        rating = int(submission["rating"])
+        feedback = submission["feedback"]
+        if submission["anonymous"]:
+            anonymous_count += 1
+
+        if target not in summary:
+            summary[target] = {
+                "count": 0,
+                "rating_total": 0,
+                "positive": 0,
+                "neutral": 0,
+                "constructive": 0,
+                "samples": [],
+            }
+
+        data = summary[target]
+        data["count"] += 1
+        data["rating_total"] += rating
+        if rating >= 4:
+            data["positive"] += 1
+        elif rating == 3:
+            data["neutral"] += 1
+        else:
+            data["constructive"] += 1
+        if len(data["samples"]) < 2:
+            data["samples"].append(feedback)
+
+    for data in summary.values():
+        count = data["count"]
+        if count == 0:
+            data["avg_rating"] = 0.0
+        else:
+            data["avg_rating"] = round(data["rating_total"] / count, 1)
+        del data["rating_total"]
+
+    return {
+        "total_submissions": len(feedback_submissions),
+        "anonymous_submissions": anonymous_count,
+        "by_target": summary,
+    }
+
+
 # ── Markdown rendering ────────────────────────────────────────────────────────
 
 def render_markdown(
@@ -409,6 +546,7 @@ def render_markdown(
     workflow_url: str,
     trend: dict[str, dict] | None = None,
     latest_interaction: dict | None = None,
+    collaboration_feedback_summary: dict | None = None,
 ) -> str:
     lines = [
         f"# 🤝 Cross-Agent Feedback & Skill Development Report — {current_date}",
@@ -444,6 +582,27 @@ def render_markdown(
             "---",
             "",
         ]
+
+    if collaboration_feedback_summary and collaboration_feedback_summary.get("total_submissions", 0) > 0:
+        lines += [
+            "## Collaboration Feedback Summary",
+            "",
+            f"- Total submissions: **{collaboration_feedback_summary['total_submissions']}**",
+            f"- Anonymous submissions: **{collaboration_feedback_summary['anonymous_submissions']}**",
+            "",
+        ]
+        for target, data in collaboration_feedback_summary.get("by_target", {}).items():
+            lines += [
+                (
+                    f"- **{target}**: {data['count']} submission(s) · "
+                    f"avg rating {data['avg_rating']}/5 · "
+                    f"{data['positive']} positive / {data['neutral']} neutral / "
+                    f"{data['constructive']} constructive"
+                )
+            ]
+            for sample in data.get("samples", []):
+                lines.append(f'  - "{sample}"')
+        lines += ["", "---", ""]
 
     for agent, data in metrics.items():
         skills = AGENT_SKILLS.get(agent, [])
@@ -540,6 +699,7 @@ def main() -> None:
     workflow_url = os.environ.get("WORKFLOW_URL", "")
     reminders_raw = os.environ.get("SKILL_REMINDERS_OPT_IN", "")
     latest_interaction_raw = os.environ.get("LATEST_INTERACTION", "")
+    collaboration_feedback_raw = os.environ.get("COLLABORATION_FEEDBACK_SUBMISSIONS", "")
 
     with open(args.input, encoding="utf-8") as fh:
         payload = json.load(fh)
@@ -566,6 +726,8 @@ def main() -> None:
     else:
         reminders = load_reminders_opt_in(reminders_raw)
         latest_interaction = load_latest_interaction(latest_interaction_raw)
+        collaboration_feedback = load_collaboration_feedback(collaboration_feedback_raw, since)
+        collaboration_feedback_summary = aggregate_collaboration_feedback(collaboration_feedback)
         print(
             render_markdown(
                 metrics,
@@ -575,6 +737,7 @@ def main() -> None:
                 workflow_url,
                 trend,
                 latest_interaction=latest_interaction,
+                collaboration_feedback_summary=collaboration_feedback_summary,
             )
         )
 

@@ -743,6 +743,13 @@ jobs:
             exit 1
           fi
 
+          FEEDBACK_SUBMISSIONS=$(gh issue list \
+            --state all \
+            --label "agent-feedback" \
+            --limit 100 \
+            --json title,body,createdAt 2>/dev/null || echo "[]")
+          export COLLABORATION_FEEDBACK_SUBMISSIONS="$FEEDBACK_SUBMISSIONS"
+
           python3 .github/scripts/skill_development_advisor.py --input /tmp/agent-runs.json > /tmp/skill-development.md
 
           REPORT=$(cat /tmp/skill-development.md)

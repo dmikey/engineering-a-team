@@ -237,14 +237,17 @@ duration. Each completed agent interaction can be captured as a feedback
 submission, aggregated into a shared report, and rolled up into the
 weekly summary. Respects per-agent opt-in preferences for reminder
 notifications stored in the `SKILL_REMINDERS_OPT_IN` repository
-variable.
+variable. Supports collaboration feedback submissions through labelled
+issues, including anonymous submissions, and aggregates those signals
+in the report.
 
 **Inputs**: Workflow runs JSON (last N days), `SKILL_REMINDERS_OPT_IN`
-repository variable (JSON opt-in map)  
+repository variable (JSON opt-in map), labelled `agent-feedback` issues  
 **Outputs**: Markdown cross-agent feedback and skill development report
 posted as a Discussion or Issue fallback  
 **GitHub APIs**: `GET /repos/{owner}/{repo}/actions/runs`,
-GraphQL `createDiscussion`, `POST /repos/{owner}/{repo}/issues`  
+`GET /repos/{owner}/{repo}/issues`, GraphQL `createDiscussion`,
+`POST /repos/{owner}/{repo}/issues`  
 **Used by**: Project Manager
 
 ---
