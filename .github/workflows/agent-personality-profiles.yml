@@ -58,20 +58,29 @@ jobs:
             exit 0
           fi
 
-          TITLE="Agent Personality Profile: $AGENT_NAME"
-          BODY=$(cat <<EOF
-          ## Agent Personality Profile
-
-          **Agent**: $AGENT_NAME
-          **Traits**: $TRAITS
-          **Strengths**: $STRENGTHS
-          **Working Style**: $WORKING_STYLE
-          EOF
+          python3 - <<'PYEOF'
+          import os, pathlib
+          agent = os.environ["AGENT_NAME"]
+          traits = os.environ.get("TRAITS", "")
+          strengths = os.environ.get("STRENGTHS", "")
+          working_style = os.environ.get("WORKING_STYLE", "")
+          body = (
+              "## Agent Personality Profile\n\n"
+              f"**Agent**: {agent}\n"
+              f"**Traits**: {traits}\n"
+              f"**Strengths**: {strengths}\n"
+              f"**Working Style**: {working_style}\n"
           )
+          pathlib.Path("/tmp/profile-body.md").write_text(body, encoding="utf-8")
+          pathlib.Path("/tmp/profile-title.txt").write_text(
+              f"Agent Personality Profile: {agent}", encoding="utf-8"
+          )
+          PYEOF
 
+          TITLE=$(cat /tmp/profile-title.txt)
           gh issue create \
             --title "$TITLE" \
-            --body "$BODY" \
+            --body-file /tmp/profile-body.md \
             --label "personality-profile"
 
       - name: Record personality profile update
@@ -89,20 +98,31 @@ jobs:
           fi
 
           DATE_UTC=$(date -u +"%Y-%m-%d")
-          TITLE="Agent Personality Profile Update: $AGENT_NAME"
-          BODY=$(cat <<EOF
-          ## Profile Update — $DATE_UTC
-
-          **Agent**: $AGENT_NAME
-          **Traits**: $TRAITS
-          **Strengths**: $STRENGTHS
-          **Working Style**: $WORKING_STYLE
-          EOF
+          export DATE_UTC
+          python3 - <<'PYEOF'
+          import os, pathlib
+          agent = os.environ["AGENT_NAME"]
+          traits = os.environ.get("TRAITS", "")
+          strengths = os.environ.get("STRENGTHS", "")
+          working_style = os.environ.get("WORKING_STYLE", "")
+          date_utc = os.environ.get("DATE_UTC", "")
+          body = (
+              f"## Profile Update — {date_utc}\n\n"
+              f"**Agent**: {agent}\n"
+              f"**Traits**: {traits}\n"
+              f"**Strengths**: {strengths}\n"
+              f"**Working Style**: {working_style}\n"
           )
+          pathlib.Path("/tmp/update-body.md").write_text(body, encoding="utf-8")
+          pathlib.Path("/tmp/update-title.txt").write_text(
+              f"Agent Personality Profile Update: {agent}", encoding="utf-8"
+          )
+          PYEOF
 
+          TITLE=$(cat /tmp/update-title.txt)
           gh issue create \
             --title "$TITLE" \
-            --body "$BODY" \
+            --body-file /tmp/update-body.md \
             --label "personality-profile-update"
 
       - name: Collect profile issue data

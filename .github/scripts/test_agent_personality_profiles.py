@@ -38,7 +38,14 @@ class LoadProfilesTests(unittest.TestCase):
 
     def test_valid_traits_accepted(self):
         for trait in MODULE.VALID_TRAITS:
-            self.assertIn(trait, MODULE.VALID_TRAITS)
+            issues = [
+                _issue(
+                    f"Agent Personality Profile: Test Agent ({trait})",
+                    body=_profile_body(traits=trait),
+                )
+            ]
+            profiles = MODULE.load_profiles(issues)
+            self.assertIn(trait, profiles[f"Test Agent ({trait})"]["traits"])
 
     def test_profile_issue_overrides_default(self):
         issues = [

@@ -108,8 +108,12 @@ def load_profiles(issues: list[dict]) -> dict[str, dict]:
             "last_update": None,
         }
 
-    # Apply profile issues (latest wins per agent)
-    for issue in issues:
+    # Apply profile issues (latest wins per agent — sort by createdAt ascending)
+    profile_issues = sorted(
+        (i for i in issues if _parse_profile_title(i.get("title", "")) is not None),
+        key=lambda i: i.get("createdAt", ""),
+    )
+    for issue in profile_issues:
         title = issue.get("title", "")
         body = issue.get("body", "") or ""
         created_at = issue.get("createdAt", "")
@@ -134,7 +138,11 @@ def load_profiles(issues: list[dict]) -> dict[str, dict]:
         }
 
     # Apply update issues (increment update counter, potentially patch traits)
-    for issue in issues:
+    update_issues = sorted(
+        (i for i in issues if _parse_update_title(i.get("title", "")) is not None),
+        key=lambda i: i.get("createdAt", ""),
+    )
+    for issue in update_issues:
         title = issue.get("title", "")
         body = issue.get("body", "") or ""
         created_at = issue.get("createdAt", "")
