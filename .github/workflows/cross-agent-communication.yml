@@ -380,14 +380,14 @@ jobs:
 
               subprocess.run(
                   ["gh", "issue", "comment", str(number), "--body", comment],
-                  check=False,
+                  check=True,
               )
 
               # Add comms-pending-human if not already present.
               if "comms-pending-human" not in labels:
                   subprocess.run(
                       ["gh", "issue", "edit", str(number), "--add-label", "comms-pending-human"],
-                      check=False,
+                      check=True,
                   )
               print(f"  Advanced issue #{number}")
           PYEOF
