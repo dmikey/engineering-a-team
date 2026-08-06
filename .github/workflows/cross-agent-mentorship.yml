@@ -216,7 +216,6 @@ jobs:
         if: env.WORKFLOW_ACTION == 'report' || env.WORKFLOW_ACTION == 'all' || github.event_name == 'schedule'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CURRENT_DATE: ${{ github.event.repository.updated_at }}
           WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           DATE_UTC=$(date -u +"%Y-%m-%d")
@@ -264,7 +263,6 @@ jobs:
           fi
 
           if [ "$DISCUSSION_CREATED" = "false" ]; then
-            gh issue create --title "$TITLE" --body "$REPORT" 2>/dev/null || \
             gh issue create --title "$TITLE" --body "$REPORT"
             echo "✅ Mentorship report posted as Issue (Discussion fallback)"
           fi
