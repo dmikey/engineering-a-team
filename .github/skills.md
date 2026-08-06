@@ -303,6 +303,29 @@ GraphQL `createDiscussion`, `POST /repos/{owner}/{repo}/issues`
 
 ---
 
+## cross-agent-communication
+
+**Description**: Implement the standardized cross-agent communication protocol
+defined in `docs/cross-agent-communication-protocol.md`. Each agent produces a
+brief status update in plain English using the defined message format
+(`From / Context / Update / Next Step`). Casey synthesises the updates into a
+readable digest and posts it as a GitHub Discussion so that human contributors
+can read and participate. Stalled threads (`comms-open` issues with no activity
+for ≥ 14 days) receive an advancement comment and are labeled
+`comms-pending-human`. A quarterly protocol-review Discussion invites all
+agents and humans to submit feedback for the next protocol version.
+
+**Inputs**: Open issue list, recent commits, stale `comms-open` issues,
+optional topic or context  
+**Outputs**: Weekly communication digest posted as Discussion (or Issue
+fallback); advancement comments on stale threads; quarterly review Discussion  
+**GitHub APIs**: GraphQL `createDiscussion`, `POST /repos/{owner}/{repo}/issues`,
+`POST /repos/{owner}/{repo}/issues/{number}/comments`,
+`PATCH /repos/{owner}/{repo}/issues/{number}`  
+**Used by**: Cross-Agent Communication Protocol workflow
+
+---
+
 ## Adding a New Skill
 
 1. Add an entry to this file with the required fields:
