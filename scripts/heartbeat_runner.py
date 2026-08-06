@@ -2187,6 +2187,7 @@ def run_tui(
             pass
         stdscr.nodelay(True)
         stdscr.timeout(200)
+        last_draw_signature: tuple[Any, ...] | None = None
 
         # Draw immediately so startup is visible while the first heartbeat cycle gathers data.
         status_message = "Initializing heartbeat..."
@@ -2195,9 +2196,20 @@ def run_tui(
 
         while True:
             now = time.monotonic()
+            agent_name = CHAT_AGENT_NAMES[chat_agent_idx % len(CHAT_AGENT_NAMES)]
 
             # ── Heartbeat cycle (skipped when chat is blocking) ──────────────
             if not chat_open and not paused and (heartbeat_data is None or now >= next_run_at):
+                # Render once before the blocking heartbeat call to avoid rapid
+                # clear/redraw flicker while work is executing.
+                status_message = f"Running beat #{heartbeat_count + 1}..."
+                remaining_pre = int(next_run_at - time.monotonic()) if not paused else interval
+                if use_full_layout:
+                    _draw_full_tui(stdscr, heartbeat_data, args.interval, args.dry_run, paused, remaining_pre, status_message, log_scroll, action_log, heartbeat_count)
+                else:
+                    lines = render_tui_lines(heartbeat_data, args.interval, args.dry_run, paused, remaining_pre, status_message)
+                    draw_tui(stdscr, lines)
+
                 errors, heartbeat_data = run_heartbeat_cycle(repo_root, repo_info, args, state, state_file, overview_file, ledger_file)
                 heartbeat_count += 1
                 _append_log(heartbeat_data["results"])
@@ -2207,18 +2219,38 @@ def run_tui(
                     else f"Beat #{heartbeat_count} complete ✓"
                 )
                 next_run_at = time.monotonic() + interval
+                # Force draw refresh after state mutation.
+                last_draw_signature = None
 
             remaining = int(next_run_at - time.monotonic()) if not paused else interval
-            agent_name = CHAT_AGENT_NAMES[chat_agent_idx % len(CHAT_AGENT_NAMES)]
+            terminal_size = stdscr.getmaxyx()
 
             # ── Draw ─────────────────────────────────────────────────────────
-            if chat_open:
-                _draw_chat_panel(stdscr, chat_messages, agent_name, "".join(chat_input), chat_thinking)
-            elif use_full_layout:
-                _draw_full_tui(stdscr, heartbeat_data, args.interval, args.dry_run, paused, remaining, status_message, log_scroll, action_log, heartbeat_count)
-            else:
-                lines = render_tui_lines(heartbeat_data, args.interval, args.dry_run, paused, remaining, status_message)
-                draw_tui(stdscr, lines)
+            render_signature = (
+                terminal_size,
+                chat_open,
+                chat_thinking,
+                paused,
+                remaining,
+                heartbeat_count,
+                status_message,
+                log_scroll,
+                len(action_log),
+                action_log[-1] if action_log else "",
+                agent_name,
+                len(chat_messages),
+                chat_messages[-1]["content"] if chat_messages else "",
+                "".join(chat_input),
+            )
+            if render_signature != last_draw_signature:
+                if chat_open:
+                    _draw_chat_panel(stdscr, chat_messages, agent_name, "".join(chat_input), chat_thinking)
+                elif use_full_layout:
+                    _draw_full_tui(stdscr, heartbeat_data, args.interval, args.dry_run, paused, remaining, status_message, log_scroll, action_log, heartbeat_count)
+                else:
+                    lines = render_tui_lines(heartbeat_data, args.interval, args.dry_run, paused, remaining, status_message)
+                    draw_tui(stdscr, lines)
+                last_draw_signature = render_signature
 
             # ── Input ────────────────────────────────────────────────────────
             key = stdscr.getch()
