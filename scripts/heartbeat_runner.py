@@ -949,7 +949,8 @@ def heuristic_repo_actions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
                     "reason": f"{len(blocked_or_priority)} blocked or priority-tagged issues need planning attention.",
                     "workflow": "project-manager.yml",
                     "inputs": {
-                        "task": "full-sprint-report",
+                        "task": "groom-backlog",
+                        "extra_context": f"Heartbeat backlog triage for {len(blocked_or_priority)} blocked or priority-tagged issues.",
                     },
                 }
             )

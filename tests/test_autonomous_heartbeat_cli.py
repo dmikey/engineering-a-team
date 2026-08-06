@@ -106,6 +106,22 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
             "gpt-5.4",
         )
 
+    def test_heuristic_repo_actions_dispatches_pm_groom_backlog_for_priority_issues(self):
+        snapshot = {
+            "issues": [
+                {
+                    "number": 1,
+                    "labels": [{"name": "priority: high"}],
+                    "assignees": [],
+                }
+            ],
+            "runs": [],
+        }
+        actions = heartbeat_runner.heuristic_repo_actions(snapshot, {"events": {}, "heartbeats": 0})
+        pm_action = next(action for action in actions if action.get("action") == "dispatch_project_manager")
+        self.assertEqual(pm_action["workflow"], "project-manager.yml")
+        self.assertEqual(pm_action["inputs"]["task"], "groom-backlog")
+
 
 if __name__ == "__main__":
     unittest.main()
