@@ -23,7 +23,7 @@ safe-outputs:
     allowed: [copilot]
     max: 1
     target: "*"
-    github-token: ${{ secrets.GH_USER_PAT }}
+    github-token: ${{ secrets.GH_AW_AGENT_TOKEN || secrets.GH_USER_PAT }}
     custom-instructions: |
       When you create a pull request for this issue, do not leave it as a
       draft. Mark it ready for review before you finish, even if the PR was
