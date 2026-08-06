@@ -2116,27 +2116,50 @@ def run_tui(
         allow_all_tools = os.environ.get("HEARTBEAT_CHAT_ALLOW_ALL_TOOLS", "true").lower() == "true"
         allow_all_urls = os.environ.get("HEARTBEAT_CHAT_ALLOW_ALL_URLS", "true").lower() == "true"
 
-        command = ["gh", "copilot", "--model", model, "--no-alt-screen"]
+        command = [
+            "gh",
+            "copilot",
+            "--model",
+            model,
+            "--no-alt-screen",
+            "--stream",
+            "off",
+            "--output-format",
+            "text",
+            "--silent",
+        ]
         if allow_all_tools:
             command.append("--allow-all-tools")
         if allow_all_urls:
             command.append("--allow-all-urls")
         command.extend(["-p", prompt])
 
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "gh copilot command failed"
-            return f"⚠ Copilot CLI failed: {detail.splitlines()[0][:220]}"
+        # Occasionally Copilot returns exit code 0 with empty stdout in prompt
+        # mode. Retry once before surfacing an error to the chat panel.
+        for attempt in range(2):
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip() or "gh copilot command failed"
+                return f"⚠ Copilot CLI failed: {detail.splitlines()[0][:220]}"
 
-        output = result.stdout.strip()
-        if not output:
-            return "⚠ Copilot CLI returned empty output"
-        return output
+            output = result.stdout.strip()
+            if output:
+                return output
+
+            # Some builds emit the response to stderr when rendering is disabled.
+            stderr_output = result.stderr.strip()
+            if stderr_output and "warning" not in stderr_output.lower():
+                return stderr_output.splitlines()[0][:400]
+
+            if attempt == 0:
+                continue
+
+        return "⚠ Copilot CLI returned empty output after retry"
 
 
     def _main(stdscr: Any) -> int:
