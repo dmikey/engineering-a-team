@@ -275,6 +275,17 @@ GraphQL `createDiscussion`, GitHub Models chat completions
 
 ---
 
+## cross-agent-mentorship
+
+**Description**: Allow agents to apply as mentors or mentees, generate skill-based mentor/mentee pairings, and track mentorship progress and outcomes over time.
+
+**Inputs**: Mentorship application issues (role, skills offered, skills needed, goals), mentorship progress/outcome issues  
+**Outputs**: Skill-based mentorship matches; markdown mentorship report posted as Discussion or Issue fallback  
+**GitHub APIs**: `GET /repos/{owner}/{repo}/issues`, `POST /repos/{owner}/{repo}/issues`, GraphQL `createDiscussion`  
+**Used by**: Cross-Agent Mentorship Program workflow
+
+---
+
 ## agent-health-monitoring
 
 **Description**: Collect recent workflow run history for every registered

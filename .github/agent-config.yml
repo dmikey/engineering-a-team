@@ -242,6 +242,25 @@ skill_development_tracking:
   warn_threshold: 85
   crit_threshold: 70
 
+# ─── Cross-Agent Mentorship Program ──────────────────────────────────────────
+
+mentorship_program:
+  # Enable or disable the mentorship workflow.
+  # Defined in .github/workflows/cross-agent-mentorship.yml.
+  enabled: true
+
+  # Weekly cadence for the mentorship progress report (UTC).
+  schedule: "0 16 * * 5"   # Every Friday at 16:00 UTC
+
+  # Labels used to manage mentorship applications, matches, and progress.
+  labels:
+    - mentorship-application
+    - mentorship-mentor
+    - mentorship-mentee
+    - mentorship-relationship
+    - mentorship-progress
+    - mentorship-outcome
+
 # ─── Council ─────────────────────────────────────────────────────────────────
 
 council:

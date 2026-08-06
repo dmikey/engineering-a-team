@@ -176,6 +176,7 @@ Default schedules (UTC):
 | Product Owner | Every weekday 13:00 | Edit `cron` in `product-owner.yml` |
 | Council Discussion | Every weekday 14:30 + Product Owner completion trigger | Edit `cron` and `workflow_run` in `council-discussion.yml` |
 | Council Sprint Prioritization | Every Monday 08:00 | Edit `cron` in `council-sprint-prioritization.yml` |
+| Cross-Agent Mentorship Program | Every Friday 16:00 | Edit `cron` in `cross-agent-mentorship.yml` |
 | Roadmap Collaboration | Weekly Monday 15:00 | Edit `cron` in `roadmap-collaboration.yml` |
 | Self-Improvement Loop | Every weekday 17:00 | Edit `cron` in `self-improvement-loop.yml` |
 
