@@ -496,21 +496,22 @@ direct local GraphQL calls.
 The runner prints an in-depth overview each cycle and also writes the latest
 report plus local dedupe state under `.git/heartbeat-runner/`.
 
-For GitHub Models-backed decision inference, export a token that has the
-`models:read` scope before starting it:
+For local runs, a single `GH_USER_PAT` covers both model inference and
+workflow dispatch. Give it `actions:write` (dispatch) and `models:read`
+(inference) scopes:
 
 ```bash
-export MODELS_TOKEN=YOUR_TOKEN_WITH_MODELS_READ
+export GH_USER_PAT=YOUR_TOKEN
 python3 ./scripts/heartbeat_runner.py --interval 300
 ```
 
 Token source policy for the heartbeat runner:
 
-- Local execution (`python3 ./scripts/heartbeat_runner.py ...`): uses `gh auth token` by default for GitHub Models calls.
-- Local fallback: if GitHub CLI auth is unavailable, it falls back to `MODELS_TOKEN` or `GH_MODELS_TOKEN`.
-- GitHub Actions execution: uses `MODELS_TOKEN` (or `GH_MODELS_TOKEN`) from workflow secrets/variables.
+- Local execution: `GH_USER_PAT` is used for both model calls and `gh` dispatch auth when set.
+- Local fallback: legacy `MODELS_TOKEN`/`GH_MODELS_TOKEN` (models) and `HEARTBEAT_GH_TOKEN` (dispatch) still work, then `gh auth token`.
+- GitHub Actions execution: uses `MODELS_TOKEN` (or `GH_MODELS_TOKEN`/`GH_USER_PAT`) from workflow secrets/variables.
 
-If you want local model inference without setting `MODELS_TOKEN`, run:
+If you want local model inference without setting `GH_USER_PAT`, run:
 
 ```bash
 gh auth login
@@ -518,16 +519,10 @@ python3 ./scripts/heartbeat_runner.py --interval 300
 ```
 
 If you also want the runner to dispatch workflows itself from local Linux,
-export a user token that has `actions:write` before starting it:
+the same `GH_USER_PAT` is used — no separate token needed.
+`HEARTBEAT_GH_TOKEN` is also still supported for local workflow dispatch auth.
 
-```bash
-export GH_USER_PAT=YOUR_TOKEN_WITH_ACTIONS_WRITE
-python3 ./scripts/heartbeat_runner.py --interval 300
-```
-
-`HEARTBEAT_GH_TOKEN` is also supported for local workflow dispatch auth.
-
-Without local GitHub CLI auth and without `MODELS_TOKEN`/`GH_MODELS_TOKEN`, the
+Without local GitHub CLI auth and without `GH_USER_PAT`, the
 runner falls back to safe heuristics. It will still merge clearly safe PRs,
 dispatch QA on pending PRs, route feature and planning backlog to the existing
 workflows, and comment on blocked PRs with an `@copilot` handoff.
