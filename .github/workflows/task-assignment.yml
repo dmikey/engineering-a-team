@@ -208,12 +208,19 @@ jobs:
       - name: Post assignment recommendations on issues
         if: steps.data.outputs.task == 'assign-tasks' && steps.data.outputs.issue_count != '0'
         env:
-          GH_TOKEN: ${{ secrets.GH_USER_PAT || secrets.GITHUB_TOKEN }}
+          GH_USER_PAT: ${{ secrets.GH_USER_PAT }}
+          GITHUB_FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RECOMMENDATIONS: ${{ steps.assign.outputs.recommendations }}
           TA_AUTO_DISPATCH_ENABLED: ${{ env.TA_AUTO_DISPATCH_ENABLED }}
           TA_AUTO_DISPATCH_MAX: ${{ env.TA_AUTO_DISPATCH_MAX }}
           WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # Prefer GH_USER_PAT but fall back to GITHUB_TOKEN when the PAT is invalid/expired.
+          export GH_TOKEN="${GH_USER_PAT:-$GITHUB_FALLBACK_TOKEN}"
+          if [ -n "$GH_USER_PAT" ] && ! gh api user > /dev/null 2>&1; then
+            echo "::warning::GH_USER_PAT is invalid or expired; falling back to GITHUB_TOKEN (auto-dispatch of other workflows may be limited)."
+            export GH_TOKEN="$GITHUB_FALLBACK_TOKEN"
+          fi
           python3 - <<'PYEOF'
           import json
           import os
