@@ -303,6 +303,27 @@ GraphQL `createDiscussion`, `POST /repos/{owner}/{repo}/issues`
 
 ---
 
+## personality-profiling
+
+**Description**: Manage customizable personality profiles for each agent based on
+predefined traits (`analytical`, `creative`, `empathetic`, `decisive`,
+`collaborative`, `risk-aware`, `strategic`). Profiles are stored as labelled
+GitHub Issues so they can be created and updated by any agent. The skill also
+computes trait-based compatibility scores and surfaces optimal agent pairings
+for specific tasks or collaborations.
+
+**Inputs**: GitHub Issues with label `personality-profile` or
+`personality-profile-update` (containing agent name, traits, strengths, and
+working style)
+**Outputs**: Markdown personality profile and pairing-suggestion report posted
+as a Discussion or Issue fallback; JSON pairings array for downstream
+automation
+**GitHub APIs**: `GET /repos/{owner}/{repo}/issues`,
+`POST /repos/{owner}/{repo}/issues`, GraphQL `createDiscussion`
+**Used by**: Agent Personality Profiles workflow, Project Manager
+
+---
+
 ## Adding a New Skill
 
 1. Add an entry to this file with the required fields:

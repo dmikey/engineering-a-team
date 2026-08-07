@@ -99,7 +99,7 @@ project_manager:
 
   # Comma-separated skills available to the Project Manager prompt.
   # Repository variable: PM_AGENT_SKILLS
-  skills: "backlog-grooming,milestone-management,discussion-creation,issue-labeling,skill-development-analysis"
+  skills: "backlog-grooming,milestone-management,discussion-creation,issue-labeling,skill-development-analysis,personality-profiling"
 
   # Priority labels that the PM agent will apply.
   labels:
@@ -393,3 +393,30 @@ roadmap_collaboration:
 
   # Weekly schedule in UTC.
   schedule: "0 15 * * 1"   # Monday 15:00 UTC
+
+# ─── Agent Personality Profiles ──────────────────────────────────────────────
+
+personality_profiles:
+  # Enable or disable the agent personality profiles workflow.
+  # Repository variable: PERSONALITY_PROFILES_ENABLED (true/false)
+  enabled: true
+
+  # Cron schedule for the weekly personality profiles report (UTC).
+  # Defined in .github/workflows/agent-personality-profiles.yml.
+  schedule: "0 10 * * 5"   # Every Friday at 10:00 UTC
+
+  # Predefined personality traits agents can use in their profiles.
+  # Only these values are accepted; unknown traits are silently ignored.
+  valid_traits:
+    - analytical      # methodical, data-driven reasoning
+    - creative        # innovative, exploratory thinking
+    - empathetic      # user-focused, relational approach
+    - decisive        # assertive, opinionated leadership
+    - collaborative   # team-oriented, consensus-seeking
+    - risk-aware      # cautious, thorough evaluation
+    - strategic       # big-picture, long-term orientation
+
+  # Labels used by the personality profiles workflow.
+  labels:
+    - personality-profile
+    - personality-profile-update
