@@ -225,6 +225,10 @@ jobs:
           import json
           import os
           import subprocess
+          import sys
+
+          sys.path.insert(0, os.path.join(os.getcwd(), ".github", "scripts"))
+          from task_assignment_dispatch_guard import should_auto_dispatch
 
           raw = os.environ.get("RECOMMENDATIONS", "[]")
           try:
@@ -276,7 +280,9 @@ jobs:
               else:
                   print(f"⚠️ Could not comment on issue #{issue_num}: {result.stderr.strip()}")
 
-              if not auto_dispatch or dispatch_count >= auto_dispatch_max:
+              allowed, reason = should_auto_dispatch(confidence, auto_dispatch, dispatch_count, auto_dispatch_max)
+              if not allowed:
+                  print(f"⏭️ Skipping auto-dispatch for issue #{issue_num}: {reason}")
                   continue
 
               target = dispatch_map.get(agent)
