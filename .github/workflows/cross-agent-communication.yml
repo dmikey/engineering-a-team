@@ -1,0 +1,487 @@
+# -----------------------------------------------------------------------------
+# Cross-Agent Communication Protocol
+#
+# Implements the standardized communication protocol defined in
+# docs/cross-agent-communication-protocol.md.
+#
+# Actions:
+#   announce  — Each agent posts a brief update to a shared Discussion.
+#   advance   — Casey reviews open comms-open discussions and advances stalled
+#               threads (adds a prompt after STALE_DAYS days of inactivity).
+#   review    — Open a quarterly protocol-review Discussion inviting all agents
+#               and human contributors to give feedback.
+#   all       — Run announce + advance (default for scheduled runs).
+#
+# Discussions are the primary channel so humans can read and participate.
+# An Issue is created as fallback when Discussions are unavailable.
+# -----------------------------------------------------------------------------
+name: Cross-Agent Communication Protocol
+
+on:
+  schedule:
+    # Weekly on Wednesday at 10:00 UTC — advancement check.
+    - cron: '0 10 * * 3'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'announce, advance, review, or all'
+        required: false
+        default: 'all'
+      topic:
+        description: 'Optional topic or context for the announce action'
+        required: false
+        default: ''
+      stale_days:
+        description: 'Days without activity before a thread is considered stale (default 14)'
+        required: false
+        default: '14'
+
+permissions:
+  contents: read
+  issues: write
+  discussions: write
+  models: read
+
+env:
+  COMMS_MODEL: ${{ vars.COMMS_MODEL || vars.COUNCIL_MODEL || vars.AGENT_MODEL || 'gpt-4o-mini' }}
+  AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
+  AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
+  WORKFLOW_ACTION: ${{ inputs.action || 'all' }}
+  STALE_DAYS: ${{ inputs.stale_days || '14' }}
+
+jobs:
+  communicate:
+    name: Cross-Agent Communication
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Ensure labels exist ────────────────────────────────────────────────
+      - name: Ensure communication labels exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create "comms-open"           --color "0075ca" --description "Active cross-agent discussion" --force 2>/dev/null || true
+          gh label create "comms-pending-human"  --color "e4e669" --description "Stalled — human input needed"  --force 2>/dev/null || true
+          gh label create "comms-resolved"       --color "0e8a16" --description "Discussion concluded"          --force 2>/dev/null || true
+          gh label create "comms-protocol-review" --color "d93f0b" --description "Quarterly protocol review"    --force 2>/dev/null || true
+
+      # ── Gather shared context ──────────────────────────────────────────────
+      - name: Gather repository context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CURRENT_DATE=$(date -u +"%Y-%m-%d")
+          echo "current_date=$CURRENT_DATE" >> "$GITHUB_OUTPUT"
+
+          OPEN_ISSUES=$(gh issue list \
+            --state open --limit 20 \
+            --json number,title,labels \
+            2>/dev/null || echo "[]")
+
+          RECENT_COMMITS=$(git log --oneline --no-merges -10 2>/dev/null || echo "")
+
+          COMMS_ISSUES=$(gh issue list \
+            --state open \
+            --label "comms-open" \
+            --limit 50 \
+            --json number,title,updatedAt,labels \
+            2>/dev/null || echo "[]")
+
+          {
+            echo "open_issues_count<<CTX_EOF"
+            echo "$OPEN_ISSUES" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "unknown"
+            echo "CTX_EOF"
+
+            echo "recent_commits<<CTX_EOF"
+            echo "$RECENT_COMMITS"
+            echo "CTX_EOF"
+
+            echo "comms_issues<<CTX_EOF"
+            echo "$COMMS_ISSUES"
+            echo "CTX_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── ANNOUNCE — agents post updates to shared Discussion ────────────────
+      - name: Quinn — QA update
+        id: quinn-update
+        if: env.WORKFLOW_ACTION == 'announce' || env.WORKFLOW_ACTION == 'all'
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.COMMS_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Quinn, QA Engineer. Write a brief cross-agent status update
+            following the standard message format exactly:
+
+            ## From: Quinn (QA Engineer)
+            ### Context
+            <trigger>
+
+            ### Update
+            <findings — risks, test gaps, security notes; bullet points>
+
+            ### Next Step
+            <one concrete next action and who should act>
+
+            ---
+            *🤖 Quinn (QA Engineer) · <date> · [Workflow run](<url>)*
+
+            Be concise (100–200 words). Write in plain English.
+          user-prompt: |
+            Date: ${{ steps.ctx.outputs.current_date }}
+            Open issues: ${{ steps.ctx.outputs.open_issues_count }}
+            Recent commits:
+            ${{ steps.ctx.outputs.recent_commits }}
+            Optional topic: ${{ inputs.topic || 'general weekly sweep' }}
+            Workflow run URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Write your cross-agent status update.
+
+      - name: Morgan — PM update
+        id: morgan-update
+        if: env.WORKFLOW_ACTION == 'announce' || env.WORKFLOW_ACTION == 'all'
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.COMMS_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Morgan, Project Manager. Write a brief cross-agent status
+            update following the standard message format exactly:
+
+            ## From: Morgan (Project Manager)
+            ### Context
+            <trigger>
+
+            ### Update
+            <delivery status — backlog health, sprint progress, blockers; bullet points>
+
+            ### Next Step
+            <one concrete next action and who should act>
+
+            ---
+            *🤖 Morgan (Project Manager) · <date> · [Workflow run](<url>)*
+
+            Be concise (100–200 words). Write in plain English.
+          user-prompt: |
+            Date: ${{ steps.ctx.outputs.current_date }}
+            Open issues: ${{ steps.ctx.outputs.open_issues_count }}
+            Recent commits:
+            ${{ steps.ctx.outputs.recent_commits }}
+            Optional topic: ${{ inputs.topic || 'general weekly sweep' }}
+            Workflow run URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Write your cross-agent status update.
+
+      - name: Alex — PO update
+        id: alex-update
+        if: env.WORKFLOW_ACTION == 'announce' || env.WORKFLOW_ACTION == 'all'
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.COMMS_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: ${{ env.AGENT_TEMPERATURE }}
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Alex, Product Owner. Write a brief cross-agent status update
+            following the standard message format exactly:
+
+            ## From: Alex (Product Owner)
+            ### Context
+            <trigger>
+
+            ### Update
+            <product health — user value themes, feature gaps, opportunities; bullet points>
+
+            ### Next Step
+            <one concrete next action and who should act>
+
+            ---
+            *🤖 Alex (Product Owner) · <date> · [Workflow run](<url>)*
+
+            Be concise (100–200 words). Write in plain English.
+          user-prompt: |
+            Date: ${{ steps.ctx.outputs.current_date }}
+            Open issues: ${{ steps.ctx.outputs.open_issues_count }}
+            Recent commits:
+            ${{ steps.ctx.outputs.recent_commits }}
+            Optional topic: ${{ inputs.topic || 'general weekly sweep' }}
+            Workflow run URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Write your cross-agent status update.
+
+      - name: Casey — synthesise and post announcement Discussion
+        id: announcement
+        if: env.WORKFLOW_ACTION == 'announce' || env.WORKFLOW_ACTION == 'all'
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.COMMS_MODEL }}
+          max-tokens: 3000
+          temperature: '0.5'
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Casey, Council Moderator. Compile three agent updates into a
+            single readable cross-agent communication digest.
+
+            Output format:
+
+            # 📡 Cross-Agent Communication Digest
+
+            ## Summary
+            Two to three sentences synthesising what the team is seeing this week.
+
+            ## Agent Updates
+
+            <paste each agent's formatted update block here>
+
+            ## Open Questions for the Community
+            Bullet list of 1–3 questions where human input would be valuable.
+
+            ## Next Actions
+            Numbered list. Be concrete.
+
+            ---
+            *🤖 Compiled by Casey (Council Moderator) · <date> · [Workflow run](<url>)*
+          user-prompt: |
+            Date: ${{ steps.ctx.outputs.current_date }}
+            Workflow run URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Compile these three agent updates:
+
+            ---
+            ${{ steps.quinn-update.outputs.response }}
+
+            ---
+            ${{ steps.morgan-update.outputs.response }}
+
+            ---
+            ${{ steps.alex-update.outputs.response }}
+
+      - name: Post announcement as Discussion
+        if: env.WORKFLOW_ACTION == 'announce' || env.WORKFLOW_ACTION == 'all'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BODY: ${{ steps.announcement.outputs.response }}
+          CURRENT_DATE: ${{ steps.ctx.outputs.current_date }}
+        run: |
+          TITLE="📡 Cross-Agent Communication Digest — $CURRENT_DATE"
+          OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
+          REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+
+          REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
+          POSTED=false
+
+          if [ -n "$REPO_ID" ]; then
+            CATEGORY_ID=$(gh api graphql \
+              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:20){nodes{id name}}}}' \
+              -f o="$OWNER" -f r="$REPO" \
+              --jq '.data.repository.discussionCategories.nodes[] | select(.name=="General") | .id' \
+              2>/dev/null || echo "")
+
+            if [ -z "$CATEGORY_ID" ]; then
+              CATEGORY_ID=$(gh api graphql \
+                -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+                -f o="$OWNER" -f r="$REPO" \
+                --jq '.data.repository.discussionCategories.nodes[0].id' \
+                2>/dev/null || echo "")
+            fi
+
+            if [ -n "$CATEGORY_ID" ]; then
+              DISCUSSION_URL=$(gh api graphql \
+                -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
+                -f ri="$REPO_ID" -f ci="$CATEGORY_ID" -f t="$TITLE" -f b="$BODY" \
+                --jq '.data.createDiscussion.discussion.url' \
+                2>/dev/null || echo "")
+
+              if [ -n "$DISCUSSION_URL" ]; then
+                echo "✅ Communication digest posted as Discussion: $DISCUSSION_URL"
+                POSTED=true
+              fi
+            fi
+          fi
+
+          if [ "$POSTED" = "false" ]; then
+            gh issue create --title "$TITLE" --body "$BODY" --label "comms-open"
+            echo "✅ Communication digest posted as Issue (Discussion fallback)"
+          fi
+
+      # ── ADVANCE — Casey advances stalled comms-open threads ────────────────
+      - name: Advance stalled discussions
+        if: env.WORKFLOW_ACTION == 'advance' || env.WORKFLOW_ACTION == 'all'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMS_ISSUES: ${{ steps.ctx.outputs.comms_issues }}
+          STALE_DAYS: ${{ env.STALE_DAYS }}
+          CURRENT_DATE: ${{ steps.ctx.outputs.current_date }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PYEOF'
+          import json
+          import os
+          import subprocess
+          from datetime import datetime, timezone, timedelta
+
+          raw = os.environ.get("COMMS_ISSUES", "[]")
+          try:
+              issues = json.loads(raw)
+          except json.JSONDecodeError:
+              issues = []
+
+          stale_days = int(os.environ.get("STALE_DAYS", "14"))
+          current_date = os.environ.get("CURRENT_DATE", "")
+          workflow_url = os.environ.get("WORKFLOW_URL", "")
+          cutoff = datetime.now(timezone.utc) - timedelta(days=stale_days)
+
+          stale = []
+          for issue in issues:
+              updated_str = issue.get("updatedAt", "")
+              if not updated_str:
+                  continue
+              try:
+                  updated = datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
+              except ValueError:
+                  continue
+              if updated < cutoff:
+                  stale.append(issue)
+
+          if not stale:
+              print("No stale comms-open threads found.")
+          else:
+              print(f"Found {len(stale)} stale thread(s). Adding advancement comments.")
+
+          for issue in stale:
+              number = issue["number"]
+              title = issue["title"]
+              labels = [lbl.get("name", "") for lbl in issue.get("labels", [])]
+
+              comment = (
+                  "## From: Casey (Council Moderator)\n"
+                  "### Context\n"
+                  f"Scheduled advancement check · Issue #{number}: {title}\n\n"
+                  "### Update\n"
+                  f"This discussion has been open for more than {stale_days} days without activity. "
+                  "Advancing the thread to keep momentum.\n\n"
+                  "**Status check:**\n"
+                  "- Is this resolved? If so, please comment and we'll close it.\n"
+                  "- Is there a blocker? Tag `comms-pending-human` and describe what you need.\n"
+                  "- Is council alignment needed? Add the `council-review` label.\n\n"
+                  "### Next Step\n"
+                  "Human contributors: please add a comment or label this issue to indicate the current status.\n\n"
+                  "---\n"
+                  f"*🤖 Casey (Council Moderator) · {current_date} · [Workflow run]({workflow_url})*"
+              )
+
+              subprocess.run(
+                  ["gh", "issue", "comment", str(number), "--body", comment],
+                  check=True,
+              )
+
+              # Add comms-pending-human if not already present.
+              if "comms-pending-human" not in labels:
+                  subprocess.run(
+                      ["gh", "issue", "edit", str(number), "--add-label", "comms-pending-human"],
+                      check=True,
+                  )
+              print(f"  Advanced issue #{number}")
+          PYEOF
+
+      # ── REVIEW — open quarterly protocol-review Discussion ─────────────────
+      - name: Casey — draft quarterly review discussion
+        id: review-draft
+        if: env.WORKFLOW_ACTION == 'review'
+        uses: ./.github/actions/call-github-model
+        with:
+          model: ${{ env.COMMS_MODEL }}
+          max-tokens: ${{ env.AGENT_MAX_TOKENS }}
+          temperature: '0.6'
+          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          system-prompt: |
+            You are Casey, Council Moderator, facilitating a quarterly review of
+            the Cross-Agent Communication Protocol.
+
+            Write a Discussion post that:
+            1. Summarises the protocol's purpose in 2–3 sentences.
+            2. Asks each agent (Quinn, Morgan, Alex) to post a brief feedback
+               comment using the standard message format.
+            3. Invites human contributors to share their observations.
+            4. Lists 3 specific questions to focus the feedback.
+            5. Closes with a 14-day feedback window and a note that findings will
+               inform a protocol update PR.
+
+            Output format:
+            # 📋 Quarterly Protocol Review — Q<N> <YEAR>
+
+            <body>
+
+            ---
+            *🤖 Casey (Council Moderator) · <date> · [Workflow run](<url>)*
+          user-prompt: |
+            Date: ${{ steps.ctx.outputs.current_date }}
+            Workflow run URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Draft the quarterly protocol review Discussion.
+
+      - name: Post quarterly review Discussion
+        if: env.WORKFLOW_ACTION == 'review'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BODY: ${{ steps.review-draft.outputs.response }}
+          CURRENT_DATE: ${{ steps.ctx.outputs.current_date }}
+        run: |
+          QUARTER=$(python3 -c "
+          from datetime import date
+          d = date.today()
+          q = (d.month - 1) // 3 + 1
+          print(f'Q{q} {d.year}')
+          ")
+          TITLE="📋 Quarterly Protocol Review — $QUARTER"
+          OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
+          REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+
+          REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
+          POSTED=false
+
+          if [ -n "$REPO_ID" ]; then
+            CATEGORY_ID=$(gh api graphql \
+              -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:20){nodes{id name}}}}' \
+              -f o="$OWNER" -f r="$REPO" \
+              --jq '.data.repository.discussionCategories.nodes[] | select(.name=="General") | .id' \
+              2>/dev/null || echo "")
+
+            if [ -z "$CATEGORY_ID" ]; then
+              CATEGORY_ID=$(gh api graphql \
+                -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){discussionCategories(first:1){nodes{id}}}}' \
+                -f o="$OWNER" -f r="$REPO" \
+                --jq '.data.repository.discussionCategories.nodes[0].id' \
+                2>/dev/null || echo "")
+            fi
+
+            if [ -n "$CATEGORY_ID" ]; then
+              DISCUSSION_URL=$(gh api graphql \
+                -f query='mutation($ri:ID!,$ci:ID!,$t:String!,$b:String!){createDiscussion(input:{repositoryId:$ri,categoryId:$ci,title:$t,body:$b}){discussion{url}}}' \
+                -f ri="$REPO_ID" -f ci="$CATEGORY_ID" -f t="$TITLE" -f b="$BODY" \
+                --jq '.data.createDiscussion.discussion.url' \
+                2>/dev/null || echo "")
+
+              if [ -n "$DISCUSSION_URL" ]; then
+                echo "✅ Protocol review posted as Discussion: $DISCUSSION_URL"
+                POSTED=true
+              fi
+            fi
+          fi
+
+          if [ "$POSTED" = "false" ]; then
+            gh issue create \
+              --title "$TITLE" \
+              --body "$BODY" \
+              --label "comms-protocol-review" \
+              --label "comms-open"
+            echo "✅ Protocol review posted as Issue (Discussion fallback)"
+          fi

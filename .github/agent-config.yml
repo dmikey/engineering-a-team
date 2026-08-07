@@ -384,6 +384,41 @@ agent_health_check:
     - agent-health
     - agent-alert
 
+# ─── Cross-Agent Communication Protocol ──────────────────────────────────────
+
+cross_agent_communication:
+  # Enable or disable the cross-agent communication workflow.
+  # Repository variable: COMMS_ENABLED (true/false)
+  enabled: true
+
+  # Model used to generate agent updates and the merged digest.
+  # Falls back to COUNCIL_MODEL then AGENT_MODEL.
+  # Repository variable: COMMS_MODEL
+  model: gpt-4o-mini
+
+  # Weekly cadence for the communication digest and advancement check (UTC).
+  # Defined in .github/workflows/cross-agent-communication.yml.
+  schedule: "0 10 * * 3"   # Every Wednesday at 10:00 UTC
+
+  # Days of inactivity before a comms-open thread is considered stale.
+  # Repository variable: COMMS_STALE_DAYS
+  stale_days: 14
+
+  # GitHub Discussion category for digest and review posts.
+  # Falls back to the first available category.
+  # Repository variable: COMMS_DISCUSSION_CATEGORY
+  discussion_category: "General"
+
+  # Labels used to manage discussion lifecycle.
+  labels:
+    - comms-open
+    - comms-pending-human
+    - comms-resolved
+    - comms-protocol-review
+
+  # Protocol document path (relative to repository root).
+  protocol_document: "docs/cross-agent-communication-protocol.md"
+
 # ─── Roadmap Collaboration ───────────────────────────────────────────────────
 
 roadmap_collaboration:
