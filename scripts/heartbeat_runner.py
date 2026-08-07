@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.error
 import urllib.request
@@ -43,6 +44,7 @@ WORKFLOW_COOLDOWNS = {
     "council-discussion.yml": timedelta(hours=24),
 }
 AUTH_FAILURE_COOLDOWN = timedelta(hours=6)
+PLANNER_UNAVAILABLE_COOLDOWN = timedelta(minutes=30)
 PR_READY_COOLDOWN = timedelta(hours=6)
 WORKFLOW_APPROVAL_COOLDOWN = timedelta(hours=1)
 COPILOT_HANDOFF_COOLDOWN = timedelta(hours=12)
@@ -441,7 +443,7 @@ def call_copilot_cli_model(system_prompt: str, user_prompt: str) -> tuple[bool, 
     env.pop("GITHUB_TOKEN", None)
 
     # A hung Copilot CLI call must not stall the heartbeat; fall back to heuristics.
-    timeout_s = int(os.environ.get("HEARTBEAT_MODEL_TIMEOUT", "120"))
+    timeout_s = int(os.environ.get("HEARTBEAT_MODEL_TIMEOUT", "45"))
     try:
         result = subprocess.run(
             ["gh", "copilot", "-p", prompt],
@@ -992,6 +994,23 @@ def heuristic_repo_actions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
                 }
             )
 
+    discussions = snapshot.get("discussions") or []
+    if discussions:
+        stale_discussions = [
+            discussion for discussion in discussions
+            if (discussion.get("comments") or {}).get("totalCount", 0) == 0
+            and (discussion.get("updatedAt") or "")
+        ]
+        if stale_discussions:
+            discussion = stale_discussions[0]
+            actions.append(
+                {
+                    "action": "participate_in_discussion",
+                    "reason": f"Discussion #{discussion['number']} needs a heartbeat response to keep the multi-agent planning loop moving.",
+                    "discussion_number": discussion["number"],
+                }
+            )
+
     return actions
 
 
@@ -1008,6 +1027,14 @@ def heuristic_pr_decisions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
                 "number": pr["number"],
                 "action": "sync_branch",
                 "reason": "PR conflicts with base; attempt an automatic branch update before requesting manual conflict resolution.",
+            })
+            continue
+
+        if merge_state == "UNSTABLE":
+            decisions.append({
+                "number": pr["number"],
+                "action": "send_back_to_copilot",
+                "reason": "PR is in an unstable merge state and needs another implementation pass before it can be merged.",
             })
             continue
 
@@ -1189,7 +1216,14 @@ def sanitize_model_plan(raw_text: str, heuristic: dict[str, Any]) -> dict[str, A
         return heuristic
 
     valid_pr_actions = {"merge", "mark_ready", "sync_branch", "send_back_to_copilot", "run_qa", "wait"}
-    valid_repo_actions = {"dispatch_task_assignment", "dispatch_project_manager", "dispatch_product_owner", "dispatch_council", "wait"}
+    valid_repo_actions = {
+        "dispatch_task_assignment",
+        "dispatch_project_manager",
+        "dispatch_product_owner",
+        "dispatch_council",
+        "participate_in_discussion",
+        "wait",
+    }
 
     by_number = {entry["number"]: entry for entry in heuristic["pull_requests"]}
     final_prs: list[dict[str, Any]] = []
@@ -1231,6 +1265,25 @@ def sanitize_model_plan(raw_text: str, heuristic: dict[str, Any]) -> dict[str, A
     return {"pull_requests": final_prs, "repo_actions": final_repo}
 
 
+def decision_rationales(plan: dict[str, Any]) -> list[dict[str, str]]:
+    rationales: list[dict[str, str]] = []
+    for decision in plan.get("pull_requests") or []:
+        rationales.append({
+            "kind": "pr",
+            "target": f"PR #{decision.get('number', '?')}",
+            "action": str(decision.get("action", "wait")),
+            "reason": str(decision.get("reason", "No reason provided.")),
+        })
+    for action in plan.get("repo_actions") or []:
+        rationales.append({
+            "kind": "repo",
+            "target": str(action.get("workflow") or "repository"),
+            "action": str(action.get("action", "wait")),
+            "reason": str(action.get("reason", "No reason provided.")),
+        })
+    return rationales
+
+
 def build_plan(
     snapshot: dict[str, Any],
     state: dict[str, Any],
@@ -1238,12 +1291,24 @@ def build_plan(
     model: str,
     models_token: str | None,
     model_every: int,
+    progress: Any = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     heuristic = {
         "pull_requests": heuristic_pr_decisions(snapshot, state),
         "repo_actions": heuristic_repo_actions(snapshot, state),
     }
     meta = {"decision_source": "heuristic", "models_status": "disabled"}
+
+    def report(message: str, plan: dict[str, Any], source: str) -> None:
+        if progress is not None:
+            progress(message, {
+                "decision_source": source,
+                "rationales": decision_rationales(plan),
+                "pr_actions": [item.get("action", "wait") for item in plan.get("pull_requests") or []],
+                "repo_actions": [item.get("action", "wait") for item in plan.get("repo_actions") or []],
+            })
+
+    report("heuristic baseline ready", heuristic, "heuristic")
 
     in_actions = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
     use_github_models = os.environ.get("HEARTBEAT_USE_GITHUB_MODELS", "false").lower() == "true"
@@ -1252,24 +1317,37 @@ def build_plan(
     upcoming_heartbeat = int(state.get("heartbeats", 0)) + 1
     if cadence > 1 and (upcoming_heartbeat % cadence) != 0:
         meta["models_status"] = f"skipped this cycle for cost control (model_every={cadence})"
+        report("using heuristic plan; model skipped by cadence", heuristic, "heuristic")
         return heuristic, meta
 
     system_prompt, user_prompt = model_prompt(snapshot, heuristic, read_collaboration_rules(repo_root))
 
     # Local runs default to Copilot CLI now that GitHub Models endpoint is retired.
     if not in_actions and not use_github_models:
+        cooldown_left = event_cooldown_remaining(state, "planner-unavailable:copilot-cli", PLANNER_UNAVAILABLE_COOLDOWN)
+        if cooldown_left:
+            meta["models_status"] = f"degraded: copilot-cli unavailable, cooldown ~{format_remaining(cooldown_left)}"
+            report("Copilot planner in failure cooldown; using safe heuristic plan", heuristic, "heuristic fallback")
+            return heuristic, meta
+        report(f"consulting Copilot planner ({model})", heuristic, "heuristic baseline")
         copilot_ok, copilot_response = call_copilot_cli_model(system_prompt, user_prompt)
         if copilot_ok:
             meta["decision_source"] = f"copilot-cli:{model}"
             meta["models_status"] = "ready via gh copilot"
-            return sanitize_model_plan(copilot_response, heuristic), meta
+            model_plan = sanitize_model_plan(copilot_response, heuristic)
+            report("Copilot plan accepted after safety validation", model_plan, meta["decision_source"])
+            return model_plan, meta
+        record_event(state, "planner-unavailable:copilot-cli", {"reason": copilot_response})
         meta["models_status"] = f"degraded: copilot-cli unavailable: {copilot_response}"
+        report("Copilot unavailable; using safe heuristic plan", heuristic, "heuristic fallback")
         return heuristic, meta
 
     if not models_token:
         meta["models_status"] = "disabled: set GH_USER_PAT (or MODELS_TOKEN) for model inference"
+        report("model token unavailable; using safe heuristic plan", heuristic, "heuristic fallback")
         return heuristic, meta
 
+    report(f"consulting GitHub Models planner ({model})", heuristic, "heuristic baseline")
     ok, response = call_github_model(model, system_prompt, user_prompt, models_token)
     if not ok:
         use_copilot_fallback = os.environ.get("HEARTBEAT_COPILOT_FALLBACK", "true").lower() != "false"
@@ -1278,21 +1356,66 @@ def build_plan(
             if copilot_ok:
                 meta["decision_source"] = f"copilot-cli:{model}"
                 meta["models_status"] = "fallback-ready via gh copilot"
-                return sanitize_model_plan(copilot_response, heuristic), meta
+                model_plan = sanitize_model_plan(copilot_response, heuristic)
+                report("Copilot fallback plan accepted after safety validation", model_plan, meta["decision_source"])
+                return model_plan, meta
             meta["models_status"] = f"degraded: {response} | copilot-fallback failed: {copilot_response}"
+            report("model calls unavailable; using safe heuristic plan", heuristic, "heuristic fallback")
             return heuristic, meta
 
         meta["models_status"] = f"degraded: {response}"
+        report("GitHub Models unavailable; using safe heuristic plan", heuristic, "heuristic fallback")
         return heuristic, meta
 
     meta["decision_source"] = f"github-models:{model}"
     meta["models_status"] = "ready"
-    return sanitize_model_plan(response, heuristic), meta
+    model_plan = sanitize_model_plan(response, heuristic)
+    report("model plan accepted after safety validation", model_plan, meta["decision_source"])
+    return model_plan, meta
+
+
+def normalize_repo_action_inputs(workflow: str, inputs: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    if workflow == "project-manager.yml":
+        task = inputs.get("task") or "full-sprint-report"
+        normalized["task"] = task
+        if inputs.get("metrics_period_days") is not None:
+            normalized["metrics_period_days"] = inputs.get("metrics_period_days")
+        if inputs.get("metrics_sort_by") is not None:
+            normalized["metrics_sort_by"] = inputs.get("metrics_sort_by")
+        if inputs.get("filter_agent") is not None:
+            normalized["filter_agent"] = inputs.get("filter_agent")
+        return normalized
+    if workflow == "product-owner.yml":
+        task = inputs.get("task") or "product-health-report"
+        normalized["task"] = task
+        if inputs.get("feature_prompt"):
+            normalized["feature_prompt"] = inputs.get("feature_prompt")
+        if inputs.get("base_url"):
+            normalized["base_url"] = inputs.get("base_url")
+        if inputs.get("extra_context"):
+            normalized["extra_context"] = inputs.get("extra_context")
+        return normalized
+    if workflow == "task-assignment.yml":
+        task = inputs.get("task") or "assign-tasks"
+        normalized["task"] = task
+        if inputs.get("extra_context"):
+            normalized["extra_context"] = inputs.get("extra_context")
+        return normalized
+    if workflow == "council-discussion.yml":
+        normalized["topic"] = inputs.get("topic") or "Heartbeat council review"
+        if inputs.get("context"):
+            normalized["context"] = inputs.get("context")
+        if inputs.get("issue_number"):
+            normalized["issue_number"] = inputs.get("issue_number")
+        return normalized
+    return dict(inputs)
 
 
 def dispatch_workflow(repo: str, workflow: str, inputs: dict[str, str], dry_run: bool, ref: str = "main") -> str:
+    normalized_inputs = normalize_repo_action_inputs(workflow, inputs)
     command = ["gh", "workflow", "run", workflow, "--repo", repo, "--ref", ref]
-    for key, value in inputs.items():
+    for key, value in normalized_inputs.items():
         command.extend(["-f", f"{key}={value}"])
     if dry_run:
         return "DRY RUN: " + " ".join(command)
@@ -1303,6 +1426,20 @@ def dispatch_workflow(repo: str, workflow: str, inputs: dict[str, str], dry_run:
             detail += " | hint: export GH_USER_PAT or HEARTBEAT_GH_TOKEN with actions:write before starting the runner"
         raise RuntimeError(detail)
     return result.stdout.strip() or f"Dispatched {workflow}"
+
+
+def participate_in_discussion(repo: str, discussion_number: int, dry_run: bool) -> str:
+    body = (
+        "The heartbeat TUI is participating in this discussion as a shared coordination step for the autonomous engineering team.\n\n"
+        "Planned follow-up: review current PRs, identify implementation gaps, and route actionable work to the appropriate agent or issue."
+    )
+    command = ["gh", "api", "--method", "POST", f"repos/{repo}/discussions/{discussion_number}/comments", "-f", f"body={body}"]
+    if dry_run:
+        return "DRY RUN: " + " ".join(command)
+    result = run_command(command, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"failed to comment on discussion #{discussion_number}")
+    return result.stdout.strip() or f"Commented on discussion #{discussion_number}"
 
 
 def merge_pr(repo: str, pr_number: int, dry_run: bool) -> str:
@@ -1411,39 +1548,10 @@ def execute_plan(snapshot: dict[str, Any], plan: dict[str, Any], state: dict[str
     default_branch = snapshot.get("repo", {}).get("defaultBranch", "main")
     pr_by_number = {pr["number"]: pr for pr in snapshot["prs"]}
 
-    for repo_action in plan["repo_actions"]:
-        if actions_taken >= max_actions:
-            break
-        workflow = repo_action.get("workflow")
-        action_key = repo_action.get("action", "")
-        if not workflow:
-            continue
-        try:
-            output = dispatch_workflow(repo, workflow, repo_action.get("inputs", {}), dry_run, ref=default_branch)
-            if not dry_run:
-                # Use action-specific event key for council so periodic and stuck-PR cooldowns are independent
-                event_key = "dispatch:council-periodic" if action_key == "dispatch_council" else f"dispatch:{workflow}"
-                record_event(state, event_key, {"reason": repo_action.get("reason", "")})
-            results.append({"target": workflow, "action": action_key, "status": "ok", "detail": output})
-            actions_taken += 1
-        except RuntimeError as exc:
-            detail = str(exc)
-            if "Resource not accessible by integration" in detail and not dry_run:
-                record_event(state, f"dispatch-blocked:{workflow}", {"reason": detail})
-            short = detail.split("\n")[0][:120]
-            if "403" in short or "Resource not accessible" in short:
-                results.append(
-                    {
-                        "target": workflow,
-                        "action": action_key,
-                        "status": "skipped",
-                        "detail": f"auth blocked: set GH_USER_PAT or HEARTBEAT_GH_TOKEN with actions:write to dispatch {workflow}",
-                    }
-                )
-            else:
-                results.append({"target": workflow, "action": action_key, "status": "error", "detail": short})
+    pr_decisions = [decision for decision in plan.get("pull_requests", []) if decision.get("action") == "merge"]
+    non_merge_pr_decisions = [decision for decision in plan.get("pull_requests", []) if decision.get("action") != "merge"]
 
-    for decision in plan["pull_requests"]:
+    for decision in pr_decisions + non_merge_pr_decisions:
         if actions_taken >= max_actions:
             break
         pr = pr_by_number.get(decision["number"])
@@ -1584,6 +1692,52 @@ def execute_plan(snapshot: dict[str, Any], plan: dict[str, Any], state: dict[str
                 results.append({"target": f"pr#{pr['number']}", "action": action, "status": "error", "detail": str(exc)})
             continue
 
+    for repo_action in plan.get("repo_actions", []):
+        if actions_taken >= max_actions:
+            break
+        action_key = repo_action.get("action", "")
+        if action_key == "participate_in_discussion":
+            discussion_number = repo_action.get("discussion_number")
+            if not discussion_number:
+                continue
+            try:
+                output = participate_in_discussion(repo, discussion_number, dry_run)
+                if not dry_run:
+                    record_event(state, f"discussion:{discussion_number}", {"reason": repo_action.get("reason", "")})
+                results.append({"target": f"discussion#{discussion_number}", "action": action_key, "status": "ok", "detail": output})
+                actions_taken += 1
+            except RuntimeError as exc:
+                results.append({"target": f"discussion#{discussion_number}", "action": action_key, "status": "error", "detail": str(exc)})
+            continue
+
+        workflow = repo_action.get("workflow")
+        if not workflow:
+            continue
+        try:
+            output = dispatch_workflow(repo, workflow, repo_action.get("inputs", {}), dry_run, ref=default_branch)
+            if not dry_run:
+                # Use action-specific event key for council so periodic and stuck-PR cooldowns are independent
+                event_key = "dispatch:council-periodic" if action_key == "dispatch_council" else f"dispatch:{workflow}"
+                record_event(state, event_key, {"reason": repo_action.get("reason", "")})
+            results.append({"target": workflow, "action": action_key, "status": "ok", "detail": output})
+            actions_taken += 1
+        except RuntimeError as exc:
+            detail = str(exc)
+            if "Resource not accessible by integration" in detail and not dry_run:
+                record_event(state, f"dispatch-blocked:{workflow}", {"reason": detail})
+            short = detail.split("\n")[0][:120]
+            if "403" in short or "Resource not accessible" in short:
+                results.append(
+                    {
+                        "target": workflow,
+                        "action": action_key,
+                        "status": "skipped",
+                        "detail": f"auth blocked: set GH_USER_PAT or HEARTBEAT_GH_TOKEN with actions:write to dispatch {workflow}",
+                    }
+                )
+            else:
+                results.append({"target": workflow, "action": action_key, "status": "error", "detail": short})
+
     return results
 
 
@@ -1711,7 +1865,15 @@ def run_heartbeat_cycle(
     effective_model_every, cadence_reason = adaptive_model_every(snapshot, args.model_every, args.adaptive_model_cadence)
     models_token, token_source = resolve_models_token()
     report("planning decisions (model inference can take a minute or two)", **live_context, model_cadence=effective_model_every)
-    plan, meta = build_plan(snapshot, state, repo_root, args.model, models_token, effective_model_every)
+    plan, meta = build_plan(
+        snapshot,
+        state,
+        repo_root,
+        args.model,
+        models_token,
+        effective_model_every,
+        progress=lambda message, details: report(message, **live_context, **details),
+    )
     if meta["models_status"] == "ready":
         meta["models_status"] = f"ready via {token_source}"
     meta["model_cadence"] = f"{effective_model_every} ({cadence_reason})"
@@ -1722,6 +1884,7 @@ def run_heartbeat_cycle(
         f"executing plan: {pr_count} PR decisions, {dispatch_count} dispatches",
         **live_context,
         decision_source=meta["decision_source"],
+        rationales=decision_rationales(plan),
         pr_actions=[decision.get("action", "wait") for decision in plan.get("pull_requests") or []],
         repo_actions=[action.get("action", "wait") for action in plan.get("repo_actions") or []],
     )
@@ -1822,6 +1985,18 @@ def _safe_addstr(win: Any, y: int, x: int, text: str, attr: int = 0) -> None:
         pass
 
 
+def _add_wrapped_lines(win: Any, row: int, x: int, text: str, max_rows: int, attr: int = 0) -> int:
+    height, width = win.getmaxyx()
+    available = max(width - x - 1, 10)
+    for line in textwrap.wrap(text, width=available, break_long_words=False, break_on_hyphens=False):
+        if row >= height - 1 or max_rows <= 0:
+            break
+        _safe_addstr(win, row, x, line, attr)
+        row += 1
+        max_rows -= 1
+    return row
+
+
 def _pr_action_color(action: str) -> int:
     if action in ("merge",):
         return curses.color_pair(1) | curses.A_BOLD
@@ -1884,13 +2059,14 @@ def render_tui_lines(
     non_draft = [p for p in prs if not p.get("isDraft")]
     mergeable = [p for p in non_draft if p.get("mergeable") == "MERGEABLE"]
     conflicting = [p for p in non_draft if p.get("mergeable") == "CONFLICTING" or p.get("mergeStateStatus") == "DIRTY"]
+    unstable = [p for p in non_draft if (p.get("mergeStateStatus") or "").upper() == "UNSTABLE"]
     unassigned = [i for i in issues if not i.get("assignees")]
     ok_c = sum(1 for r in results if r.get("status") == "ok")
     err_c = sum(1 for r in results if r.get("status") == "error")
     lines.extend([
         "",
         f"Repo: {snapshot['repo']['nameWithOwner']} | Models: {meta.get('models_status','?')} | Auth: {meta.get('gh_auth_source','?')}",
-        f"PRs: total={len(prs)} draft={len(prs)-len(non_draft)} mergeable={len(mergeable)} conflicting={len(conflicting)}",
+        f"PRs: total={len(prs)} draft={len(prs)-len(non_draft)} mergeable={len(mergeable)} conflicting={len(conflicting)} follow-up={len(unstable)}",
         f"Issues: total={len(issues)} unassigned={len(unassigned)}",
         f"Runs: active={len(active_runs)} failing={len(failing_runs)}",
         f"Last cycle: ok={ok_c} errors={err_c}",
@@ -1903,7 +2079,13 @@ def render_tui_lines(
             continue
         ch = checks_summary(pr)
         tag = "[DRAFT] " if pr.get("isDraft") else ""
-        lines.append(f"  #{pr['number']} {tag}{dec['action']:18} mergeable={pr.get('mergeable','?'):12} checks(p={ch['pending']},f={ch['failing']}) {pr.get('title','')[:40]}")
+        follow_up = " [FOLLOW-UP]" if (pr.get("mergeStateStatus") or "").upper() == "UNSTABLE" else ""
+        reason = str(dec.get("reason") or "")
+        base = f"  #{pr['number']} {tag}{dec['action']:18} mergeable={pr.get('mergeable','?'):12} checks(p={ch['pending']},f={ch['failing']}) {pr.get('title','')[:40]}{follow_up}"
+        if reason:
+            lines.append(f"{base} | reason={reason}")
+        else:
+            lines.append(base)
     lines.extend(["", "Dispatches:"])
     for a in (plan.get("repo_actions") or [])[:8]:
         lines.append(f"  {a['action']:30} {a.get('reason','')[:60]}")
@@ -2001,6 +2183,16 @@ def _draw_full_tui(
                     break
                 _safe_addstr(pr_win, row, 2, f"• {action}: {count}", _pr_action_color(action))
                 row += 1
+        pr_reasons = [item for item in live.get("rationales") or [] if item.get("kind") == "pr"]
+        if pr_reasons and row < body_h - 2:
+            row += 1
+            _safe_addstr(pr_win, row, 1, "Why", curses.color_pair(4) | curses.A_BOLD)
+            row += 1
+            for item in pr_reasons:
+                if row >= body_h - 1:
+                    break
+                text = f"{item['target']} -> {item['action']}: {item['reason']}"
+                row = _add_wrapped_lines(pr_win, row, 2, text, 2, _pr_action_color(item["action"]))
     else:
         plan = heartbeat_data["plan"]
         snapshot = heartbeat_data["snapshot"]
@@ -2009,9 +2201,10 @@ def _draw_full_tui(
         non_draft = [p for p in prs if not p.get("isDraft")]
         mergeable_list = [p for p in non_draft if p.get("mergeable") == "MERGEABLE"]
         conflicting_list = [p for p in non_draft if p.get("mergeable") == "CONFLICTING" or p.get("mergeStateStatus") == "DIRTY"]
+        unstable_list = [p for p in non_draft if (p.get("mergeStateStatus") or "").upper() == "UNSTABLE"]
         drafts = [p for p in prs if p.get("isDraft")]
 
-        summary = f" {len(prs)} open | {len(drafts)} draft | {len(mergeable_list)} mergeable | {len(conflicting_list)} conflict"
+        summary = f" {len(prs)} open | {len(drafts)} draft | {len(mergeable_list)} mergeable | {len(conflicting_list)} conflict | {len(unstable_list)} follow-up"
         _safe_addstr(pr_win, row, 1, summary[:mid - 3], curses.color_pair(6))
         row += 1
 
@@ -2025,6 +2218,7 @@ def _draw_full_tui(
             ch = checks_summary(pr)
             is_draft = pr.get("isDraft", False)
             draft_tag = "✎" if is_draft else " "
+            follow_up_tag = "!" if (pr.get("mergeStateStatus") or "").upper() == "UNSTABLE" else " "
             m = pr.get("mergeable", "?")[:7]
             num_str = f"#{pr['number']:4}"
             action_str = f"{action:17}"
@@ -2032,11 +2226,17 @@ def _draw_full_tui(
 
             _safe_addstr(pr_win, row, 1, num_str, curses.color_pair(4) | curses.A_BOLD)
             _safe_addstr(pr_win, row, 6, draft_tag, curses.color_pair(7))
+            _safe_addstr(pr_win, row, 7, follow_up_tag, curses.color_pair(2) | curses.A_BOLD)
             _safe_addstr(pr_win, row, 8, action_str, _pr_action_color(action))
             _safe_addstr(pr_win, row, 26, f"m={m}", curses.color_pair(3) if m == "UNKNOWN" else (curses.color_pair(1) if m == "MERGEAB" else curses.color_pair(2)))
             _safe_addstr(pr_win, row, 35, f"c={ch['failing']}", curses.color_pair(2) if ch["failing"] else curses.color_pair(6))
-            _safe_addstr(pr_win, row, 39, title, curses.color_pair(6))
+            _safe_addstr(pr_win, row, 39, title, curses.color_pair(2) if follow_up_tag else curses.color_pair(6))
             row += 1
+            reason = str(dec.get("reason") or "")
+            if reason and row < body_h - 1:
+                reason_text = f"    reason: {reason}"[:mid - 3]
+                _safe_addstr(pr_win, row, 2, reason_text, curses.color_pair(7))
+                row += 1
     # ── Right panel: dispatches + issues + runs ───────────────────────────────
     rp_win = curses.newwin(body_h, W - mid - 1, body_top, mid)
     _draw_box(rp_win, "Supervisor Planning" if show_live else "Repo Actions & Status")
@@ -2073,6 +2273,16 @@ def _draw_full_tui(
                     break
                 _safe_addstr(rp_win, row, 2, f"• {action}", curses.color_pair(5))
                 row += 1
+        repo_reasons = [item for item in live.get("rationales") or [] if item.get("kind") == "repo"]
+        if repo_reasons and row < body_h - 2:
+            row += 1
+            _safe_addstr(rp_win, row, 1, "Why", curses.color_pair(4) | curses.A_BOLD)
+            row += 1
+            for item in repo_reasons:
+                if row >= body_h - 1:
+                    break
+                text = f"{item['target']} -> {item['action']}: {item['reason']}"
+                row = _add_wrapped_lines(rp_win, row, 2, text, 2, curses.color_pair(5))
     if not show_live and heartbeat_data is not None:
         plan = heartbeat_data["plan"]
         meta = heartbeat_data["meta"]
@@ -2214,6 +2424,7 @@ def run_tui(
     action_log: list[str] = []
     heartbeat_count = 0
     live_beat: dict[str, Any] = {"phase": "initializing", "active": True}
+    logged_rationales: set[tuple[str, str, str]] = set()
 
     # Chat state
     chat_open = False
@@ -2374,7 +2585,7 @@ def run_tui(
 
     def _main(stdscr: Any) -> int:
         nonlocal heartbeat_data, paused, next_run_at, status_message
-        nonlocal log_scroll, heartbeat_count, live_beat
+        nonlocal log_scroll, heartbeat_count, live_beat, logged_rationales
         nonlocal chat_open, chat_agent_idx, chat_input, chat_messages, chat_thinking
         force_plain = args.tui_plain or os.environ.get("HEARTBEAT_TUI_PLAIN", "false").lower() == "true"
         use_full_layout = not force_plain
@@ -2412,14 +2623,23 @@ def run_tui(
             if not chat_open and not paused and (heartbeat_data is None or now >= next_run_at):
                 remaining_pre = int(next_run_at - time.monotonic()) if not paused else interval
                 live_beat = {"phase": "starting", "active": True}
+                logged_rationales = set()
 
                 def _beat_progress(message: str, details: dict[str, Any] | None = None) -> None:
-                    nonlocal status_message, log_scroll, live_beat
+                    nonlocal status_message, log_scroll, live_beat, logged_rationales
                     live_beat.update(details or {})
                     live_beat["phase"] = message
                     live_beat["active"] = True
                     status_message = f"Beat #{heartbeat_count + 1}: {message}"
                     action_log.append(f"{isoformat()}  {'heartbeat':25} {'phase':22} | –  {message[:70]}")
+                    for item in (details or {}).get("rationales") or []:
+                        key = (item.get("target", "?"), item.get("action", "wait"), item.get("reason", ""))
+                        if key in logged_rationales:
+                            continue
+                        logged_rationales.add(key)
+                        action_log.append(
+                            f"{isoformat()}  {item.get('target', '?'):25} {item.get('action', 'wait'):22} | –  {item.get('reason', '')[:90]}"
+                        )
                     log_scroll = max(0, len(action_log) - 10)
                     if use_full_layout:
                         _draw_full_tui(stdscr, heartbeat_data, args.interval, args.dry_run, paused, remaining_pre, status_message, log_scroll, action_log, heartbeat_count, live_beat)

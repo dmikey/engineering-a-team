@@ -493,6 +493,25 @@ When chat is used in TUI mode, relay publication now dispatches the council
 workflow so discussion outcomes are posted through GitHub Actions instead of
 direct local GraphQL calls.
 
+#### Copilot planner timeout and cooldown
+
+Local heartbeats consult the Copilot CLI planner (`gh copilot`) each cycle.
+To keep a hung or unavailable planner from stalling the TUI:
+
+- The planner call times out after 45 seconds by default; override with
+  `HEARTBEAT_MODEL_TIMEOUT` (seconds).
+- After a planner timeout or failure, the runner enters a 30-minute
+  **planner cooldown** and plans from safe heuristics immediately instead of
+  retrying every beat. The status line shows
+  `copilot-cli unavailable, cooldown ~29m` while active.
+- The heuristic plan still merges safe PRs, dispatches QA, routes backlog
+  work, and posts `@copilot` handoffs — no beat is skipped.
+
+If the planner keeps timing out, run `gh copilot -p "say hi"` once in a
+normal interactive terminal: first-run trust/login prompts are the usual
+cause, and the heartbeat resumes Copilot planning automatically once the
+cooldown expires.
+
 The runner prints an in-depth overview each cycle and also writes the latest
 report plus local dedupe state under `.git/heartbeat-runner/`.
 
