@@ -117,7 +117,7 @@ Usage:
   scripts/autonomous-heartbeat.sh restart [options]
   scripts/autonomous-heartbeat.sh run [options]
   scripts/autonomous-heartbeat.sh once [options]
-  scripts/autonomous-heartbeat.sh tui [options]
+  scripts/autonomous-heartbeat.sh tui [options]     # interactive agentic supervisor (acts every beat)
   scripts/autonomous-heartbeat.sh install-service [options]
   scripts/autonomous-heartbeat.sh uninstall-service
   scripts/autonomous-heartbeat.sh doctor
@@ -149,10 +149,14 @@ Examples:
   scripts/autonomous-heartbeat.sh start --interval 600
   scripts/autonomous-heartbeat.sh install-service --interval 600
   scripts/autonomous-heartbeat.sh restart --interval 600
-  scripts/autonomous-heartbeat.sh tui --tail-lines 80 --refresh 2
+  scripts/autonomous-heartbeat.sh tui --interval 300
   scripts/autonomous-heartbeat.sh status
   scripts/autonomous-heartbeat.sh stop
   scripts/autonomous-heartbeat.sh once --ref main
+
+TUI environment toggles:
+  HEARTBEAT_TUI_DRY_RUN=true   Observe decisions without mutating GitHub state
+  HEARTBEAT_TUI_PLAIN=true     Plain-text rendering (no colors/panels)
 EOF
 }
 
@@ -306,14 +310,34 @@ tui_mode() {
   local tail_lines="$2"
 
   ensure_prereqs
-  touch "$LOG_FILE" "$DECISION_LOG_FILE"
 
-  if [[ ! "$refresh_seconds" =~ ^[0-9]+$ ]] || [[ "$refresh_seconds" -lt 1 ]]; then
-    echo "Error: --refresh must be an integer >= 1." >&2
+  if [[ ! -f "$HEARTBEAT_RUNNER" ]]; then
+    echo "Error: missing heartbeat runner at $HEARTBEAT_RUNNER" >&2
     exit 1
   fi
 
-  render_tui "$refresh_seconds" "$tail_lines"
+  if is_running; then
+    echo "Note: background heartbeat daemon is running; shared cooldown state prevents duplicate actions." >&2
+  fi
+
+  local repo_name
+  repo_name="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)"
+
+  # The runner TUI is the live supervisor loop: it readies drafts, syncs
+  # conflicting branches, hands stuck PRs to @copilot, dispatches QA/PM/PO/
+  # council workflows, and merges eligible PRs each beat.
+  local runner_args=(--tui --interval "$INTERVAL")
+  if [[ -n "$repo_name" ]]; then
+    runner_args+=(--repo "$repo_name")
+  fi
+  if [[ "${HEARTBEAT_TUI_DRY_RUN:-false}" == "true" ]]; then
+    runner_args+=(--dry-run)
+  fi
+  if [[ "${HEARTBEAT_TUI_PLAIN:-false}" == "true" ]]; then
+    runner_args+=(--tui-plain)
+  fi
+
+  exec python3 "$HEARTBEAT_RUNNER" "${runner_args[@]}"
 }
 
 verify_models_pipeline() {

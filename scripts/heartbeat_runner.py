@@ -44,6 +44,7 @@ WORKFLOW_COOLDOWNS = {
 }
 AUTH_FAILURE_COOLDOWN = timedelta(hours=6)
 PR_READY_COOLDOWN = timedelta(hours=6)
+WORKFLOW_APPROVAL_COOLDOWN = timedelta(hours=1)
 COPILOT_HANDOFF_COOLDOWN = timedelta(hours=12)
 PR_SYNC_COOLDOWN = timedelta(hours=6)
 STUCK_PR_ISSUE_COOLDOWN = timedelta(hours=3)
@@ -209,14 +210,14 @@ def resolve_repo(explicit_repo: str | None) -> dict[str, str]:
 def resolve_models_token() -> tuple[str | None, str]:
     # In GitHub Actions, require explicit model token env vars.
     if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
-        for env_name in ("MODELS_TOKEN", "GH_MODELS_TOKEN"):
+        for env_name in ("MODELS_TOKEN", "GH_MODELS_TOKEN", "GH_USER_PAT"):
             value = os.environ.get(env_name, "").strip()
             if value:
                 return value, env_name
         return None, "actions-unconfigured"
 
-    # Local runs prefer explicit model token env vars when present.
-    for env_name in ("MODELS_TOKEN", "GH_MODELS_TOKEN"):
+    # Local runs prefer the single GH_USER_PAT, then legacy model token env vars.
+    for env_name in ("GH_USER_PAT", "MODELS_TOKEN", "GH_MODELS_TOKEN", "HEARTBEAT_GH_TOKEN"):
         value = os.environ.get(env_name, "").strip()
         if value:
             return value, env_name
@@ -246,7 +247,7 @@ def _explicit_gh_token_is_unauthorized(env: dict[str, str]) -> bool:
 
 
 def resolve_gh_command_env() -> tuple[dict[str, str] | None, str]:
-    for env_name in ("HEARTBEAT_GH_TOKEN", "GH_USER_PAT"):
+    for env_name in ("GH_USER_PAT", "HEARTBEAT_GH_TOKEN"):
         value = os.environ.get(env_name, "").strip()
         if value:
             env = os.environ.copy()
@@ -439,12 +440,18 @@ def call_copilot_cli_model(system_prompt: str, user_prompt: str) -> tuple[bool, 
     env.pop("GH_TOKEN", None)
     env.pop("GITHUB_TOKEN", None)
 
-    result = subprocess.run(
-        ["gh", "copilot", "-p", prompt],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    # A hung Copilot CLI call must not stall the heartbeat; fall back to heuristics.
+    timeout_s = int(os.environ.get("HEARTBEAT_MODEL_TIMEOUT", "120"))
+    try:
+        result = subprocess.run(
+            ["gh", "copilot", "-p", prompt],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"gh copilot timed out after {timeout_s}s"
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "gh copilot command failed"
         return False, detail.splitlines()[0][:240]
@@ -1260,7 +1267,7 @@ def build_plan(
         return heuristic, meta
 
     if not models_token:
-        meta["models_status"] = "disabled: MODELS_TOKEN or GH_MODELS_TOKEN not set"
+        meta["models_status"] = "disabled: set GH_USER_PAT (or MODELS_TOKEN) for model inference"
         return heuristic, meta
 
     ok, response = call_github_model(model, system_prompt, user_prompt, models_token)
@@ -1306,6 +1313,44 @@ def merge_pr(repo: str, pr_number: int, dry_run: bool) -> str:
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"failed to merge PR #{pr_number}")
     return result.stdout.strip() or f"Merged or queued PR #{pr_number}"
+
+
+def approve_workflow_run(repo: str, run_id: int, dry_run: bool) -> str:
+    command = ["gh", "api", "--method", "POST", f"repos/{repo}/actions/runs/{run_id}/approve"]
+    if dry_run:
+        return "DRY RUN: " + " ".join(command)
+    result = run_command(command, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"failed to approve workflow run {run_id}")
+    return f"Approved workflow run {run_id}"
+
+
+def approve_pending_workflow_runs(snapshot: dict[str, Any], state: dict[str, Any], repo: str, dry_run: bool) -> list[dict[str, Any]]:
+    """Approve workflow runs held at the 'action required' approval gate so PR checks can execute."""
+    results: list[dict[str, Any]] = []
+    for run in snapshot["runs"]:
+        status = (run.get("status") or "").lower()
+        conclusion = (run.get("conclusion") or "").lower()
+        if status != "action_required" and conclusion != "action_required":
+            continue
+        run_id = run.get("databaseId")
+        if not run_id:
+            continue
+        workflow = run.get("workflowName", "?")
+        event_key = f"approve:run:{run_id}"
+        if state_event_recent(state, event_key, WORKFLOW_APPROVAL_COOLDOWN):
+            continue
+        try:
+            detail = approve_workflow_run(repo, run_id, dry_run)
+            if not dry_run:
+                record_event(state, event_key, {"workflow": workflow})
+            results.append({"target": f"run:{run_id}", "action": "approve_workflow", "status": "ok", "detail": f"{workflow}: {detail}"})
+        except RuntimeError as exc:
+            short = str(exc).split("\n")[0][:120]
+            if not dry_run:
+                record_event(state, event_key, {"workflow": workflow, "error": short})
+            results.append({"target": f"run:{run_id}", "action": "approve_workflow", "status": "error", "detail": f"{workflow}: {short}"})
+    return results
 
 
 def sync_pr_branch(repo: str, pr_number: int, dry_run: bool) -> str:
@@ -1621,23 +1666,69 @@ def run_heartbeat_cycle(
     state_file: Path,
     overview_file: Path,
     ledger_file: Path,
+    progress: Any = None,
 ) -> tuple[int, dict[str, Any]]:
+    def report(message: str, **details: Any) -> None:
+        if progress is not None:
+            progress(message, details)
+
+    report(f"fetching open PRs (limit {args.pr_limit})")
+    prs = fetch_open_prs(repo_info["nameWithOwner"], args.pr_limit)
+    drafts = sum(1 for pr in prs if pr.get("isDraft"))
+    conflicting = sum(
+        1 for pr in prs
+        if pr.get("mergeable") == "CONFLICTING" or pr.get("mergeStateStatus") == "DIRTY"
+    )
+    mergeable = sum(1 for pr in prs if not pr.get("isDraft") and pr.get("mergeable") == "MERGEABLE")
+    report(f"fetched {len(prs)} open PRs", prs=len(prs), drafts=drafts, conflicting=conflicting, mergeable=mergeable)
+    report(f"fetching open issues (limit {args.issue_limit})", prs=len(prs), drafts=drafts, conflicting=conflicting, mergeable=mergeable)
+    issues = fetch_open_issues(repo_info["nameWithOwner"], args.issue_limit)
+    unassigned = sum(1 for issue in issues if not issue.get("assignees"))
+    report(f"fetched {len(issues)} open issues", prs=len(prs), drafts=drafts, conflicting=conflicting, mergeable=mergeable, issues=len(issues), unassigned=unassigned)
+    report(f"fetching workflow runs (limit {args.run_limit})", prs=len(prs), drafts=drafts, conflicting=conflicting, mergeable=mergeable, issues=len(issues), unassigned=unassigned)
+    runs = fetch_runs(repo_info["nameWithOwner"], args.run_limit)
+    active_runs = sum(1 for run in runs if (run.get("status") or "").lower() in ACTIVE_RUN_STATUSES)
+    failing_runs = sum(1 for run in runs if (run.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS)
+    gated_runs = sum(
+        1 for run in runs
+        if (run.get("status") or "").lower() == "action_required"
+        or (run.get("conclusion") or "").lower() == "action_required"
+    )
     snapshot = {
         "repo": repo_info,
-        "prs": fetch_open_prs(repo_info["nameWithOwner"], args.pr_limit),
-        "issues": fetch_open_issues(repo_info["nameWithOwner"], args.issue_limit),
-        "runs": fetch_runs(repo_info["nameWithOwner"], args.run_limit),
+        "prs": prs,
+        "issues": issues,
+        "runs": runs,
     }
     reconcile_conflict_failures(state, snapshot)
+    live_context = {
+        "prs": len(prs), "drafts": drafts, "conflicting": conflicting, "mergeable": mergeable,
+        "issues": len(issues), "unassigned": unassigned, "runs": len(runs),
+        "active_runs": active_runs, "failing_runs": failing_runs, "gated_runs": gated_runs,
+    }
+    report("approving gated workflow runs", **live_context)
+    approval_results = approve_pending_workflow_runs(snapshot, state, repo_info["nameWithOwner"], args.dry_run)
     effective_model_every, cadence_reason = adaptive_model_every(snapshot, args.model_every, args.adaptive_model_cadence)
     models_token, token_source = resolve_models_token()
+    report("planning decisions (model inference can take a minute or two)", **live_context, model_cadence=effective_model_every)
     plan, meta = build_plan(snapshot, state, repo_root, args.model, models_token, effective_model_every)
     if meta["models_status"] == "ready":
         meta["models_status"] = f"ready via {token_source}"
     meta["model_cadence"] = f"{effective_model_every} ({cadence_reason})"
     meta["gh_auth_source"] = GH_AUTH_SOURCE
-    results = execute_plan(snapshot, plan, state, repo_info["nameWithOwner"], args.dry_run, args.max_actions)
+    pr_count = len(plan.get("pull_requests") or [])
+    dispatch_count = len(plan.get("repo_actions") or [])
+    report(
+        f"executing plan: {pr_count} PR decisions, {dispatch_count} dispatches",
+        **live_context,
+        decision_source=meta["decision_source"],
+        pr_actions=[decision.get("action", "wait") for decision in plan.get("pull_requests") or []],
+        repo_actions=[action.get("action", "wait") for action in plan.get("repo_actions") or []],
+    )
+    results = approval_results + execute_plan(snapshot, plan, state, repo_info["nameWithOwner"], args.dry_run, args.max_actions)
+    report("checking stuck-PR escalations")
     results.extend(run_stuck_pr_escalations(snapshot, state, repo_info["nameWithOwner"], args.dry_run))
+    report("saving ledger, state, and overview")
     append_decision_ledger(ledger_file, decision_ledger_events(snapshot, plan, results, meta, args.dry_run))
     state["heartbeats"] = int(state.get("heartbeats", 0)) + 1
     state["last_heartbeat_at"] = isoformat()
@@ -1842,6 +1933,7 @@ def _draw_full_tui(
     log_scroll: int,
     action_log: list[str],
     heartbeat_count: int,
+    live_beat: dict[str, Any] | None = None,
 ) -> None:
     stdscr.erase()
     H, W = stdscr.getmaxyx()
@@ -1863,6 +1955,7 @@ def _draw_full_tui(
     body_bot = H - log_h - 1
     body_h = max(body_bot - body_top, 2)
     mid = W // 2
+    show_live = heartbeat_data is None or bool(live_beat and live_beat.get("active"))
 
     mode = "DRY-RUN" if dry_run else "ACTIVE"
     state_str = "⏸ PAUSED" if paused else f"next in {max(next_run_in,0)}s"
@@ -1877,10 +1970,37 @@ def _draw_full_tui(
 
     # ── Left panel: PR queue ─────────────────────────────────────────────────
     pr_win = curses.newwin(body_h, mid - 1, body_top, 0)
-    _draw_box(pr_win, "PR Decision Queue")
+    _draw_box(pr_win, "Live PR Assessment" if show_live else "PR Decision Queue")
     row = 1
-    if heartbeat_data is None:
-        _safe_addstr(pr_win, row, 1, "Waiting for first cycle...", curses.color_pair(3))
+    if show_live:
+        live = live_beat or {}
+        _safe_addstr(pr_win, row, 1, f"Phase: {live.get('phase', 'starting')}", curses.color_pair(3) | curses.A_BOLD)
+        row += 2
+        _safe_addstr(pr_win, row, 1, "Observed repository state", curses.color_pair(4))
+        row += 1
+        for label, value in (
+            ("Open PRs", live.get("prs")),
+            ("Draft PRs", live.get("drafts")),
+            ("Mergeable", live.get("mergeable")),
+            ("Conflicts", live.get("conflicting")),
+        ):
+            if row >= body_h - 1:
+                break
+            shown = "collecting…" if value is None else str(value)
+            color = curses.color_pair(2) if label == "Conflicts" and value else curses.color_pair(6)
+            _safe_addstr(pr_win, row, 2, f"{label:14} {shown}", color)
+            row += 1
+        actions = live.get("pr_actions") or []
+        if actions and row < body_h - 2:
+            row += 1
+            _safe_addstr(pr_win, row, 1, "Planned PR actions", curses.color_pair(4))
+            row += 1
+            counts = {action: actions.count(action) for action in dict.fromkeys(actions)}
+            for action, count in counts.items():
+                if row >= body_h - 1:
+                    break
+                _safe_addstr(pr_win, row, 2, f"• {action}: {count}", _pr_action_color(action))
+                row += 1
     else:
         plan = heartbeat_data["plan"]
         snapshot = heartbeat_data["snapshot"]
@@ -1917,13 +2037,43 @@ def _draw_full_tui(
             _safe_addstr(pr_win, row, 35, f"c={ch['failing']}", curses.color_pair(2) if ch["failing"] else curses.color_pair(6))
             _safe_addstr(pr_win, row, 39, title, curses.color_pair(6))
             row += 1
-    pr_win.refresh()
-
     # ── Right panel: dispatches + issues + runs ───────────────────────────────
     rp_win = curses.newwin(body_h, W - mid - 1, body_top, mid)
-    _draw_box(rp_win, "Repo Actions & Status")
+    _draw_box(rp_win, "Supervisor Planning" if show_live else "Repo Actions & Status")
     row = 1
-    if heartbeat_data is not None:
+    if show_live:
+        live = live_beat or {}
+        _safe_addstr(rp_win, row, 1, "Evidence and decision context", curses.color_pair(4) | curses.A_BOLD)
+        row += 2
+        for label, value in (
+            ("Issues", live.get("issues")),
+            ("Unassigned", live.get("unassigned")),
+            ("Workflow runs", live.get("runs")),
+            ("Active runs", live.get("active_runs")),
+            ("Failing runs", live.get("failing_runs")),
+            ("Approval gates", live.get("gated_runs")),
+        ):
+            if row >= body_h - 1:
+                break
+            shown = "collecting…" if value is None else str(value)
+            color = curses.color_pair(2) if label in ("Failing runs", "Approval gates") and value else curses.color_pair(6)
+            _safe_addstr(rp_win, row, 2, f"{label:16} {shown}", color)
+            row += 1
+        source = live.get("decision_source")
+        if source and row < body_h - 2:
+            row += 1
+            _safe_addstr(rp_win, row, 1, f"Planner: {source}", curses.color_pair(5))
+            row += 1
+        repo_actions = live.get("repo_actions") or []
+        if repo_actions and row < body_h - 2:
+            _safe_addstr(rp_win, row, 1, "Planned agent dispatches", curses.color_pair(4))
+            row += 1
+            for action in repo_actions:
+                if row >= body_h - 1:
+                    break
+                _safe_addstr(rp_win, row, 2, f"• {action}", curses.color_pair(5))
+                row += 1
+    if not show_live and heartbeat_data is not None:
         plan = heartbeat_data["plan"]
         meta = heartbeat_data["meta"]
         snapshot = heartbeat_data["snapshot"]
@@ -1965,8 +2115,6 @@ def _draw_full_tui(
                     break
                 _safe_addstr(rp_win, row, 2, f"⟳ {r.get('workflowName','?')[:W-mid-5]}", curses.color_pair(3))
                 row += 1
-    rp_win.refresh()
-
     # ── Action log panel ──────────────────────────────────────────────────────
     log_win = curses.newwin(log_h, W, body_bot, 0)
     _draw_box(log_win, f"Action Log  ({len(action_log)} entries, ↑↓ scroll)")
@@ -1983,11 +2131,13 @@ def _draw_full_tui(
         else:
             col = curses.color_pair(6)
         _safe_addstr(log_win, li + 1, 1, entry[: W - 2], col)
-    log_win.refresh()
-
     # Status bar
     _safe_addstr(stdscr, H - 1, 0, f" {status_msg}"[: W - 1].ljust(W - 1), curses.color_pair(3) | curses.A_REVERSE)
-    stdscr.refresh()
+    stdscr.noutrefresh()
+    pr_win.noutrefresh()
+    rp_win.noutrefresh()
+    log_win.noutrefresh()
+    curses.doupdate()
 
 
 def _draw_chat_panel(stdscr: Any, messages: list[dict[str, str]], agent_name: str, input_buf: str, thinking: bool) -> None:
@@ -2063,6 +2213,7 @@ def run_tui(
     log_scroll = 0
     action_log: list[str] = []
     heartbeat_count = 0
+    live_beat: dict[str, Any] = {"phase": "initializing", "active": True}
 
     # Chat state
     chat_open = False
@@ -2190,13 +2341,18 @@ def run_tui(
 
         # Occasionally Copilot returns exit code 0 with empty stdout in prompt
         # mode. Retry once before surfacing an error to the chat panel.
+        chat_timeout = int(os.environ.get("HEARTBEAT_CHAT_TIMEOUT", "180"))
         for attempt in range(2):
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                env=env,
-            )
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=chat_timeout,
+                )
+            except subprocess.TimeoutExpired:
+                return f"⚠ Copilot CLI timed out after {chat_timeout}s"
             if result.returncode != 0:
                 detail = result.stderr.strip() or result.stdout.strip() or "gh copilot command failed"
                 return f"⚠ Copilot CLI failed: {detail.splitlines()[0][:220]}"
@@ -2218,7 +2374,7 @@ def run_tui(
 
     def _main(stdscr: Any) -> int:
         nonlocal heartbeat_data, paused, next_run_at, status_message
-        nonlocal log_scroll, heartbeat_count
+        nonlocal log_scroll, heartbeat_count, live_beat
         nonlocal chat_open, chat_agent_idx, chat_input, chat_messages, chat_thinking
         force_plain = args.tui_plain or os.environ.get("HEARTBEAT_TUI_PLAIN", "false").lower() == "true"
         use_full_layout = not force_plain
@@ -2254,17 +2410,25 @@ def run_tui(
 
             # ── Heartbeat cycle (skipped when chat is blocking) ──────────────
             if not chat_open and not paused and (heartbeat_data is None or now >= next_run_at):
-                # Render once before the blocking heartbeat call to avoid rapid
-                # clear/redraw flicker while work is executing.
-                status_message = f"Running beat #{heartbeat_count + 1}..."
                 remaining_pre = int(next_run_at - time.monotonic()) if not paused else interval
-                if use_full_layout:
-                    _draw_full_tui(stdscr, heartbeat_data, args.interval, args.dry_run, paused, remaining_pre, status_message, log_scroll, action_log, heartbeat_count)
-                else:
-                    lines = render_tui_lines(heartbeat_data, args.interval, args.dry_run, paused, remaining_pre, status_message)
-                    draw_tui(stdscr, lines)
+                live_beat = {"phase": "starting", "active": True}
 
-                errors, heartbeat_data = run_heartbeat_cycle(repo_root, repo_info, args, state, state_file, overview_file, ledger_file)
+                def _beat_progress(message: str, details: dict[str, Any] | None = None) -> None:
+                    nonlocal status_message, log_scroll, live_beat
+                    live_beat.update(details or {})
+                    live_beat["phase"] = message
+                    live_beat["active"] = True
+                    status_message = f"Beat #{heartbeat_count + 1}: {message}"
+                    action_log.append(f"{isoformat()}  {'heartbeat':25} {'phase':22} | –  {message[:70]}")
+                    log_scroll = max(0, len(action_log) - 10)
+                    if use_full_layout:
+                        _draw_full_tui(stdscr, heartbeat_data, args.interval, args.dry_run, paused, remaining_pre, status_message, log_scroll, action_log, heartbeat_count, live_beat)
+                    else:
+                        draw_tui(stdscr, render_tui_lines(heartbeat_data, args.interval, args.dry_run, paused, remaining_pre, status_message))
+
+                _beat_progress("starting")
+                errors, heartbeat_data = run_heartbeat_cycle(repo_root, repo_info, args, state, state_file, overview_file, ledger_file, progress=_beat_progress)
+                live_beat["active"] = False
                 heartbeat_count += 1
                 _append_log(heartbeat_data["results"])
                 log_scroll = max(0, len(action_log) - 10)
@@ -2300,7 +2464,7 @@ def run_tui(
                 if chat_open:
                     _draw_chat_panel(stdscr, chat_messages, agent_name, "".join(chat_input), chat_thinking)
                 elif use_full_layout:
-                    _draw_full_tui(stdscr, heartbeat_data, args.interval, args.dry_run, paused, remaining, status_message, log_scroll, action_log, heartbeat_count)
+                    _draw_full_tui(stdscr, heartbeat_data, args.interval, args.dry_run, paused, remaining, status_message, log_scroll, action_log, heartbeat_count, live_beat)
                 else:
                     lines = render_tui_lines(heartbeat_data, args.interval, args.dry_run, paused, remaining, status_message)
                     draw_tui(stdscr, lines)
