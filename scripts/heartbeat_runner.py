@@ -1316,8 +1316,10 @@ def build_plan(
     cadence = max(1, model_every)
     upcoming_heartbeat = int(state.get("heartbeats", 0)) + 1
     if cadence > 1 and (upcoming_heartbeat % cadence) != 0:
-        meta["models_status"] = f"skipped this cycle for cost control (model_every={cadence})"
-        report("using heuristic plan; model skipped by cadence", heuristic, "heuristic")
+        meta["models_status"] = (
+            f"heuristic-only this cycle (model cadence {cadence}; next model run in {cadence - ((upcoming_heartbeat % cadence) or cadence)} beats)"
+        )
+        report("using heuristic plan; model deferred by cadence", heuristic, "heuristic")
         return heuristic, meta
 
     system_prompt, user_prompt = model_prompt(snapshot, heuristic, read_collaboration_rules(repo_root))

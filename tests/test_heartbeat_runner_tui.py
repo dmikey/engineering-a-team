@@ -206,6 +206,23 @@ class HeartbeatRunnerTuiTests(unittest.TestCase):
         self.assertEqual(copilot_mock.call_count, 0)
         self.assertIn("cooldown", meta["models_status"])
 
+    def test_build_plan_skips_copilot_by_cadence_with_clear_status(self):
+        snapshot = {
+            "repo": {"nameWithOwner": "acme/widgets", "defaultBranch": "main"},
+            "prs": [],
+            "issues": [],
+            "runs": [],
+        }
+        state = {"events": {}, "heartbeats": 0}
+
+        plan, meta = heartbeat_runner.build_plan(
+            snapshot, state, Path("."), "gpt-4o-mini", None, 3
+        )
+
+        self.assertEqual(plan.get("pull_requests"), [])
+        self.assertIn("cadence", meta["models_status"])
+        self.assertIn("heuristic", meta["models_status"])
+
     def test_build_plan_records_copilot_failure_for_cooldown(self):
         snapshot = {
             "repo": {"nameWithOwner": "acme/widgets", "defaultBranch": "main"},
