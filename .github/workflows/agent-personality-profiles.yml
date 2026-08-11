@@ -16,7 +16,7 @@ on:
         description: 'Comma-separated personality traits (e.g. analytical, creative, decisive)'
         required: false
       strengths:
-        description: 'Brief description of the agent's key strengths'
+        description: "Brief description of the agent's key strengths"
         required: false
       working_style:
         description: 'Short description of how the agent prefers to work'
@@ -31,7 +31,7 @@ jobs:
   personality-profiles:
     runs-on: ubuntu-latest
     env:
-      WORKFLOW_ACTION: ${{ inputs.action || 'report' }}
+      WORKFLOW_ACTION: ${{ github.event.inputs.action || 'report' }}
 
     steps:
       - name: Checkout repository
@@ -48,10 +48,10 @@ jobs:
         if: env.WORKFLOW_ACTION == 'set-profile'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          AGENT_NAME: ${{ inputs.agent_name || '' }}
-          TRAITS: ${{ inputs.traits || '' }}
-          STRENGTHS: ${{ inputs.strengths || '' }}
-          WORKING_STYLE: ${{ inputs.working_style || '' }}
+          AGENT_NAME: ${{ github.event.inputs.agent_name || '' }}
+          TRAITS: ${{ github.event.inputs.traits || '' }}
+          STRENGTHS: ${{ github.event.inputs.strengths || '' }}
+          WORKING_STYLE: ${{ github.event.inputs.working_style || '' }}
         run: |
           if [ -z "$AGENT_NAME" ]; then
             echo "No agent name provided; skipping set-profile step."
@@ -87,10 +87,10 @@ jobs:
         if: env.WORKFLOW_ACTION == 'update-profile'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          AGENT_NAME: ${{ inputs.agent_name || '' }}
-          TRAITS: ${{ inputs.traits || '' }}
-          STRENGTHS: ${{ inputs.strengths || '' }}
-          WORKING_STYLE: ${{ inputs.working_style || '' }}
+          AGENT_NAME: ${{ github.event.inputs.agent_name || '' }}
+          TRAITS: ${{ github.event.inputs.traits || '' }}
+          STRENGTHS: ${{ github.event.inputs.strengths || '' }}
+          WORKING_STYLE: ${{ github.event.inputs.working_style || '' }}
         run: |
           if [ -z "$AGENT_NAME" ]; then
             echo "No agent name provided; skipping update-profile step."
@@ -98,7 +98,7 @@ jobs:
           fi
 
           DATE_UTC=$(date -u +"%Y-%m-%d")
-          export DATE_UTC
+            WORKFLOW_ACTION: ${{ github.event.inputs.action || 'report' }}
           python3 - <<'PYEOF'
           import os, pathlib
           agent = os.environ["AGENT_NAME"]
@@ -112,18 +112,18 @@ jobs:
               f"**Traits**: {traits}\n"
               f"**Strengths**: {strengths}\n"
               f"**Working Style**: {working_style}\n"
-          )
-          pathlib.Path("/tmp/update-body.md").write_text(body, encoding="utf-8")
-          pathlib.Path("/tmp/update-title.txt").write_text(
-              f"Agent Personality Profile Update: {agent}", encoding="utf-8"
+                AGENT_NAME: ${{ github.event.inputs.agent_name || '' }}
+                TRAITS: ${{ github.event.inputs.traits || '' }}
+                STRENGTHS: ${{ github.event.inputs.strengths || '' }}
+                WORKING_STYLE: ${{ github.event.inputs.working_style || '' }}
           )
           PYEOF
 
           TITLE=$(cat /tmp/update-title.txt)
-          gh issue create \
-            --title "$TITLE" \
-            --body-file /tmp/update-body.md \
-            --label "personality-profile-update"
+                AGENT_NAME: ${{ github.event.inputs.agent_name || '' }}
+                TRAITS: ${{ github.event.inputs.traits || '' }}
+                STRENGTHS: ${{ github.event.inputs.strengths || '' }}
+                WORKING_STYLE: ${{ github.event.inputs.working_style || '' }}
 
       - name: Collect profile issue data
         env:

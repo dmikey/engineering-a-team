@@ -295,6 +295,18 @@ def default_ledger_path() -> Path:
     return base / "decision-ledger.jsonl"
 
 
+def default_runtime_log_path() -> Path:
+    base = repo_root() / ".git" / "heartbeat-runner"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / "runtime.log"
+
+
+def append_runtime_log(path: Path, entry: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(entry.rstrip() + "\n")
+
+
 def load_state(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"events": {}, "heartbeats": 0}
@@ -2386,6 +2398,11 @@ def _draw_full_tui(
         row += 1
         _safe_addstr(rp_win, row, 1, f"Runs:   {len(active_runs)} active  {len(failing_runs)} failing", curses.color_pair(2) if failing_runs else curses.color_pair(6))
         row += 1
+        if failing_runs and row < body_h - 1:
+            latest_failure = max(failing_runs, key=lambda run: run.get("createdAt", ""))
+            failure_text = f"Last failure: {latest_failure.get('workflowName', '?')}"
+            _safe_addstr(rp_win, row, 1, failure_text[:W - mid - 3], curses.color_pair(2) | curses.A_BOLD)
+            row += 1
         _safe_addstr(rp_win, row, 1, "─" * (W - mid - 3), curses.color_pair(7))
         row += 1
         _safe_addstr(rp_win, row, 1, "Scheduled dispatches:", curses.color_pair(4))
@@ -2400,6 +2417,16 @@ def _draw_full_tui(
         if not plan.get("repo_actions"):
             _safe_addstr(rp_win, row, 2, "  none pending", curses.color_pair(7))
             row += 1
+        recent_actions = [entry for entry in reversed(action_log) if "|" in entry][:3]
+        if recent_actions and row < body_h - 2:
+            _safe_addstr(rp_win, row, 1, "Recent actions:", curses.color_pair(4))
+            row += 1
+            for entry in recent_actions:
+                if row >= body_h - 1:
+                    break
+                _, _, detail = entry.partition("| ")
+                _safe_addstr(rp_win, row, 2, detail[:W - mid - 5], curses.color_pair(7))
+                row += 1
         if active_runs:
             _safe_addstr(rp_win, row, 1, "─" * (W - mid - 3), curses.color_pair(7))
             row += 1
@@ -2410,6 +2437,9 @@ def _draw_full_tui(
                     break
                 _safe_addstr(rp_win, row, 2, f"⟳ {r.get('workflowName','?')[:W-mid-5]}", curses.color_pair(3))
                 row += 1
+        if row < body_h - 1:
+            _safe_addstr(rp_win, row, 1, f"Log: {default_runtime_log_path().name}", curses.color_pair(7))
+            row += 1
     # ── Action log panel ──────────────────────────────────────────────────────
     log_win = curses.newwin(log_h, W, body_bot, 0)
     _draw_box(log_win, f"Action Log  ({len(action_log)} entries, ↑↓ scroll)")
@@ -2508,8 +2538,13 @@ def run_tui(
     log_scroll = 0
     action_log: list[str] = []
     heartbeat_count = 0
+    runtime_log_path = default_runtime_log_path()
     live_beat: dict[str, Any] = {"phase": "initializing", "active": True}
     logged_rationales: set[tuple[str, str, str]] = set()
+
+    def _record_action_log(entry: str) -> None:
+        action_log.append(entry)
+        append_runtime_log(runtime_log_path, entry)
 
     # Chat state
     chat_open = False
@@ -2522,7 +2557,7 @@ def run_tui(
         ts = isoformat()
         for r in results:
             status_sym = "✓" if r["status"] == "ok" else ("✗" if r["status"] == "error" else "–")
-            action_log.append(f"{ts}  {r['target']:25} {r['action']:22} | {r['status']} {status_sym}  {r.get('detail','')[:60]}")
+            _record_action_log(f"{ts}  {r['target']:25} {r['action']:22} | {r['status']} {status_sym}  {r.get('detail','')[:100]}")
 
     def _trigger_dispatch(workflow: str, inputs: dict[str, str], label: str) -> None:
         nonlocal status_message
@@ -2531,13 +2566,13 @@ def run_tui(
             if not args.dry_run:
                 record_event(state, f"dispatch:{workflow}", {"reason": label})
                 save_state(state_file, state)
-            action_log.append(f"{isoformat()}  {workflow:30} dispatch_manual      | ok ✓  {out[:50]}")
-            status_message = f"Dispatched {label}"
+            _record_action_log(f"{isoformat()}  {workflow:30} dispatch_manual      | ok ✓  {out[:100]}")
+            status_message = f"Dispatched {label}: {out[:80]}"
         except RuntimeError as exc:
             short = str(exc).split("\n")[0][:80]
             if "403" in short or "Resource not accessible" in short:
                 short = f"Auth error dispatching {label} — export GH_USER_PAT with actions:write"
-            action_log.append(f"{isoformat()}  {workflow:30} dispatch_manual      | error ✗  {short}")
+            _record_action_log(f"{isoformat()}  {workflow:30} dispatch_manual      | error ✗  {short}")
             status_message = f"✗ {short}"
 
     def _trigger_copilot_assignment() -> None:
@@ -2551,7 +2586,7 @@ def run_tui(
         top_issue = select_top_unassigned_issue(issues)
         if not top_issue:
             status_message = "No unassigned issues available for Copilot assignment"
-            action_log.append(f"{isoformat()}  {'assign-top-priority-agent.lock.yml':30} dispatch_manual      | skipped –  no unassigned issues")
+            _record_action_log(f"{isoformat()}  {'assign-top-priority-agent.lock.yml':30} dispatch_manual      | skipped –  no unassigned issues")
             return
 
         priority = issue_priority_label(top_issue)
@@ -2577,7 +2612,7 @@ def run_tui(
                 continue
             try:
                 out = mark_pr_ready(repo_info["nameWithOwner"], pr["number"], args.dry_run)
-                action_log.append(f"{isoformat()}  pr#{pr['number']:5}                    mark_ready           | ok ✓  {out[:50]}")
+                _record_action_log(f"{isoformat()}  pr#{pr['number']:5}                    mark_ready           | ok ✓  {out[:100]}")
                 if not args.dry_run:
                     # immediate merge attempt after promoting
                     refreshed = gh_json(
@@ -2588,11 +2623,11 @@ def run_tui(
                     allowed, detail = mergeable_guard(refreshed, heartbeat_data["snapshot"]["runs"])
                     if allowed:
                         mout = merge_pr(repo_info["nameWithOwner"], pr["number"], False)
-                        action_log.append(f"{isoformat()}  pr#{pr['number']:5}                    merge                | ok ✓  {mout[:50]}")
+                        _record_action_log(f"{isoformat()}  pr#{pr['number']:5}                    merge                | ok ✓  {mout[:100]}")
                     else:
-                        action_log.append(f"{isoformat()}  pr#{pr['number']:5}                    merge                | skipped –  {detail}")
+                        _record_action_log(f"{isoformat()}  pr#{pr['number']:5}                    merge                | skipped –  {detail}")
             except RuntimeError as exc:
-                action_log.append(f"{isoformat()}  pr#{pr['number']:5}                    mark_ready           | error ✗  {exc}")
+                _record_action_log(f"{isoformat()}  pr#{pr['number']:5}                    mark_ready           | error ✗  {exc}")
         status_message = "Draft → ready pass complete"
 
     def _send_chat(message: str, agent_name: str) -> str:
@@ -2741,13 +2776,13 @@ def run_tui(
                     live_beat["phase"] = message
                     live_beat["active"] = True
                     status_message = f"Beat #{heartbeat_count + 1}: {message}"
-                    action_log.append(f"{isoformat()}  {'heartbeat':25} {'phase':22} | –  {message[:70]}")
+                    _record_action_log(f"{isoformat()}  {'heartbeat':25} {'phase':22} | –  {message[:90]}")
                     for item in (details or {}).get("rationales") or []:
                         key = (item.get("target", "?"), item.get("action", "wait"), item.get("reason", ""))
                         if key in logged_rationales:
                             continue
                         logged_rationales.add(key)
-                        action_log.append(
+                        _record_action_log(
                             f"{isoformat()}  {item.get('target', '?'):25} {item.get('action', 'wait'):22} | –  {item.get('reason', '')[:90]}"
                         )
                     log_scroll = max(0, len(action_log) - 10)
@@ -2832,7 +2867,7 @@ def run_tui(
                         reply = _send_chat(user_text, agent_name)
                         chat_thinking = False
                         chat_messages.append({"role": "assistant", "content": reply})
-                        action_log.append(f"{isoformat()}  chat:{agent_name[:20]:20}             | ok ✓  {reply[:60]}")
+                        _record_action_log(f"{isoformat()}  chat:{agent_name[:20]:20}             | ok ✓  {reply[:100]}")
                         # Relay chat context through the council workflow so
                         # discussion publishing flows through GitHub Actions.
                         try:
