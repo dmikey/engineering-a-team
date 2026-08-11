@@ -36,6 +36,12 @@ RELEVANT_PR_WORKFLOWS = {
     "PR Compliance Checks",
     "Copilot cloud agent",
 }
+ISSUE_PRIORITY_LABELS = [
+    "priority: critical",
+    "priority: high",
+    "priority: medium",
+    "priority: low",
+]
 WORKFLOW_COOLDOWNS = {
     "qa-engineer.yml": timedelta(hours=6),
     "task-assignment.yml": timedelta(hours=6),
@@ -555,6 +561,32 @@ def fetch_runs(repo: str, limit: int) -> list[dict[str, Any]]:
 
 def label_names(issue: dict[str, Any]) -> list[str]:
     return [label.get("name", "") for label in issue.get("labels", [])]
+
+
+def issue_priority_label(issue: dict[str, Any]) -> str:
+    labels = set(label_names(issue))
+    for label in ISSUE_PRIORITY_LABELS:
+        if label in labels:
+            return label
+    if "blocked" in labels:
+        return "blocked"
+    return "unlabeled"
+
+
+def select_top_unassigned_issue(issues: list[dict[str, Any]]) -> dict[str, Any] | None:
+    candidates = [issue for issue in issues if not issue.get("assignees")]
+    if not candidates:
+        return None
+
+    def sort_key(issue: dict[str, Any]) -> tuple[int, int, int, datetime, int]:
+        labels = set(label_names(issue))
+        priority_rank = next((idx for idx, label in enumerate(ISSUE_PRIORITY_LABELS) if label in labels), len(ISSUE_PRIORITY_LABELS))
+        blocked_rank = 0 if "blocked" in labels else 1
+        feature_rank = 0 if {"feature", "product-owner"}.intersection(labels) else 1
+        created = parse_ts(issue.get("createdAt")) or parse_ts(issue.get("updatedAt")) or now_utc()
+        return (priority_rank, blocked_rank, feature_rank, created, int(issue.get("number") or 0))
+
+    return min(candidates, key=sort_key)
 
 
 def checks_summary(pr: dict[str, Any]) -> dict[str, int]:
@@ -2508,6 +2540,31 @@ def run_tui(
             action_log.append(f"{isoformat()}  {workflow:30} dispatch_manual      | error ✗  {short}")
             status_message = f"✗ {short}"
 
+    def _trigger_copilot_assignment() -> None:
+        nonlocal status_message
+        issues: list[dict[str, Any]]
+        if heartbeat_data and heartbeat_data.get("snapshot"):
+            issues = heartbeat_data["snapshot"].get("issues", [])
+        else:
+            issues = fetch_open_issues(repo_info["nameWithOwner"], 100)
+
+        top_issue = select_top_unassigned_issue(issues)
+        if not top_issue:
+            status_message = "No unassigned issues available for Copilot assignment"
+            action_log.append(f"{isoformat()}  {'assign-top-priority-agent.lock.yml':30} dispatch_manual      | skipped –  no unassigned issues")
+            return
+
+        priority = issue_priority_label(top_issue)
+        label = f"Copilot assignment for issue #{top_issue['number']}"
+        _trigger_dispatch(
+            "assign-top-priority-agent.lock.yml",
+            {
+                "issue_number": str(top_issue["number"]),
+                "priority": priority,
+            },
+            label,
+        )
+
     def _force_draft_ready() -> None:
         """Mark every open draft PR ready and queue merge."""
         nonlocal status_message
@@ -2833,11 +2890,7 @@ def run_tui(
                         "PM sprint report",
                     )
                 elif key in (ord("a"), ord("A")):
-                    _trigger_dispatch(
-                        "task-assignment.yml",
-                        {"task": "assign-tasks", "extra_context": "Supervisor TUI manual task assignment."},
-                        "Task assignment",
-                    )
+                    _trigger_copilot_assignment()
                 elif key in (ord("d"), ord("D")):
                     _force_draft_ready()
                 elif key in (curses.KEY_UP, ord("k")):

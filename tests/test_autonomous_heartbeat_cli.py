@@ -196,6 +196,40 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
         action_names = [action.get("action") for action in actions]
         self.assertIn("dispatch_task_assignment", action_names)
 
+    def test_select_top_unassigned_issue_prefers_highest_priority_label(self):
+        issues = [
+            {
+                "number": 10,
+                "labels": [{"name": "priority: medium"}],
+                "assignees": [],
+                "createdAt": "2026-08-11T04:00:00Z",
+            },
+            {
+                "number": 11,
+                "labels": [{"name": "priority: critical"}],
+                "assignees": [],
+                "createdAt": "2026-08-11T04:10:00Z",
+            },
+            {
+                "number": 12,
+                "labels": [{"name": "priority: high"}],
+                "assignees": [{"login": "dmikey"}],
+                "createdAt": "2026-08-11T03:00:00Z",
+            },
+        ]
+
+        chosen = heartbeat_runner.select_top_unassigned_issue(issues)
+        self.assertIsNotNone(chosen)
+        assert chosen is not None
+        self.assertEqual(chosen["number"], 11)
+
+    def test_issue_priority_label_defaults_to_blocked_then_unlabeled(self):
+        blocked = {"labels": [{"name": "blocked"}]}
+        unlabeled = {"labels": []}
+
+        self.assertEqual(heartbeat_runner.issue_priority_label(blocked), "blocked")
+        self.assertEqual(heartbeat_runner.issue_priority_label(unlabeled), "unlabeled")
+
 
 if __name__ == "__main__":
     unittest.main()
