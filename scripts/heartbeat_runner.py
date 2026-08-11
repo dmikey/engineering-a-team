@@ -571,6 +571,54 @@ def fetch_runs(repo: str, limit: int) -> list[dict[str, Any]]:
     )
 
 
+def describe_latest_failure(repo: str, runs: list[dict[str, Any]]) -> dict[str, str] | None:
+    failing_runs = [run for run in runs if (run.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS]
+    if not failing_runs:
+        return None
+
+    latest = max(failing_runs, key=lambda run: run.get("createdAt", ""))
+    run_id = latest.get("databaseId")
+    workflow = latest.get("workflowName") or latest.get("displayTitle") or "Unknown workflow"
+    url = latest.get("url") or ""
+    summary = f"{workflow}"
+
+    if run_id:
+        detail = gh_json(
+            [
+                "run",
+                "view",
+                str(run_id),
+                "--repo",
+                repo,
+                "--json",
+                "jobs",
+            ],
+            default=None,
+            check=False,
+        )
+        jobs = (detail or {}).get("jobs") or []
+        for job in jobs:
+            job_name = job.get("name") or "job"
+            failed_step = next(
+                (
+                    step for step in (job.get("steps") or [])
+                    if (step.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS
+                ),
+                None,
+            )
+            if failed_step:
+                step_name = failed_step.get("name") or "unknown step"
+                summary = f"{workflow} -> {job_name} -> {step_name}"
+                break
+
+    return {
+        "workflow": str(workflow),
+        "run_id": str(run_id or "?"),
+        "url": str(url),
+        "summary": summary,
+    }
+
+
 def label_names(issue: dict[str, Any]) -> list[str]:
     return [label.get("name", "") for label in issue.get("labels", [])]
 
@@ -1881,6 +1929,14 @@ def render_overview(snapshot: dict[str, Any], plan: dict[str, Any], results: lis
         "",
     ]
 
+    latest_failure = meta.get("latest_failure")
+    latest_failure_url = meta.get("latest_failure_url")
+    if latest_failure:
+        lines.append(f"- Latest failing workflow: {latest_failure}")
+        if latest_failure_url:
+            lines.append(f"- Latest failing run URL: {latest_failure_url}")
+
+    lines.extend(["", "## Pending Workflow Dispatches", ""])
     if plan["repo_actions"]:
         for entry in plan["repo_actions"]:
             lines.append(f"- {entry['action']}: {entry['reason']}")
@@ -1966,6 +2022,15 @@ def run_heartbeat_cycle(
         "issues": len(issues), "unassigned": unassigned, "runs": len(runs),
         "active_runs": active_runs, "failing_runs": failing_runs, "gated_runs": gated_runs,
     }
+    latest_failure = describe_latest_failure(repo_info["nameWithOwner"], runs)
+    if latest_failure:
+        live_context["latest_failure"] = latest_failure
+        report(
+            f"latest failing workflow: {latest_failure['summary']} (run {latest_failure['run_id']})",
+            **live_context,
+        )
+    else:
+        report("no failing workflows in recent run window", **live_context)
     report("approving gated workflow runs", **live_context)
     approval_results = approve_pending_workflow_runs(snapshot, state, repo_info["nameWithOwner"], args.dry_run)
     effective_model_every, cadence_reason = adaptive_model_every(snapshot, args.model_every, args.adaptive_model_cadence)
@@ -1982,6 +2047,12 @@ def run_heartbeat_cycle(
     )
     if meta["models_status"] == "ready":
         meta["models_status"] = f"ready via {token_source}"
+    if latest_failure:
+        meta["latest_failure"] = f"{latest_failure['summary']} (run {latest_failure['run_id']})"
+        meta["latest_failure_url"] = latest_failure["url"]
+    else:
+        meta["latest_failure"] = "none"
+        meta["latest_failure_url"] = ""
     meta["model_cadence"] = f"{effective_model_every} ({cadence_reason})"
     meta["gh_auth_source"] = GH_AUTH_SOURCE
     pr_count = len(plan.get("pull_requests") or [])
@@ -2365,6 +2436,15 @@ def _draw_full_tui(
             color = curses.color_pair(2) if label in ("Failing runs", "Approval gates") and value else curses.color_pair(6)
             _safe_addstr(rp_win, row, 2, f"{label:16} {shown}", color)
             row += 1
+        latest_failure = live.get("latest_failure")
+        if latest_failure and row < body_h - 2:
+            row += 1
+            _safe_addstr(rp_win, row, 1, "Latest failure", curses.color_pair(2) | curses.A_BOLD)
+            row += 1
+            text = f"{latest_failure.get('summary', '?')} (run {latest_failure.get('run_id', '?')})"
+            row = _add_wrapped_lines(rp_win, row, 2, text, 2, curses.color_pair(2))
+            if latest_failure.get("url") and row < body_h - 1:
+                row = _add_wrapped_lines(rp_win, row, 2, latest_failure["url"], 1, curses.color_pair(7))
         source = live.get("decision_source")
         if source and row < body_h - 2:
             row += 1
@@ -2412,6 +2492,12 @@ def _draw_full_tui(
             failure_text = f"Last failure: {latest_failure.get('workflowName', '?')}"
             _safe_addstr(rp_win, row, 1, failure_text[:W - mid - 3], curses.color_pair(2) | curses.A_BOLD)
             row += 1
+        failure_summary = meta.get("latest_failure")
+        if failure_summary and failure_summary != "none" and row < body_h - 1:
+            row = _add_wrapped_lines(rp_win, row, 1, f"Reason: {failure_summary}", 2, curses.color_pair(2))
+        failure_url = meta.get("latest_failure_url")
+        if failure_url and row < body_h - 1:
+            row = _add_wrapped_lines(rp_win, row, 1, failure_url, 1, curses.color_pair(7))
         _safe_addstr(rp_win, row, 1, "─" * (W - mid - 3), curses.color_pair(7))
         row += 1
         _safe_addstr(rp_win, row, 1, "Scheduled dispatches:", curses.color_pair(4))

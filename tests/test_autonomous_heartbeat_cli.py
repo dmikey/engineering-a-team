@@ -251,6 +251,51 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
         self.assertEqual(heartbeat_runner.issue_priority_label(blocked), "blocked")
         self.assertEqual(heartbeat_runner.issue_priority_label(unlabeled), "unlabeled")
 
+    def test_describe_latest_failure_returns_none_when_no_failures(self):
+        runs = [
+            {
+                "databaseId": 1,
+                "workflowName": "CI",
+                "conclusion": "success",
+                "createdAt": "2026-08-11T12:00:00Z",
+                "url": "https://example.com/runs/1",
+            }
+        ]
+
+        summary = heartbeat_runner.describe_latest_failure("owner/repo", runs)
+        self.assertIsNone(summary)
+
+    def test_describe_latest_failure_includes_failed_job_step(self):
+        runs = [
+            {
+                "databaseId": 99,
+                "workflowName": "Skill Development Tracking",
+                "conclusion": "failure",
+                "createdAt": "2026-08-11T15:13:51Z",
+                "url": "https://github.com/owner/repo/actions/runs/99",
+            }
+        ]
+        detail = {
+            "jobs": [
+                {
+                    "name": "Morgan · Skill Development Tracking",
+                    "steps": [
+                        {"name": "Set up job", "conclusion": "success"},
+                        {"name": "Gather workflow run data", "conclusion": "failure"},
+                    ],
+                }
+            ]
+        }
+
+        with mock.patch.object(heartbeat_runner, "gh_json", return_value=detail):
+            summary = heartbeat_runner.describe_latest_failure("owner/repo", runs)
+
+        self.assertIsNotNone(summary)
+        assert summary is not None
+        self.assertIn("Gather workflow run data", summary["summary"])
+        self.assertEqual(summary["run_id"], "99")
+        self.assertIn("actions/runs/99", summary["url"])
+
 
 if __name__ == "__main__":
     unittest.main()
