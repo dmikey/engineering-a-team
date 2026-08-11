@@ -619,6 +619,18 @@ def describe_latest_failure(repo: str, runs: list[dict[str, Any]]) -> dict[str, 
     }
 
 
+def failure_status_code(latest_failure: dict[str, str] | None) -> str:
+    if not latest_failure:
+        return "HF-OK"
+
+    workflow = (latest_failure.get("workflow") or "unknown").strip().lower().replace(" ", "-")
+    run_id = (latest_failure.get("run_id") or "?").strip()
+    summary = latest_failure.get("summary") or ""
+    failed_step = summary.rsplit(" -> ", 1)[-1] if " -> " in summary else "unknown-step"
+    failed_step = failed_step.strip().lower().replace(" ", "-")
+    return f"HF-FAIL wf={workflow} run={run_id} step={failed_step}"
+
+
 def label_names(issue: dict[str, Any]) -> list[str]:
     return [label.get("name", "") for label in issue.get("labels", [])]
 
@@ -1918,6 +1930,7 @@ def render_overview(snapshot: dict[str, Any], plan: dict[str, Any], results: lis
         f"- Models status: {meta['models_status']}",
         f"- Model cadence: {meta.get('model_cadence', 'n/a')}",
         f"- GH command auth: {meta['gh_auth_source']}",
+        f"- Last failure code: {meta.get('latest_failure_code', 'HF-UNKNOWN')}",
         "",
         "## Queue Summary",
         "",
@@ -2053,6 +2066,7 @@ def run_heartbeat_cycle(
     else:
         meta["latest_failure"] = "none"
         meta["latest_failure_url"] = ""
+    meta["latest_failure_code"] = failure_status_code(latest_failure)
     meta["model_cadence"] = f"{effective_model_every} ({cadence_reason})"
     meta["gh_auth_source"] = GH_AUTH_SOURCE
     pr_count = len(plan.get("pull_requests") or [])
