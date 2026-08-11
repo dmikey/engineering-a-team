@@ -164,13 +164,29 @@ jobs:
           CURRENT_DATE=$(date -u +"%Y-%m-%d")
           echo "current_date=$CURRENT_DATE" >> "$GITHUB_OUTPUT"
 
+          fetch_runs_page() {
+            local page="$1"
+            local out_file="$2"
+            local endpoint="repos/${{ github.repository }}/actions/runs?per_page=100&page=${page}"
+            local attempt
+
+            for attempt in 1 2 3; do
+              if gh api "$endpoint" > "$out_file"; then
+                echo "Fetched workflow runs page ${page} (attempt ${attempt})"
+                return 0
+              fi
+              echo "::warning::Failed to fetch workflow runs page ${page} (attempt ${attempt}/3)."
+            done
+
+            echo "::warning::Falling back to empty workflow_runs for page ${page} after repeated API failures."
+            echo '{"workflow_runs": []}' > "$out_file"
+            return 0
+          }
+
           # Fetch up to 200 recent runs to cover current + prior periods
-          gh api "repos/${{ github.repository }}/actions/runs?per_page=100" \
-            > /tmp/sd-runs-page1.json
-          gh api "repos/${{ github.repository }}/actions/runs?per_page=100&page=2" \
-            > /tmp/sd-runs-page2.json
-          gh api "repos/${{ github.repository }}/actions/runs?per_page=100&page=3" \
-            > /tmp/sd-runs-page3.json
+          fetch_runs_page 1 /tmp/sd-runs-page1.json
+          fetch_runs_page 2 /tmp/sd-runs-page2.json
+          fetch_runs_page 3 /tmp/sd-runs-page3.json
 
           # Merge all pages into one runs file
           python3 - <<'PYEOF'
