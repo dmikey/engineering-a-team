@@ -296,6 +296,60 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
         self.assertEqual(summary["run_id"], "99")
         self.assertIn("actions/runs/99", summary["url"])
 
+    def test_failure_status_code_returns_ok_without_failure(self):
+        self.assertEqual(heartbeat_runner.failure_status_code(None), "HF-OK")
+
+    def test_failure_status_code_returns_compact_failure_fields(self):
+        latest_failure = {
+            "workflow": "Skill Development Tracking",
+            "run_id": "31505876554",
+            "url": "https://github.com/owner/repo/actions/runs/31505876554",
+            "summary": "Skill Development Tracking -> Morgan -> Gather workflow run data",
+        }
+
+        code = heartbeat_runner.failure_status_code(latest_failure)
+        self.assertIn("HF-FAIL", code)
+        self.assertIn("wf=skill-development-tracking", code)
+        self.assertIn("run=31505876554", code)
+        self.assertIn("step=gather-workflow-run-data", code)
+
+    def test_compact_failure_code_keeps_ok(self):
+        self.assertEqual(heartbeat_runner.compact_failure_code("HF-OK"), "HF-OK")
+
+    def test_compact_failure_code_extracts_fail_run(self):
+        code = "HF-FAIL wf=skill-development-tracking run=31505876554 step=gather-workflow-run-data"
+        self.assertEqual(
+            heartbeat_runner.compact_failure_code(code),
+            "HF-FAIL run=31505876554",
+        )
+
+    def test_unresolved_failure_runs_only_latest_per_workflow(self):
+        runs = [
+            {
+                "workflowName": "Skill Development Tracking",
+                "conclusion": "failure",
+                "createdAt": "2026-08-11T15:13:44Z",
+                "databaseId": 31505876554,
+            },
+            {
+                "workflowName": "Skill Development Tracking",
+                "conclusion": "success",
+                "createdAt": "2026-08-11T15:36:00Z",
+                "databaseId": 31507324909,
+            },
+            {
+                "workflowName": "Agent Personality Profiles",
+                "conclusion": "failure",
+                "createdAt": "2026-08-11T14:30:28Z",
+                "databaseId": 31501901732,
+            },
+        ]
+
+        unresolved = heartbeat_runner.unresolved_failure_runs(runs)
+        self.assertEqual(len(unresolved), 1)
+        self.assertEqual(unresolved[0]["workflowName"], "Agent Personality Profiles")
+        self.assertEqual(unresolved[0]["databaseId"], 31501901732)
+
 
 if __name__ == "__main__":
     unittest.main()

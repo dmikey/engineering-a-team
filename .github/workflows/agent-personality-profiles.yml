@@ -41,10 +41,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh label create "personality-profile"        --color "e4e669" --force 2>/dev/null || true
+          gh label create "personality-profile" --color "e4e669" --force 2>/dev/null || true
           gh label create "personality-profile-update" --color "d4c5f9" --force 2>/dev/null || true
 
-      - name: Create or update personality profile issue
+      - name: Create personality profile issue
         if: env.WORKFLOW_ACTION == 'set-profile'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -59,7 +59,9 @@ jobs:
           fi
 
           python3 - <<'PYEOF'
-          import os, pathlib
+          import os
+          from pathlib import Path
+
           agent = os.environ["AGENT_NAME"]
           traits = os.environ.get("TRAITS", "")
           strengths = os.environ.get("STRENGTHS", "")
@@ -71,10 +73,8 @@ jobs:
               f"**Strengths**: {strengths}\n"
               f"**Working Style**: {working_style}\n"
           )
-          pathlib.Path("/tmp/profile-body.md").write_text(body, encoding="utf-8")
-          pathlib.Path("/tmp/profile-title.txt").write_text(
-              f"Agent Personality Profile: {agent}", encoding="utf-8"
-          )
+          Path("/tmp/profile-body.md").write_text(body, encoding="utf-8")
+          Path("/tmp/profile-title.txt").write_text(f"Agent Personality Profile: {agent}", encoding="utf-8")
           PYEOF
 
           TITLE=$(cat /tmp/profile-title.txt)
@@ -98,32 +98,34 @@ jobs:
           fi
 
           DATE_UTC=$(date -u +"%Y-%m-%d")
-            WORKFLOW_ACTION: ${{ github.event.inputs.action || 'report' }}
+          export DATE_UTC
+
           python3 - <<'PYEOF'
-          import os, pathlib
+          import os
+          from pathlib import Path
+
           agent = os.environ["AGENT_NAME"]
           traits = os.environ.get("TRAITS", "")
           strengths = os.environ.get("STRENGTHS", "")
           working_style = os.environ.get("WORKING_STYLE", "")
           date_utc = os.environ.get("DATE_UTC", "")
           body = (
-              f"## Profile Update — {date_utc}\n\n"
+              f"## Profile Update - {date_utc}\n\n"
               f"**Agent**: {agent}\n"
               f"**Traits**: {traits}\n"
               f"**Strengths**: {strengths}\n"
               f"**Working Style**: {working_style}\n"
-                AGENT_NAME: ${{ github.event.inputs.agent_name || '' }}
-                TRAITS: ${{ github.event.inputs.traits || '' }}
-                STRENGTHS: ${{ github.event.inputs.strengths || '' }}
-                WORKING_STYLE: ${{ github.event.inputs.working_style || '' }}
           )
+          Path("/tmp/update-body.md").write_text(body, encoding="utf-8")
+          Path("/tmp/update-title.txt").write_text(f"Agent Personality Profile Update: {agent} ({date_utc})", encoding="utf-8")
           PYEOF
 
           TITLE=$(cat /tmp/update-title.txt)
-                AGENT_NAME: ${{ github.event.inputs.agent_name || '' }}
-                TRAITS: ${{ github.event.inputs.traits || '' }}
-                STRENGTHS: ${{ github.event.inputs.strengths || '' }}
-                WORKING_STYLE: ${{ github.event.inputs.working_style || '' }}
+          gh issue create \
+            --title "$TITLE" \
+            --body-file /tmp/update-body.md \
+            --label "personality-profile" \
+            --label "personality-profile-update"
 
       - name: Collect profile issue data
         env:
@@ -159,7 +161,7 @@ jobs:
           REPORT=$(cat /tmp/personality-report.md)
           OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
           REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
-          TITLE="🧠 Agent Personality Profiles Report — $DATE_UTC"
+          TITLE="Agent Personality Profiles Report - $DATE_UTC"
 
           REPO_ID=$(gh api "repos/${{ github.repository }}" --jq '.node_id' 2>/dev/null || echo "")
           DISCUSSION_CREATED=false
@@ -187,7 +189,7 @@ jobs:
                 2>/dev/null || echo "")
 
               if [ -n "$DISCUSSION_URL" ]; then
-                echo "✅ Personality profiles report posted as Discussion: $DISCUSSION_URL"
+                echo "Personality profiles report posted as Discussion: $DISCUSSION_URL"
                 DISCUSSION_CREATED=true
               fi
             fi
@@ -195,5 +197,5 @@ jobs:
 
           if [ "$DISCUSSION_CREATED" = "false" ]; then
             gh issue create --title "$TITLE" --body "$REPORT" --label "personality-profile"
-            echo "✅ Personality profiles report posted as Issue (Discussion fallback)"
+            echo "Personality profiles report posted as Issue (Discussion fallback)"
           fi

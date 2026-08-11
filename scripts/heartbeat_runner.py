@@ -571,8 +571,21 @@ def fetch_runs(repo: str, limit: int) -> list[dict[str, Any]]:
     )
 
 
+def unresolved_failure_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    latest_by_workflow: dict[str, dict[str, Any]] = {}
+    for run in sorted(runs, key=lambda item: item.get("createdAt", ""), reverse=True):
+        workflow = str(run.get("workflowName") or "")
+        if not workflow or workflow in latest_by_workflow:
+            continue
+        latest_by_workflow[workflow] = run
+    return [
+        run for run in latest_by_workflow.values()
+        if (run.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS
+    ]
+
+
 def describe_latest_failure(repo: str, runs: list[dict[str, Any]]) -> dict[str, str] | None:
-    failing_runs = [run for run in runs if (run.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS]
+    failing_runs = unresolved_failure_runs(runs)
     if not failing_runs:
         return None
 
@@ -629,6 +642,20 @@ def failure_status_code(latest_failure: dict[str, str] | None) -> str:
     failed_step = summary.rsplit(" -> ", 1)[-1] if " -> " in summary else "unknown-step"
     failed_step = failed_step.strip().lower().replace(" ", "-")
     return f"HF-FAIL wf={workflow} run={run_id} step={failed_step}"
+
+
+def compact_failure_code(code: str) -> str:
+    raw = (code or "").strip()
+    if raw == "HF-OK":
+        return raw
+    if raw.startswith("HF-FAIL"):
+        run_marker = "run="
+        run_pos = raw.find(run_marker)
+        if run_pos >= 0:
+            run_token = raw[run_pos:].split()[0]
+            return f"HF-FAIL {run_token}"
+        return "HF-FAIL"
+    return raw or "HF-UNKNOWN"
 
 
 def label_names(issue: dict[str, Any]) -> list[str]:
@@ -823,7 +850,7 @@ def adaptive_model_every(snapshot: dict[str, Any], configured_every: int, enable
     issues = snapshot["issues"]
     runs = snapshot["runs"]
     conflicting = [pr for pr in prs if pr.get("mergeable") == "CONFLICTING" or pr.get("mergeStateStatus") == "DIRTY"]
-    failing_runs = [run for run in runs if (run.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS]
+    failing_runs = unresolved_failure_runs(runs)
     unassigned = [issue for issue in issues if not issue.get("assignees")]
 
     if conflicting or len(failing_runs) >= 5:
@@ -1912,7 +1939,7 @@ def render_overview(snapshot: dict[str, Any], plan: dict[str, Any], results: lis
     issues = snapshot["issues"]
     runs = snapshot["runs"]
     active_runs = [run for run in runs if (run.get("status") or "").lower() in ACTIVE_RUN_STATUSES]
-    action_required_runs = [run for run in runs if (run.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS]
+    unresolved_failures = unresolved_failure_runs(runs)
     non_draft = [pr for pr in prs if not pr.get("isDraft")]
     mergeable = [pr for pr in non_draft if pr.get("mergeable") == "MERGEABLE"]
     conflicting = [pr for pr in non_draft if pr.get("mergeable") == "CONFLICTING" or pr.get("mergeStateStatus") == "DIRTY"]
@@ -1936,7 +1963,7 @@ def render_overview(snapshot: dict[str, Any], plan: dict[str, Any], results: lis
         "",
         f"- Open pull requests: {len(prs)} total, {len(non_draft)} non-draft, {len(mergeable)} mergeable, {len(conflicting)} conflicting",
         f"- Open issues: {len(issues)} total, {len(unassigned)} unassigned",
-        f"- Workflow runs: {len(active_runs)} active, {len(action_required_runs)} recent failing/action-required",
+        f"- Workflow runs: {len(active_runs)} active, {len(unresolved_failures)} unresolved failing/action-required",
         "",
         "## Pending Workflow Dispatches",
         "",
@@ -2017,7 +2044,7 @@ def run_heartbeat_cycle(
     report(f"fetching workflow runs (limit {args.run_limit})", prs=len(prs), drafts=drafts, conflicting=conflicting, mergeable=mergeable, issues=len(issues), unassigned=unassigned)
     runs = fetch_runs(repo_info["nameWithOwner"], args.run_limit)
     active_runs = sum(1 for run in runs if (run.get("status") or "").lower() in ACTIVE_RUN_STATUSES)
-    failing_runs = sum(1 for run in runs if (run.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS)
+    failing_runs = len(unresolved_failure_runs(runs))
     gated_runs = sum(
         1 for run in runs
         if (run.get("status") or "").lower() == "action_required"
@@ -2036,14 +2063,19 @@ def run_heartbeat_cycle(
         "active_runs": active_runs, "failing_runs": failing_runs, "gated_runs": gated_runs,
     }
     latest_failure = describe_latest_failure(repo_info["nameWithOwner"], runs)
+    latest_failure_code = failure_status_code(latest_failure)
     if latest_failure:
         live_context["latest_failure"] = latest_failure
+        live_context["latest_failure_code"] = latest_failure_code
         report(
             f"latest failing workflow: {latest_failure['summary']} (run {latest_failure['run_id']})",
             **live_context,
         )
+        report(f"latest failure code: {latest_failure_code}", **live_context)
     else:
+        live_context["latest_failure_code"] = latest_failure_code
         report("no failing workflows in recent run window", **live_context)
+        report(f"latest failure code: {latest_failure_code}", **live_context)
     report("approving gated workflow runs", **live_context)
     approval_results = approve_pending_workflow_runs(snapshot, state, repo_info["nameWithOwner"], args.dry_run)
     effective_model_every, cadence_reason = adaptive_model_every(snapshot, args.model_every, args.adaptive_model_cadence)
@@ -2066,7 +2098,7 @@ def run_heartbeat_cycle(
     else:
         meta["latest_failure"] = "none"
         meta["latest_failure_url"] = ""
-    meta["latest_failure_code"] = failure_status_code(latest_failure)
+    meta["latest_failure_code"] = latest_failure_code
     meta["model_cadence"] = f"{effective_model_every} ({cadence_reason})"
     meta["gh_auth_source"] = GH_AUTH_SOURCE
     pr_count = len(plan.get("pull_requests") or [])
@@ -2246,7 +2278,7 @@ def render_tui_lines(
     issues = snapshot["issues"]
     runs = snapshot["runs"]
     active_runs = [r for r in runs if (r.get("status") or "").lower() in ACTIVE_RUN_STATUSES]
-    failing_runs = [r for r in runs if (r.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS]
+    failing_runs = unresolved_failure_runs(runs)
     non_draft = [p for p in prs if not p.get("isDraft")]
     mergeable = [p for p in non_draft if p.get("mergeable") == "MERGEABLE"]
     conflicting = [p for p in non_draft if p.get("mergeable") == "CONFLICTING" or p.get("mergeStateStatus") == "DIRTY"]
@@ -2455,10 +2487,20 @@ def _draw_full_tui(
             row += 1
             _safe_addstr(rp_win, row, 1, "Latest failure", curses.color_pair(2) | curses.A_BOLD)
             row += 1
-            text = f"{latest_failure.get('summary', '?')} (run {latest_failure.get('run_id', '?')})"
-            row = _add_wrapped_lines(rp_win, row, 2, text, 2, curses.color_pair(2))
+            failure_code = live.get("latest_failure_code")
+            if failure_code and row < body_h - 1:
+                row = _add_wrapped_lines(rp_win, row, 2, f"Code: {compact_failure_code(failure_code)}", 1, curses.color_pair(3))
+            summary_text = str(latest_failure.get("summary") or "")
+            summary_parts = [part.strip() for part in summary_text.split(" -> ") if part.strip()]
+            workflow_name = latest_failure.get("workflow") or (summary_parts[0] if summary_parts else "unknown")
+            failed_step = summary_parts[-1] if summary_parts else "unknown"
+            if row < body_h - 1:
+                row = _add_wrapped_lines(rp_win, row, 2, f"Workflow: {workflow_name}", 1, curses.color_pair(2))
+            if row < body_h - 1:
+                row = _add_wrapped_lines(rp_win, row, 2, f"Step: {failed_step}", 1, curses.color_pair(2))
             if latest_failure.get("url") and row < body_h - 1:
-                row = _add_wrapped_lines(rp_win, row, 2, latest_failure["url"], 1, curses.color_pair(7))
+                compact_url = str(latest_failure["url"]).replace("https://", "")
+                row = _add_wrapped_lines(rp_win, row, 2, f"Run: {compact_url}", 1, curses.color_pair(7))
         source = live.get("decision_source")
         if source and row < body_h - 2:
             row += 1
@@ -2490,7 +2532,7 @@ def _draw_full_tui(
         issues = snapshot["issues"]
         runs = snapshot["runs"]
         active_runs = [r for r in runs if (r.get("status") or "").lower() in ACTIVE_RUN_STATUSES]
-        failing_runs = [r for r in runs if (r.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS]
+        failing_runs = unresolved_failure_runs(runs)
         unassigned = [i for i in issues if not i.get("assignees")]
 
         _safe_addstr(rp_win, row, 1, f"Models: {meta.get('models_status','?')[:W-mid-6]}", curses.color_pair(1) if "ready" in meta.get("models_status","") else curses.color_pair(3))
@@ -2506,12 +2548,16 @@ def _draw_full_tui(
             failure_text = f"Last failure: {latest_failure.get('workflowName', '?')}"
             _safe_addstr(rp_win, row, 1, failure_text[:W - mid - 3], curses.color_pair(2) | curses.A_BOLD)
             row += 1
+        failure_code = meta.get("latest_failure_code")
+        if failure_code and failure_code != "HF-UNKNOWN" and row < body_h - 1:
+            row = _add_wrapped_lines(rp_win, row, 1, f"Code: {compact_failure_code(failure_code)}", 1, curses.color_pair(3))
         failure_summary = meta.get("latest_failure")
         if failure_summary and failure_summary != "none" and row < body_h - 1:
-            row = _add_wrapped_lines(rp_win, row, 1, f"Reason: {failure_summary}", 2, curses.color_pair(2))
+            row = _add_wrapped_lines(rp_win, row, 1, f"Reason: {failure_summary}", 1, curses.color_pair(2))
         failure_url = meta.get("latest_failure_url")
         if failure_url and row < body_h - 1:
-            row = _add_wrapped_lines(rp_win, row, 1, failure_url, 1, curses.color_pair(7))
+            compact_url = str(failure_url).replace("https://", "")
+            row = _add_wrapped_lines(rp_win, row, 1, f"Run: {compact_url}", 1, curses.color_pair(7))
         _safe_addstr(rp_win, row, 1, "─" * (W - mid - 3), curses.color_pair(7))
         row += 1
         _safe_addstr(rp_win, row, 1, "Scheduled dispatches:", curses.color_pair(4))
