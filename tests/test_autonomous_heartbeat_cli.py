@@ -223,6 +223,27 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
         assert chosen is not None
         self.assertEqual(chosen["number"], 11)
 
+    def test_select_top_copilot_candidate_falls_back_to_assigned_issue(self):
+        issues = [
+            {
+                "number": 20,
+                "labels": [{"name": "priority: high"}],
+                "assignees": [{"login": "dmikey"}],
+                "createdAt": "2026-08-11T04:00:00Z",
+            },
+            {
+                "number": 21,
+                "labels": [{"name": "priority: critical"}],
+                "assignees": [{"login": "dmikey"}],
+                "createdAt": "2026-08-11T04:10:00Z",
+            },
+        ]
+
+        chosen = heartbeat_runner.select_top_copilot_candidate(issues)
+        self.assertIsNotNone(chosen)
+        assert chosen is not None
+        self.assertEqual(chosen["number"], 21)
+
     def test_issue_priority_label_defaults_to_blocked_then_unlabeled(self):
         blocked = {"labels": [{"name": "blocked"}]}
         unlabeled = {"labels": []}

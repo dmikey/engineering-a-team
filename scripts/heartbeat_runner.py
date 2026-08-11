@@ -585,20 +585,29 @@ def issue_priority_label(issue: dict[str, Any]) -> str:
     return "unlabeled"
 
 
+def _issue_sort_key(issue: dict[str, Any]) -> tuple[int, int, int, datetime, int]:
+    labels = set(label_names(issue))
+    priority_rank = next((idx for idx, label in enumerate(ISSUE_PRIORITY_LABELS) if label in labels), len(ISSUE_PRIORITY_LABELS))
+    blocked_rank = 0 if "blocked" in labels else 1
+    feature_rank = 0 if {"feature", "product-owner"}.intersection(labels) else 1
+    created = parse_ts(issue.get("createdAt")) or parse_ts(issue.get("updatedAt")) or now_utc()
+    return (priority_rank, blocked_rank, feature_rank, created, int(issue.get("number") or 0))
+
+
 def select_top_unassigned_issue(issues: list[dict[str, Any]]) -> dict[str, Any] | None:
     candidates = [issue for issue in issues if not issue.get("assignees")]
     if not candidates:
         return None
+    return min(candidates, key=_issue_sort_key)
 
-    def sort_key(issue: dict[str, Any]) -> tuple[int, int, int, datetime, int]:
-        labels = set(label_names(issue))
-        priority_rank = next((idx for idx, label in enumerate(ISSUE_PRIORITY_LABELS) if label in labels), len(ISSUE_PRIORITY_LABELS))
-        blocked_rank = 0 if "blocked" in labels else 1
-        feature_rank = 0 if {"feature", "product-owner"}.intersection(labels) else 1
-        created = parse_ts(issue.get("createdAt")) or parse_ts(issue.get("updatedAt")) or now_utc()
-        return (priority_rank, blocked_rank, feature_rank, created, int(issue.get("number") or 0))
 
-    return min(candidates, key=sort_key)
+def select_top_copilot_candidate(issues: list[dict[str, Any]]) -> dict[str, Any] | None:
+    top_unassigned = select_top_unassigned_issue(issues)
+    if top_unassigned is not None:
+        return top_unassigned
+    if not issues:
+        return None
+    return min(issues, key=_issue_sort_key)
 
 
 def checks_summary(pr: dict[str, Any]) -> dict[str, int]:
@@ -2583,10 +2592,10 @@ def run_tui(
         else:
             issues = fetch_open_issues(repo_info["nameWithOwner"], 100)
 
-        top_issue = select_top_unassigned_issue(issues)
+        top_issue = select_top_copilot_candidate(issues)
         if not top_issue:
-            status_message = "No unassigned issues available for Copilot assignment"
-            _record_action_log(f"{isoformat()}  {'assign-top-priority-agent.lock.yml':30} dispatch_manual      | skipped –  no unassigned issues")
+            status_message = "No open issues available for Copilot assignment"
+            _record_action_log(f"{isoformat()}  {'assign-top-priority-agent.lock.yml':30} dispatch_manual      | skipped –  no open issues")
             return
 
         priority = issue_priority_label(top_issue)
