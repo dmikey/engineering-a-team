@@ -61,6 +61,7 @@ env:
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
   TA_AUTO_DISPATCH_ENABLED: ${{ vars.TA_AUTO_DISPATCH_ENABLED || 'true' }}
   TA_AUTO_DISPATCH_MAX: ${{ vars.TA_AUTO_DISPATCH_MAX || '3' }}
+  TA_ASSIGN_ISSUES_ENABLED: ${{ vars.TA_ASSIGN_ISSUES_ENABLED || 'true' }}
 
 jobs:
   task-assignment:
@@ -210,9 +211,14 @@ jobs:
         env:
           GH_USER_PAT: ${{ secrets.GH_USER_PAT }}
           GITHUB_FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_ASSIGNEE: ${{ vars.TA_DEFAULT_ASSIGNEE || github.repository_owner }}
+          ASSIGNEE_QA: ${{ vars.TA_ASSIGNEE_QA || vars.TA_DEFAULT_ASSIGNEE || github.repository_owner }}
+          ASSIGNEE_PM: ${{ vars.TA_ASSIGNEE_PM || vars.TA_DEFAULT_ASSIGNEE || github.repository_owner }}
+          ASSIGNEE_PO: ${{ vars.TA_ASSIGNEE_PO || vars.TA_DEFAULT_ASSIGNEE || github.repository_owner }}
           RECOMMENDATIONS: ${{ steps.assign.outputs.recommendations }}
           TA_AUTO_DISPATCH_ENABLED: ${{ env.TA_AUTO_DISPATCH_ENABLED }}
           TA_AUTO_DISPATCH_MAX: ${{ env.TA_AUTO_DISPATCH_MAX }}
+          TA_ASSIGN_ISSUES_ENABLED: ${{ env.TA_ASSIGN_ISSUES_ENABLED }}
           WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           # Prefer GH_USER_PAT but fall back to GITHUB_TOKEN when the PAT is invalid/expired.
@@ -238,11 +244,19 @@ jobs:
 
           workflow_url = os.environ.get("WORKFLOW_URL", "")
           auto_dispatch = os.environ.get("TA_AUTO_DISPATCH_ENABLED", "true").lower() == "true"
+            assign_issues = os.environ.get("TA_ASSIGN_ISSUES_ENABLED", "true").lower() == "true"
           try:
               auto_dispatch_max = int(os.environ.get("TA_AUTO_DISPATCH_MAX", "3"))
           except ValueError:
               auto_dispatch_max = 3
           dispatch_count = 0
+
+            assignee_map = {
+              "Quinn (QA Engineer)": os.environ.get("ASSIGNEE_QA", "").strip(),
+              "Morgan (Project Manager)": os.environ.get("ASSIGNEE_PM", "").strip(),
+              "Alex (Product Owner)": os.environ.get("ASSIGNEE_PO", "").strip(),
+            }
+            default_assignee = os.environ.get("DEFAULT_ASSIGNEE", "").strip()
 
           # Map recommendation output to Manual Agent Runner inputs.
           dispatch_map = {
@@ -279,6 +293,22 @@ jobs:
                   print(f"✅ Commented on issue #{issue_num} → {agent}")
               else:
                   print(f"⚠️ Could not comment on issue #{issue_num}: {result.stderr.strip()}")
+
+                if assign_issues:
+                  assignee = assignee_map.get(agent) or default_assignee
+                  if assignee:
+                    assign_result = subprocess.run(
+                      ["gh", "issue", "edit", str(issue_num), "--add-assignee", assignee],
+                      capture_output=True,
+                      text=True,
+                    )
+                    if assign_result.returncode == 0:
+                      print(f"✅ Assigned issue #{issue_num} to @{assignee}")
+                    else:
+                      err = assign_result.stderr.strip() or assign_result.stdout.strip()
+                      print(f"⚠️ Could not assign issue #{issue_num} to @{assignee}: {err}")
+                  else:
+                    print(f"⏭️ No assignee configured for issue #{issue_num} ({agent})")
 
               allowed, reason = should_auto_dispatch(confidence, auto_dispatch, dispatch_count, auto_dispatch_max)
               if not allowed:
