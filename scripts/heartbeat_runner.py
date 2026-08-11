@@ -43,6 +43,14 @@ WORKFLOW_COOLDOWNS = {
     "product-owner.yml": timedelta(hours=12),
     "council-discussion.yml": timedelta(hours=24),
 }
+BACKLOG_PRESSURE_UNASSIGNED_THRESHOLD = 25
+BACKLOG_PRESSURE_PRIORITY_THRESHOLD = 20
+BACKLOG_PRESSURE_FEATURE_THRESHOLD = 20
+BACKLOG_PRESSURE_COOLDOWNS = {
+    "task-assignment.yml": timedelta(hours=1),
+    "project-manager.yml": timedelta(hours=4),
+    "product-owner.yml": timedelta(hours=4),
+}
 AUTH_FAILURE_COOLDOWN = timedelta(hours=6)
 PLANNER_UNAVAILABLE_COOLDOWN = timedelta(minutes=30)
 PR_READY_COOLDOWN = timedelta(hours=6)
@@ -257,7 +265,12 @@ def resolve_gh_command_env() -> tuple[dict[str, str] | None, str]:
             if _explicit_gh_token_is_unauthorized(env):
                 continue
             return env, env_name
-    return None, "gh-auth"
+
+    env = os.environ.copy()
+    # Prevent low-permission env tokens from overriding gh stored credentials.
+    env.pop("GH_TOKEN", None)
+    env.pop("GITHUB_TOKEN", None)
+    return env, "gh-auth"
 
 
 def repo_root() -> Path:
@@ -620,6 +633,23 @@ def event_cooldown_remaining(state: dict[str, Any], key: str, cooldown: timedelt
     return remaining
 
 
+def auth_block_cooldown_remaining(state: dict[str, Any], key: str, cooldown: timedelta) -> timedelta | None:
+    if os.environ.get("HEARTBEAT_IGNORE_AUTH_BLOCK_COOLDOWN", "false").lower() == "true":
+        return None
+
+    event = state.get("events", {}).get(key)
+    if event:
+        payload = event.get("payload") or {}
+        blocked_source = str(payload.get("auth_source") or "").strip()
+        # Legacy auth-block events may not carry source metadata.
+        if not blocked_source and GH_AUTH_SOURCE == "gh-auth":
+            return None
+        if blocked_source and blocked_source != GH_AUTH_SOURCE:
+            return None
+
+    return event_cooldown_remaining(state, key, cooldown)
+
+
 def format_remaining(duration: timedelta) -> str:
     total_seconds = max(int(duration.total_seconds()), 0)
     hours, rem = divmod(total_seconds, 3600)
@@ -834,7 +864,7 @@ def run_stuck_pr_escalations(snapshot: dict[str, Any], state: dict[str, Any], re
         council_event_key = "dispatch:council-stuck-prs"
         if state_event_recent(state, council_event_key, COUNCIL_ESCALATION_COOLDOWN):
             results.append({"target": "council-discussion.yml", "action": "dispatch_council", "status": "skipped", "detail": "Council escalation cooldown active."})
-        elif state_event_recent(state, "dispatch-blocked:council-discussion.yml", AUTH_FAILURE_COOLDOWN):
+        elif auth_block_cooldown_remaining(state, "dispatch-blocked:council-discussion.yml", AUTH_FAILURE_COOLDOWN):
             results.append({"target": "council-discussion.yml", "action": "dispatch_council", "status": "skipped", "detail": "Council escalation is auth-blocked and still within cooldown."})
         else:
             numbers = ", ".join(f"#{item['number']}" for item in stuck_council_prs)
@@ -855,7 +885,7 @@ def run_stuck_pr_escalations(snapshot: dict[str, Any], state: dict[str, Any], re
             except RuntimeError as exc:
                 detail = str(exc)
                 if "Resource not accessible by integration" in detail and not dry_run:
-                    record_event(state, "dispatch-blocked:council-discussion.yml", {"reason": detail})
+                    record_event(state, "dispatch-blocked:council-discussion.yml", {"reason": detail, "auth_source": GH_AUTH_SOURCE})
                 if "Resource not accessible by integration" in detail or "403" in detail:
                     results.append(
                         {
@@ -884,6 +914,12 @@ def heuristic_repo_actions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
         if any(label.startswith("priority:") or label == "blocked" for label in label_names(issue))
     ]
 
+    backlog_pressure = {
+        "task-assignment.yml": len(unassigned) >= BACKLOG_PRESSURE_UNASSIGNED_THRESHOLD,
+        "project-manager.yml": len(blocked_or_priority) >= BACKLOG_PRESSURE_PRIORITY_THRESHOLD,
+        "product-owner.yml": len(feature_issues) >= BACKLOG_PRESSURE_FEATURE_THRESHOLD,
+    }
+
     recent_runs_by_workflow: dict[str, datetime] = {}
     for run in runs:
         created = parse_ts(run.get("createdAt"))
@@ -891,9 +927,9 @@ def heuristic_repo_actions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
         if created and workflow_name and workflow_name not in recent_runs_by_workflow:
             recent_runs_by_workflow[workflow_name] = created
 
-    # Periodic council meeting — keep agents aligned even when nothing is "stuck"
+    # Periodic council meeting - keep agents aligned even when nothing is "stuck"
     if not state_event_recent(state, "dispatch:council-periodic", timedelta(hours=24)) \
-            and not state_event_recent(state, "dispatch-blocked:council-discussion.yml", AUTH_FAILURE_COOLDOWN):
+            and not auth_block_cooldown_remaining(state, "dispatch-blocked:council-discussion.yml", AUTH_FAILURE_COOLDOWN):
         actions.append({
             "action": "dispatch_council",
             "reason": "Scheduled periodic council review to align agents on roadmap and open work.",
@@ -905,8 +941,13 @@ def heuristic_repo_actions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
         })
 
     if unassigned:
-        blocked_for = event_cooldown_remaining(state, "dispatch-blocked:task-assignment.yml", AUTH_FAILURE_COOLDOWN)
-        dispatch_for = event_cooldown_remaining(state, "dispatch:task-assignment.yml", WORKFLOW_COOLDOWNS["task-assignment.yml"])
+        blocked_for = auth_block_cooldown_remaining(state, "dispatch-blocked:task-assignment.yml", AUTH_FAILURE_COOLDOWN)
+        task_assignment_cooldown = (
+            BACKLOG_PRESSURE_COOLDOWNS["task-assignment.yml"]
+            if backlog_pressure["task-assignment.yml"]
+            else WORKFLOW_COOLDOWNS["task-assignment.yml"]
+        )
+        dispatch_for = event_cooldown_remaining(state, "dispatch:task-assignment.yml", task_assignment_cooldown)
         if blocked_for:
             actions.append(
                 {
@@ -935,8 +976,13 @@ def heuristic_repo_actions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
             )
 
     if blocked_or_priority:
-        blocked_for = event_cooldown_remaining(state, "dispatch-blocked:project-manager.yml", AUTH_FAILURE_COOLDOWN)
-        dispatch_for = event_cooldown_remaining(state, "dispatch:project-manager.yml", WORKFLOW_COOLDOWNS["project-manager.yml"])
+        blocked_for = auth_block_cooldown_remaining(state, "dispatch-blocked:project-manager.yml", AUTH_FAILURE_COOLDOWN)
+        pm_cooldown = (
+            BACKLOG_PRESSURE_COOLDOWNS["project-manager.yml"]
+            if backlog_pressure["project-manager.yml"]
+            else WORKFLOW_COOLDOWNS["project-manager.yml"]
+        )
+        dispatch_for = event_cooldown_remaining(state, "dispatch:project-manager.yml", pm_cooldown)
         if blocked_for:
             actions.append(
                 {
@@ -965,8 +1011,13 @@ def heuristic_repo_actions(snapshot: dict[str, Any], state: dict[str, Any]) -> l
             )
 
     if feature_issues:
-        blocked_for = event_cooldown_remaining(state, "dispatch-blocked:product-owner.yml", AUTH_FAILURE_COOLDOWN)
-        dispatch_for = event_cooldown_remaining(state, "dispatch:product-owner.yml", WORKFLOW_COOLDOWNS["product-owner.yml"])
+        blocked_for = auth_block_cooldown_remaining(state, "dispatch-blocked:product-owner.yml", AUTH_FAILURE_COOLDOWN)
+        po_cooldown = (
+            BACKLOG_PRESSURE_COOLDOWNS["product-owner.yml"]
+            if backlog_pressure["product-owner.yml"]
+            else WORKFLOW_COOLDOWNS["product-owner.yml"]
+        )
+        dispatch_for = event_cooldown_remaining(state, "dispatch:product-owner.yml", po_cooldown)
         if blocked_for:
             actions.append(
                 {
@@ -1726,7 +1777,7 @@ def execute_plan(snapshot: dict[str, Any], plan: dict[str, Any], state: dict[str
         except RuntimeError as exc:
             detail = str(exc)
             if "Resource not accessible by integration" in detail and not dry_run:
-                record_event(state, f"dispatch-blocked:{workflow}", {"reason": detail})
+                record_event(state, f"dispatch-blocked:{workflow}", {"reason": detail, "auth_source": GH_AUTH_SOURCE})
             short = detail.split("\n")[0][:120]
             if "403" in short or "Resource not accessible" in short:
                 results.append(

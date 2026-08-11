@@ -3,6 +3,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -76,7 +77,10 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
             with mock.patch.object(heartbeat_runner.subprocess, "run", return_value=invalid):
                 env, source = heartbeat_runner.resolve_gh_command_env()
 
-        self.assertIsNone(env)
+        self.assertIsNotNone(env)
+        assert env is not None
+        self.assertNotIn("GH_TOKEN", env)
+        self.assertNotIn("GITHUB_TOKEN", env)
         self.assertEqual(source, "gh-auth")
 
     def test_resolve_gh_command_env_uses_explicit_token_when_valid(self):
@@ -89,6 +93,50 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
         assert env is not None
         self.assertEqual(env.get("GH_TOKEN"), "good-token")
         self.assertEqual(source, "GH_USER_PAT")
+
+    def test_resolve_gh_command_env_gh_auth_strips_token_overrides(self):
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "integration-token", "GH_TOKEN": "other-token"}, clear=False):
+            env, source = heartbeat_runner.resolve_gh_command_env()
+
+        self.assertIsNotNone(env)
+        assert env is not None
+        self.assertNotIn("GH_TOKEN", env)
+        self.assertNotIn("GITHUB_TOKEN", env)
+        self.assertEqual(source, "gh-auth")
+
+    def test_auth_block_cooldown_remaining_bypasses_legacy_event_on_gh_auth(self):
+        state = {
+            "events": {
+                "dispatch-blocked:task-assignment.yml": {
+                    "at": heartbeat_runner.isoformat(),
+                    "payload": {"reason": "legacy blocked event"},
+                }
+            }
+        }
+        with mock.patch.object(heartbeat_runner, "GH_AUTH_SOURCE", "gh-auth"):
+            remaining = heartbeat_runner.auth_block_cooldown_remaining(
+                state,
+                "dispatch-blocked:task-assignment.yml",
+                heartbeat_runner.AUTH_FAILURE_COOLDOWN,
+            )
+        self.assertIsNone(remaining)
+
+    def test_auth_block_cooldown_remaining_enforced_same_source(self):
+        state = {
+            "events": {
+                "dispatch-blocked:task-assignment.yml": {
+                    "at": heartbeat_runner.isoformat(),
+                    "payload": {"auth_source": "gh-auth", "reason": "blocked"},
+                }
+            }
+        }
+        with mock.patch.object(heartbeat_runner, "GH_AUTH_SOURCE", "gh-auth"):
+            remaining = heartbeat_runner.auth_block_cooldown_remaining(
+                state,
+                "dispatch-blocked:task-assignment.yml",
+                heartbeat_runner.AUTH_FAILURE_COOLDOWN,
+            )
+        self.assertIsNotNone(remaining)
 
     def test_normalize_copilot_chat_model_maps_legacy_model_names(self):
         self.assertEqual(
@@ -121,6 +169,32 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
         pm_action = next(action for action in actions if action.get("action") == "dispatch_project_manager")
         self.assertEqual(pm_action["workflow"], "project-manager.yml")
         self.assertEqual(pm_action["inputs"]["task"], "groom-backlog")
+
+    def test_heuristic_repo_actions_uses_backlog_pressure_cooldown_for_task_assignment(self):
+        snapshot = {
+            "issues": [
+                {
+                    "number": idx,
+                    "labels": [],
+                    "assignees": [],
+                }
+                for idx in range(1, 40)
+            ],
+            "runs": [],
+        }
+        state = {
+            "events": {
+                "dispatch:task-assignment.yml": {
+                    "at": heartbeat_runner.isoformat(heartbeat_runner.now_utc() - timedelta(hours=2)),
+                    "payload": {"reason": "previous dispatch"},
+                }
+            },
+            "heartbeats": 1,
+        }
+
+        actions = heartbeat_runner.heuristic_repo_actions(snapshot, state)
+        action_names = [action.get("action") for action in actions]
+        self.assertIn("dispatch_task_assignment", action_names)
 
 
 if __name__ == "__main__":
