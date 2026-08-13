@@ -1,0 +1,203 @@
+name: 'Call Copilot Model'
+description: >
+  Invoke a GitHub Copilot model through Copilot CLI and return the text response.
+  All agent AI calls must go through this action.
+
+inputs:
+  model:
+    description: 'Copilot model identifier (legacy gpt-4o-mini/gpt-4o values are mapped)'
+    default: 'gpt-4o-mini'
+  system-prompt:
+    description: 'System prompt defining the agent persona and instructions'
+    required: true
+  user-prompt:
+    description: 'User message — the context or question for the agent'
+    required: true
+  temperature:
+    description: 'Compatibility input; Copilot CLI controls sampling'
+    default: '0.7'
+  max-tokens:
+    description: 'Requested response limit included in the prompt'
+    default: '2048'
+  token:
+    description: 'Copilot token; use COPILOT_GITHUB_TOKEN or a workflow token with copilot-requests:write'
+    required: true
+  fallback-token:
+    description: 'Optional fallback Copilot token used when the primary invocation fails'
+    required: false
+
+outputs:
+  response:
+    description: 'Plain-text response from the model'
+    value: ${{ steps.invoke.outputs.response }}
+  raw-json:
+    description: 'JSON envelope containing provider, model, and response'
+    value: ${{ steps.invoke.outputs.raw_json }}
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure GitHub Copilot CLI
+      shell: bash
+      run: |
+        if ! gh copilot -- --version >/dev/null 2>&1; then
+          npm install --global @github/copilot
+        fi
+        gh copilot -- --version
+
+    - name: Invoke Copilot Model
+      id: invoke
+      shell: bash
+      env:
+        REQUESTED_MODEL: ${{ inputs.model }}
+        SYSTEM_PROMPT: ${{ inputs.system-prompt }}
+        USER_PROMPT: ${{ inputs.user-prompt }}
+        MAX_TOKENS: ${{ inputs.max-tokens }}
+        PRIMARY_COPILOT_TOKEN: ${{ inputs.token }}
+        FALLBACK_COPILOT_TOKEN: ${{ inputs.fallback-token }}
+        RULES_FILE: ${{ github.workspace }}/.github/collaboration-rules.md
+        COPILOT_AUTO_UPDATE: 'false'
+      run: |
+        set -euo pipefail
+
+        PROMPT_FILE=$(mktemp)
+        RESPONSE_FILE=$(mktemp)
+        ERROR_FILE=$(mktemp)
+        trap 'rm -f "$PROMPT_FILE" "$RESPONSE_FILE" "$ERROR_FILE"' EXIT
+
+        COPILOT_MODEL=$(python3 - <<'PYEOF'
+        import os
+
+        requested = os.environ.get("REQUESTED_MODEL", "").strip()
+        if "/" in requested:
+            requested = requested.rsplit("/", 1)[-1]
+        aliases = {
+            "gpt-4o-mini": "gpt-5-mini",
+            "gpt-4o": "gpt-5.4",
+        }
+        print(aliases.get(requested, requested or "gpt-5-mini"))
+        PYEOF
+        )
+        export COPILOT_MODEL
+
+        python3 - <<'PYEOF' > "$PROMPT_FILE"
+        import os
+        import re
+        from pathlib import Path
+
+        def validate_rules(rules: str, rules_file: Path) -> None:
+            if not rules:
+                raise SystemExit(
+                    f"Collaboration rules file {rules_file} is empty. "
+                    "Add markdown headings and rule items, or remove the file if shared rules are not needed."
+                )
+
+            heading_pattern = re.compile(r"^#{1,6}[ \t]+\S", re.MULTILINE)
+            list_item_pattern = re.compile(r"^(?:[-*][ \t]+\S|\d+\.[ \t]+\S)", re.MULTILINE)
+            has_heading = heading_pattern.search(rules) is not None
+            has_list_item = list_item_pattern.search(rules) is not None
+            if not has_heading or not has_list_item:
+                raise SystemExit(
+                    f"Collaboration rules file {rules_file} must be valid markdown with at least one heading "
+                    "and one ordered or unordered list item."
+                )
+
+            if "\x00" in rules:
+                raise SystemExit(
+                    f"Collaboration rules file {rules_file} contains NUL bytes. "
+                    "Use plain UTF-8 markdown text."
+                )
+
+        system_prompt = os.environ.get("SYSTEM_PROMPT")
+        user_prompt = os.environ.get("USER_PROMPT")
+        if system_prompt is None:
+            raise SystemExit("Missing required input: system-prompt. This should be provided by the workflow calling this action.")
+        if user_prompt is None:
+          raise SystemExit("Missing required input: user-prompt. This should be provided by the workflow calling this action.")
+        
+        rules_file_value = os.environ.get("RULES_FILE")
+        if rules_file_value is None:
+            raise SystemExit("Missing required environment variable: RULES_FILE. This should be set automatically by this action - please report this as an action implementation bug.")
+        
+        prompt = system_prompt.rstrip()
+        rules_file = Path(rules_file_value)
+        
+        if rules_file.is_file():
+            try:
+                rules = rules_file.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError) as exc:
+                raise SystemExit(f"Failed to read collaboration rules file {rules_file}: {exc}")
+            else:
+                validate_rules(rules, rules_file)
+                prompt = f"{prompt}\n\nFollow these repository collaboration rules for agent interaction and decision-making:\n\n{rules}"
+        
+        max_tokens = os.environ.get("MAX_TOKENS", "2048")
+        print(prompt)
+        print("\nUser request:\n")
+        print(user_prompt)
+        print(f"\nReturn only the requested response. Do not use tools or modify files. Keep the response within approximately {max_tokens} tokens.")
+        PYEOF
+
+        invoke_copilot() {
+          local token="$1"
+          : > "$RESPONSE_FILE"
+          : > "$ERROR_FILE"
+          set +e
+          COPILOT_GITHUB_TOKEN="$token" gh copilot -- \
+            --model "$COPILOT_MODEL" \
+            --no-alt-screen \
+            --stream off \
+            --output-format text \
+            --silent \
+            --no-custom-instructions \
+            --disable-builtin-mcps \
+            --deny-tool '*' \
+            --allow-all-tools \
+            --prompt "$(cat "$PROMPT_FILE")" \
+            >"$RESPONSE_FILE" 2>"$ERROR_FILE"
+          COPILOT_EXIT=$?
+          set -e
+        }
+
+        invoke_copilot "$PRIMARY_COPILOT_TOKEN"
+        if [ "$COPILOT_EXIT" -ne 0 ] && [ -n "$FALLBACK_COPILOT_TOKEN" ] && [ "$FALLBACK_COPILOT_TOKEN" != "$PRIMARY_COPILOT_TOKEN" ]; then
+          echo "Primary Copilot token failed; retrying with fallback token." >&2
+          invoke_copilot "$FALLBACK_COPILOT_TOKEN"
+        fi
+
+        if [ "$COPILOT_EXIT" -ne 0 ]; then
+          printf '⚠️ Copilot call failed: %s\n' "$(head -1 "$ERROR_FILE")" > "$RESPONSE_FILE"
+        fi
+        if [ ! -s "$RESPONSE_FILE" ]; then
+          printf '⚠️ Copilot call failed: empty response from model %s\n' "$COPILOT_MODEL" > "$RESPONSE_FILE"
+        fi
+
+        RAW_FILE=$(mktemp)
+        trap 'rm -f "$PROMPT_FILE" "$RESPONSE_FILE" "$ERROR_FILE" "$RAW_FILE"' EXIT
+        python3 - "$RESPONSE_FILE" "$RAW_FILE" <<'PYEOF'
+        import json
+        import os
+        import sys
+
+        response_path, output_path = sys.argv[1:]
+        response = open(response_path, encoding="utf-8").read().rstrip()
+        payload = {
+            "provider": "github-copilot-cli",
+            "model": os.environ["COPILOT_MODEL"],
+            "response": response,
+        }
+        with open(output_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        PYEOF
+
+        DELIMITER="COPILOT_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+        {
+          echo "response<<$DELIMITER"
+          cat "$RESPONSE_FILE"
+          echo
+          echo "$DELIMITER"
+          echo "raw_json<<$DELIMITER"
+          cat "$RAW_FILE"
+          echo
+          echo "$DELIMITER"
+        } >> "$GITHUB_OUTPUT"
