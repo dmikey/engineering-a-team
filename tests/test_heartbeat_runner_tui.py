@@ -84,6 +84,7 @@ class HeartbeatRunnerTuiTests(unittest.TestCase):
     def test_tui_key_normalizer_accepts_characters_and_special_keys(self):
         self.assertEqual(heartbeat_runner.normalize_tui_key("r"), ord("r"))
         self.assertEqual(heartbeat_runner.normalize_tui_key("/"), ord("/"))
+        self.assertEqual(heartbeat_runner.normalize_tui_key(" "), ord(" "))
         self.assertEqual(heartbeat_runner.normalize_tui_key("ENTER"), 10)
         self.assertEqual(heartbeat_runner.normalize_tui_key(ord("r")), ord("r"))
 

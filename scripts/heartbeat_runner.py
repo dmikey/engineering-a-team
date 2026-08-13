@@ -145,9 +145,6 @@ def normalize_tui_key(raw_key: Any) -> int | None:
     if isinstance(raw_key, str):
         if not raw_key:
             return None
-        text = raw_key.strip()
-        if not text:
-            return None
         special_keys = {
             "ENTER": 10,
             "RETURN": 10,
@@ -158,9 +155,15 @@ def normalize_tui_key(raw_key: Any) -> int | None:
             "DEL": 127,
             "DELETE": 127,
         }
-        normalized = special_keys.get(text.upper())
+        upper_key = raw_key.upper()
+        normalized = special_keys.get(upper_key)
         if normalized is not None:
             return normalized
+        if len(raw_key) == 1:
+            return ord(raw_key)
+        text = raw_key.strip()
+        if not text:
+            return None
         return ord(text[0])
     return None
 
