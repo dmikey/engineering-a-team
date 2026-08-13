@@ -137,8 +137,39 @@ TUI_ACTION_LABELS = {
 }
 
 
+def normalize_tui_key(raw_key: Any) -> int | None:
+    if raw_key is None:
+        return None
+    if isinstance(raw_key, int):
+        return raw_key
+    if isinstance(raw_key, str):
+        if not raw_key:
+            return None
+        text = raw_key.strip()
+        if not text:
+            return None
+        special_keys = {
+            "ENTER": 10,
+            "RETURN": 10,
+            "ESC": 27,
+            "ESCAPE": 27,
+            "TAB": 9,
+            "BACKSPACE": 127,
+            "DEL": 127,
+            "DELETE": 127,
+        }
+        normalized = special_keys.get(text.upper())
+        if normalized is not None:
+            return normalized
+        return ord(text[0])
+    return None
+
+
 def tui_action_for_key(key: int) -> str | None:
-    return TUI_MUTATING_ACTION_KEYS.get(key)
+    normalized = normalize_tui_key(key)
+    if normalized is None:
+        return None
+    return TUI_MUTATING_ACTION_KEYS.get(normalized)
 
 
 def resolve_tui_confirmation(pending_action: str | None, key: int) -> tuple[str, str | None]:
@@ -3272,8 +3303,12 @@ def run_tui(
                 last_draw_signature = render_signature
 
             # ── Input ────────────────────────────────────────────────────────
-            key = stdscr.getch()
-            if key == -1:
+            try:
+                raw_key = stdscr.get_wch() if hasattr(stdscr, "get_wch") else stdscr.getch()
+            except curses.error:
+                continue
+            key = normalize_tui_key(raw_key)
+            if key in (None, -1):
                 continue
 
             if chat_open:

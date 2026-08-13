@@ -81,6 +81,12 @@ class HeartbeatRunnerTuiTests(unittest.TestCase):
         execute_plan_mock.assert_not_called()
         approve_mock.assert_not_called()
 
+    def test_tui_key_normalizer_accepts_characters_and_special_keys(self):
+        self.assertEqual(heartbeat_runner.normalize_tui_key("r"), ord("r"))
+        self.assertEqual(heartbeat_runner.normalize_tui_key("/"), ord("/"))
+        self.assertEqual(heartbeat_runner.normalize_tui_key("ENTER"), 10)
+        self.assertEqual(heartbeat_runner.normalize_tui_key(ord("r")), ord("r"))
+
     def test_tui_mutating_actions_require_explicit_confirmation(self):
         for key, expected_action in {
             ord("r"): "heartbeat",
