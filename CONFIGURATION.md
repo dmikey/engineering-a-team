@@ -8,8 +8,7 @@ repository.
 ## Prerequisites
 
 1. **GitHub Actions** must be enabled for your repository.
-2. **GitHub Models** access — a PAT with `models:read` scope, stored as the
-   `MODELS_TOKEN` secret (optional; falls back to `GITHUB_TOKEN`).
+2. **GitHub Copilot** access for the account or organization running workflows.
 3. **Labels** created in your repository (see [Quick Start](./README.md)).
 4. **Discussions enabled** (optional but recommended) for council decisions and
    weekly reports.
@@ -18,24 +17,20 @@ repository.
 
 ## Authentication
 
-### MODELS_TOKEN (recommended)
+### COPILOT_GITHUB_TOKEN (optional)
 
-Create a GitHub Personal Access Token with the `models:read` scope and store it
-as a repository secret named `MODELS_TOKEN`.
+Model-calling workflows grant `copilot-requests: write` to `GITHUB_TOKEN`. If
+your organization requires a dedicated Copilot-enabled token, store it as
+`COPILOT_GITHUB_TOKEN`:
 
 ```
 Settings → Secrets and variables → Secrets → New repository secret
-Name:  MODELS_TOKEN
-Value: <your PAT>
+Name:  COPILOT_GITHUB_TOKEN
+Value: <your Copilot-enabled token>
 ```
 
-If `MODELS_TOKEN` is not set, workflows fall back to the built-in
-`GITHUB_TOKEN`. Note that `GITHUB_TOKEN` may have limited access to GitHub
-Models depending on your plan.
-
-The model-calling workflows in this repository request `models: read`
-permission explicitly. If GitHub Models access is still denied, provide a
-`MODELS_TOKEN` secret instead of relying on `GITHUB_TOKEN`.
+If the secret is not set, workflows use the built-in `GITHUB_TOKEN`. Direct
+GitHub Models endpoints and `MODELS_TOKEN` are not supported.
 
 ### GH_USER_PAT (for Copilot agent workflow dispatch)
 
@@ -75,8 +70,8 @@ Settings → Secrets and variables → Variables → New repository variable
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENT_MODEL` | `gpt-4o-mini` | Default model for QA, PM, and PO agents |
-| `COUNCIL_MODEL` | `gpt-4o` | Model for the Council Moderator (higher capability recommended) |
+| `AGENT_MODEL` | `gpt-5-mini` | Default model for QA, PM, and PO agents |
+| `COUNCIL_MODEL` | `gpt-5.4` | Model for the Council Moderator (higher capability recommended) |
 | `AGENT_MAX_TOKENS` | `2048` | Maximum tokens per model response |
 | `AGENT_TEMPERATURE` | `0.7` | Sampling temperature (0.0 = deterministic, 1.0 = creative) |
 | `AGENT_DEFAULT_COMMUNICATION_METHOD` | `discussion` | Default channel for agent-router notifications. Options: `comment`, `issue`, `discussion` |
@@ -87,7 +82,7 @@ Settings → Secrets and variables → Variables → New repository variable
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `QA_MODEL` | `gpt-4o-mini` | Override model for QA Engineer |
+| `QA_MODEL` | `gpt-5-mini` | Override model for QA Engineer |
 | `QA_SEVERITY_THRESHOLD` | `HIGH` | Minimum severity to open a tracking issue. Options: `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` |
 | `QA_COLLAB_REPOSITORIES` | _(empty)_ | Optional comma-separated `owner/repo` list used for cross-repo issue context and mirrored serious QA findings. The workflow uses up to the first 3 valid external repositories. Example: `octo-org/frontend,octo-org/backend` |
 | `QA_AGENT_SKILLS` | `code-review,issue-creation,pr-feedback,security-scan` | Comma-separated skill set injected into Quinn's system prompt at runtime |
@@ -96,7 +91,7 @@ Settings → Secrets and variables → Variables → New repository variable
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PM_MODEL` | `gpt-4o-mini` | Override model for Project Manager |
+| `PM_MODEL` | `gpt-5-mini` | Override model for Project Manager |
 | `PM_MILESTONE_LOOKAHEAD_DAYS` | `30` | Days before a milestone due date to start drift detection |
 | `PM_AGENT_SKILLS` | `backlog-grooming,milestone-management,discussion-creation,issue-labeling,skill-development-analysis` | Comma-separated skill set injected into Morgan's system prompts at runtime |
 
@@ -104,7 +99,7 @@ Settings → Secrets and variables → Variables → New repository variable
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PO_MODEL` | `gpt-4o-mini` | Override model for Product Owner |
+| `PO_MODEL` | `gpt-5-mini` | Override model for Product Owner |
 | `PO_RUN_PLAYWRIGHT` | `true` | Set to `false` to disable Playwright test runs |
 | `PLAYWRIGHT_BASE_URL` | _(empty)_ | Base URL passed to Playwright tests |
 | `PO_AGENT_SKILLS` | `feature-suggestion,playwright-testing,issue-creation,discussion-facilitation,product-analysis` | Comma-separated skill set injected into Alex's system prompts at runtime |
@@ -113,7 +108,7 @@ Settings → Secrets and variables → Variables → New repository variable
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SELF_IMPROVEMENT_MODEL` | `gpt-4o-mini` | Override model for the self-improvement evaluator |
+| `SELF_IMPROVEMENT_MODEL` | `gpt-5-mini` | Override model for the self-improvement evaluator |
 | `REFERENCE_APP_REPO` | current repository | Optional override for the `owner/repo` used as the Get Milk benchmark source |
 | `REFERENCE_APP_BASE_URL` | _(empty)_ | Optional live URL for the Get Milk app |
 | `COPILOT_ASSIGNEE` | `@copilot` | Assignee login used for native GitHub Copilot handoff when supported |
@@ -122,7 +117,7 @@ Settings → Secrets and variables → Variables → New repository variable
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TA_MODEL` | `gpt-4o-mini` | Override model for the Task Assignment System (falls back to `PM_MODEL` then `AGENT_MODEL`) |
+| `TA_MODEL` | `gpt-5-mini` | Override model for the Task Assignment System (falls back to `PM_MODEL` then `AGENT_MODEL`) |
 
 ### Skill Development Variables
 
@@ -134,7 +129,7 @@ Settings → Secrets and variables → Variables → New repository variable
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `COUNCIL_MODEL` | `gpt-4o` | Model for Council Moderator synthesis |
+| `COUNCIL_MODEL` | `gpt-5.4` | Model for Council Moderator synthesis |
 | `COUNCIL_DISCUSSION_CATEGORY` | `Team Decisions` | GitHub Discussion category for council decisions |
 | `COUNCIL_ROLE_ADJUSTMENT_ENABLED` | `true` | Enables dynamic role-adjustment reports from the Council Moderator |
 | `COUNCIL_ROLE_ADJUSTMENT_MIN_SCORE` | `80` | Minimum availability score required for an agent to stay in a lead role |
@@ -155,7 +150,7 @@ Shared collaboration rules live in
 [`/.github/collaboration-rules.md`](./.github/collaboration-rules.md).
 
 - Edit this file to define how agents should interact and make decisions.
-- The shared `call-github-model` action reads the file on every invocation, so
+- The shared `call-copilot-model` action reads the file on every invocation, so
   updates apply dynamically to subsequent agent runs without restarting
   anything.
 - Keep the file as non-empty Markdown with headings and rule list items so the
@@ -266,7 +261,7 @@ Add a new section to `.github/agents.md`:
 
 **ID**: `my-agent`
 **Name**: Sam (My Agent)
-**Model**: `gpt-4o-mini`
+**Model**: `gpt-5-mini`
 
 ### Persona
 ...
@@ -305,6 +300,7 @@ on:
 permissions:
   issues: write
   pull-requests: write
+  copilot-requests: write
 
 jobs:
   my-agent:
@@ -314,10 +310,10 @@ jobs:
 
       - name: Sam — analysis
         id: analysis
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
-          model: gpt-4o-mini
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          model: gpt-5-mini
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Sam, a ... (paste persona here)
           user-prompt: |
@@ -339,27 +335,27 @@ pattern of the existing `/qa`, `/pm`, `/po` routes.
 
 ## Composite Actions Reference
 
-### `.github/actions/call-github-model`
+### `.github/actions/call-copilot-model`
 
-Calls GitHub Models API and returns the text response.
+Calls a GitHub Copilot model through Copilot CLI and returns the text response.
 
 **Inputs**:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `model` | No | `gpt-4o-mini` | Model identifier |
+| `model` | No | `gpt-5-mini` | Copilot model identifier; legacy defaults are mapped |
 | `system-prompt` | Yes | — | Agent persona and instructions |
 | `user-prompt` | Yes | — | Context to analyse |
-| `temperature` | No | `0.7` | Sampling temperature |
-| `max-tokens` | No | `2048` | Max response tokens |
-| `token` | Yes | — | GitHub token with `models:read` |
+| `temperature` | No | `0.7` | Compatibility input; Copilot controls sampling |
+| `max-tokens` | No | `2048` | Requested response limit |
+| `token` | Yes | — | Copilot-enabled token |
 
 **Outputs**:
 
 | Output | Description |
 |--------|-------------|
 | `response` | Plain-text model response |
-| `raw-json` | Full JSON response body |
+| `raw-json` | JSON envelope with provider, model, and response |
 
 ### `.github/actions/post-council-results`
 
@@ -388,9 +384,9 @@ Posts a council decision to GitHub Discussions, falling back to Issues.
 
 ### Model returns "⚠️ Model call failed"
 
-- Check that `MODELS_TOKEN` is set and has `models:read` scope.
-- Confirm the model name is valid (see [GitHub Models docs](https://github.com/marketplace/models)).
-- Check the Actions run log for the raw API response.
+- Check that the repository or organization has Copilot access.
+- Verify `COPILOT_GITHUB_TOKEN`, or the fallback workflow token, can make Copilot requests.
+- Confirm the configured model is supported by Copilot CLI and inspect its workflow log.
 
 ### Labels not being applied
 
@@ -415,4 +411,4 @@ Posts a council decision to GitHub Discussions, falling back to Issues.
 
 - Council discussions make 4 model calls sequentially. If using a slow model
   (e.g., `gpt-4`), the workflow may approach the 6-hour limit.
-  Switch to `gpt-4o-mini` via `COUNCIL_MODEL` variable for faster runs.
+  Switch to `gpt-5-mini` via `COUNCIL_MODEL` variable for faster runs.

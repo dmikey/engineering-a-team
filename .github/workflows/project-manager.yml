@@ -11,7 +11,7 @@
 #            issue-labeling
 #
 # Reads persona from .github/agents.md (Project Manager section).
-# Model defaults to gpt-4o-mini; override with repository variable PM_MODEL.
+# Model defaults to gpt-5-mini; override with repository variable PM_MODEL.
 # ──────────────────────────────────────────────────────────────────────────────
 name: Project Manager Agent
 
@@ -85,7 +85,7 @@ on:
         description: 'Additional context for the PM'
         required: false
     secrets:
-      MODELS_TOKEN:
+      COPILOT_GITHUB_TOKEN:
         required: false
       GH_USER_PAT:
         required: false
@@ -95,10 +95,10 @@ permissions:
   contents: read
   issues: write
   discussions: write
-  models: read
+  copilot-requests: write
 
 env:
-  PM_MODEL: ${{ vars.PM_MODEL || 'gpt-4o-mini' }}
+  PM_MODEL: ${{ vars.PM_MODEL || 'gpt-5-mini' }}
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
   PM_MILESTONE_LOOKAHEAD: ${{ vars.PM_MILESTONE_LOOKAHEAD_DAYS || '30' }}
@@ -317,12 +317,12 @@ jobs:
         if: |
           steps.data.outputs.task == 'groom-backlog' ||
           steps.data.outputs.task == 'full-sprint-report'
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.PM_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Morgan, an experienced engineering Project Manager. You keep
             teams focused, on schedule, and aligned with business goals.
@@ -372,12 +372,12 @@ jobs:
           (steps.data.outputs.task == 'check-milestones' ||
            steps.data.outputs.task == 'full-sprint-report') &&
           steps.data.outputs.milestone_count != '0'
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.PM_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Morgan, an experienced engineering Project Manager. You keep
             teams focused, on schedule, and aligned with business goals.
@@ -626,12 +626,12 @@ jobs:
       - name: Morgan — performance insights and recommendations
         id: perf-insights
         if: steps.data.outputs.task == 'agent-performance-dashboard'
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.PM_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Morgan, an experienced engineering Project Manager analysing
             agent performance metrics for an autonomous AI engineering team.

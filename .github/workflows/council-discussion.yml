@@ -12,7 +12,7 @@
 #            workflow_dispatch
 #            workflow_call (from agent-router or other workflows)
 #
-# Model:     gpt-4o (overridable via COUNCIL_MODEL variable)
+# Model:     gpt-5.4 (overridable via COUNCIL_MODEL variable)
 # ──────────────────────────────────────────────────────────────────────────────
 name: Council Discussion
 
@@ -69,20 +69,20 @@ on:
         description: 'The council decision text'
         value: ${{ jobs.council.outputs.decision }}
     secrets:
-      MODELS_TOKEN:
+      COPILOT_GITHUB_TOKEN:
         required: false
 
 permissions:
   contents: read
   issues: write
-  models: read
+  copilot-requests: write
   pull-requests: write
   discussions: write
 
 env:
-  COUNCIL_MODEL: ${{ vars.COUNCIL_MODEL || 'gpt-4o' }}
+  COUNCIL_MODEL: ${{ vars.COUNCIL_MODEL || 'gpt-5.4' }}
   COUNCIL_ROLE_ADJUSTMENT_MIN_SCORE: ${{ vars.COUNCIL_ROLE_ADJUSTMENT_MIN_SCORE || '80' }}
-  AGENT_MODEL: ${{ vars.AGENT_MODEL || 'gpt-4o-mini' }}
+  AGENT_MODEL: ${{ vars.AGENT_MODEL || 'gpt-5-mini' }}
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
   QA_AGENT_SKILLS: ${{ vars.QA_AGENT_SKILLS || 'code-review,issue-creation,pr-feedback,security-scan' }}
@@ -324,12 +324,12 @@ jobs:
       - name: Quinn — QA perspective
         if: steps.resolve.outputs.mode != 'role-adjustment'
         id: qa-perspective
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.AGENT_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Quinn, a senior QA Engineer. You are participating in an
             engineering council discussion. Provide your honest professional
@@ -369,12 +369,12 @@ jobs:
       - name: Morgan — PM perspective
         if: steps.resolve.outputs.mode != 'role-adjustment'
         id: pm-perspective
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.AGENT_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Morgan, an experienced Project Manager. You are participating
             in an engineering council discussion. Provide your honest professional
@@ -415,12 +415,12 @@ jobs:
       - name: Alex — PO perspective
         if: steps.resolve.outputs.mode != 'role-adjustment'
         id: po-perspective
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.AGENT_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Alex, a Product Owner. You are participating in an engineering
             council discussion. Provide your honest professional perspective
@@ -469,12 +469,12 @@ jobs:
       - name: Casey — Council Moderator synthesis
         if: steps.resolve.outputs.mode != 'role-adjustment'
         id: moderator
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.COUNCIL_MODEL }}
           max-tokens: 3000
           temperature: '0.5'
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Casey, the Council Moderator for an autonomous engineering
             team. Your role is to synthesise the perspectives of the QA Engineer,

@@ -32,17 +32,17 @@ git clone https://github.com/YOUR-ORG/engineering-a-team.git
 cd engineering-a-team
 ```
 
-### 2. Configure GitHub Models access
+### 2. Configure GitHub Copilot access
 
-The agents call **GitHub Models** (`https://models.inference.ai.azure.com`).
-You need a token with the `models:read` scope.
+The agents call **GitHub Copilot models** through GitHub Copilot CLI. Direct
+GitHub Models endpoints are not used.
 
-Workflows in this repository now also request `models: read` permission for the
-`GITHUB_TOKEN`. If your plan or org policy still does not allow GitHub Models
-through `GITHUB_TOKEN`, set `MODELS_TOKEN` explicitly.
+Model-calling workflows request `copilot-requests: write` for the built-in
+`GITHUB_TOKEN`. Your GitHub account or organization must have Copilot access.
+If your policy requires a dedicated token, configure it explicitly:
 
 1. Go to **Settings → Secrets and variables → Secrets**
-2. Create secret `MODELS_TOKEN` with your GitHub PAT (or leave it unset to
+2. Create secret `COPILOT_GITHUB_TOKEN` with your Copilot-enabled token (or leave it unset to
    fall back to `GITHUB_TOKEN`)
 
 ### 3. Create required labels
@@ -200,8 +200,8 @@ scripts/autonomous-heartbeat.sh install-service --interval 600
 
 Supervisor behavior per heartbeat cycle (event + time):
 
-1. Verifies GH Models pipeline signals (`call-github-model` usage + `models: read` permission)
-2. Detects whether `MODELS_TOKEN` secret exists (falls back to `GITHUB_TOKEN` mode when absent)
+1. Verifies Copilot pipeline signals (`call-copilot-model` usage + `copilot-requests: write` permission)
+2. Detects whether `COPILOT_GITHUB_TOKEN` exists (falls back to `GITHUB_TOKEN` mode when absent)
 3. Checks recent PR update events (short rolling window)
 4. Optionally marks eligible draft PRs as ready for review
 5. Auto-merges approved PRs (`--auto-merge-prs true` by default; queues auto-merge when checks are pending)
@@ -362,8 +362,8 @@ Override defaults using GitHub repository variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENT_MODEL` | `gpt-4o-mini` | Default model for all agents |
-| `COUNCIL_MODEL` | `gpt-4o` | Model for Council Moderator |
+| `AGENT_MODEL` | `gpt-5-mini` | Default model for all agents |
+| `COUNCIL_MODEL` | `gpt-5.4` | Model for Council Moderator |
 | `AGENT_MAX_TOKENS` | `2048` | Max response tokens |
 | `AGENT_TEMPERATURE` | `0.7` | Generation temperature |
 | `AGENT_DEFAULT_COMMUNICATION_METHOD` | `discussion` | Default channel for agent-router notifications (`comment`, `issue`, or `discussion`) |
@@ -378,8 +378,8 @@ Override defaults using GitHub repository variables
 | `PO_AGENT_SKILLS` | `feature-suggestion,playwright-testing,issue-creation,discussion-facilitation,product-analysis` | Comma-separated skill set injected into PO prompts |
 | `REFERENCE_APP_REPO` | current repository | Optional override for the `owner/repo` used for the Get Milk benchmark app |
 | `REFERENCE_APP_BASE_URL` | _(empty)_ | Optional live URL for the Get Milk benchmark app |
-| `SELF_IMPROVEMENT_MODEL` | `gpt-4o-mini` | Model for self-improvement evaluation |
-| `TA_MODEL` | `gpt-4o-mini` | Model for the Task Assignment System (falls back to `PM_MODEL` then `AGENT_MODEL`) |
+| `SELF_IMPROVEMENT_MODEL` | `gpt-5-mini` | Model for self-improvement evaluation |
+| `TA_MODEL` | `gpt-5-mini` | Model for the Task Assignment System (falls back to `PM_MODEL` then `AGENT_MODEL`) |
 | `SKILL_REMINDERS_OPT_IN` | `{}` | JSON object mapping known agent names to `true`/`false` reminder opt-ins |
 | `COPILOT_ASSIGNEE` | _(empty)_ | Optional native Copilot assignee identity |
 | `COUNCIL_DISCUSSION_CATEGORY` | `Team Decisions` | GitHub Discussion category |
@@ -480,18 +480,51 @@ Run the full interactive TUI:
 python3 ./scripts/heartbeat_runner.py --tui --interval 300
 ```
 
+To explicitly grant automatic execution at startup and run the first guarded
+heartbeat immediately:
+
+```bash
+python3 ./scripts/heartbeat_runner.py --tui --tui-auto --interval 300
+```
+
 TUI controls:
 
 - `q`: quit
-- `r`: run a heartbeat immediately
-- `p`: pause/resume automatic heartbeats
+- `r`: request a policy-gated heartbeat
+- `p`: request enabling or disabling automatic policy-gated heartbeats
+- `c`: request a council workflow dispatch
+- `m`: request a project manager report
+- `a`: request assignment of the highest-priority eligible issue
+- `d`: request advancement of planner-approved drafts
+- `y` / `n`: confirm or cancel the pending execution request
+- `/`: open local agent chat
 
-The TUI displays live queue status, PR decision actions, workflow pressure,
-model/auth status, and the actions executed in the latest heartbeat.
+TUI mode starts under operator control with automatic execution disabled.
+On startup it loads a read-only repository preview so the queue, workflow
+pressure, and heuristic decisions are visible before the operator grants any
+execution. This preview does not approve runs, merge PRs, dispatch workflows,
+or write heartbeat decisions.
+Enabling automatic mode requires confirmation; after that grant, the first
+heartbeat runs immediately and later heartbeats run at `--interval` until the
+operator confirms that automatic mode should stop. `--tui-auto` supplies the
+same grant explicitly on the command line.
+Chat and pending confirmation dialogs suspend due runs. Manual controls and
+automatic heartbeats use the same backend merge guards, cooldowns, action
+limits, authentication, and decision ledger. The TUI displays the current
+mode, automatic countdown, queue state, PR decisions, workflow pressure,
+model/auth status, and latest execution results.
 
-When chat is used in TUI mode, relay publication now dispatches the council
-workflow so discussion outcomes are posted through GitHub Actions instead of
-direct local GraphQL calls.
+When the latest run for a workflow fails with `failure`, `startup_failure`, or
+`timed_out`, an active heartbeat requests a rerun of failed jobs. Recovery is
+limited to one workflow per heartbeat, waits 30 minutes between attempts, and
+stops after three consecutive attempts. A later successful run clears the
+attempt count. Dry-run mode only simulates this recovery and labels it as not
+executed.
+
+Chat does not publish or dispatch workflows automatically. Copilot tool and
+URL access are disabled by default; operators can explicitly opt in with
+`HEARTBEAT_CHAT_ALLOW_ALL_TOOLS=true` or
+`HEARTBEAT_CHAT_ALLOW_ALL_URLS=true` before starting the TUI.
 
 #### Copilot planner timeout and cooldown
 
@@ -515,9 +548,9 @@ cooldown expires.
 The runner prints an in-depth overview each cycle and also writes the latest
 report plus local dedupe state under `.git/heartbeat-runner/`.
 
-For local runs, a single `GH_USER_PAT` covers both model inference and
-workflow dispatch. Give it `actions:write` (dispatch) and `models:read`
-(inference) scopes:
+For local runs, Copilot CLI uses your authenticated Copilot session. A
+`GH_USER_PAT` with `actions:write` is only needed when the runner dispatches
+workflows:
 
 ```bash
 export GH_USER_PAT=YOUR_TOKEN
@@ -526,9 +559,9 @@ python3 ./scripts/heartbeat_runner.py --interval 300
 
 Token source policy for the heartbeat runner:
 
-- Local execution: `GH_USER_PAT` is used for both model calls and `gh` dispatch auth when set.
-- Local fallback: legacy `MODELS_TOKEN`/`GH_MODELS_TOKEN` (models) and `HEARTBEAT_GH_TOKEN` (dispatch) still work, then `gh auth token`.
-- GitHub Actions execution: uses `MODELS_TOKEN` (or `GH_MODELS_TOKEN`/`GH_USER_PAT`) from workflow secrets/variables.
+- Local inference: Copilot CLI uses `COPILOT_GITHUB_TOKEN` when set, otherwise its authenticated session.
+- Local dispatch: `GH_USER_PAT` or `HEARTBEAT_GH_TOKEN` authorizes workflow dispatches.
+- GitHub Actions inference: uses `COPILOT_GITHUB_TOKEN`, falling back to the workflow `GITHUB_TOKEN` with `copilot-requests: write`.
 
 If you want local model inference without setting `GH_USER_PAT`, run:
 
@@ -621,7 +654,7 @@ To add a new agent:
   collaboration-rules.md     # Shared agent interaction and decision rules
   copilot-instructions.md    # GitHub Copilot context
   actions/
-    call-github-model/       # Reusable composite action — GitHub Models API
+    call-copilot-model/       # Reusable composite action — Copilot CLI models
     post-council-results/    # Composite action — post to Discussions/Issues
   workflows/
     collaboration-rules-audit.yml # Audits collaboration rule changes
@@ -642,15 +675,15 @@ CONFIGURATION.md             # Full configuration guide
 ```
 PR Opened
     └─► qa-engineer.yml
-            └─► call-github-model (Quinn persona)
+            └─► call-copilot-model (Quinn persona)
                     └─► PR review comment posted
                     └─► Non-approval reviews tag `@copilot` for PR follow-up
                     └─► Issue opened if HIGH/CRITICAL
 
 Weekdays 09:00 UTC
     └─► project-manager.yml
-            ├─► call-github-model (Morgan — grooming)
-            ├─► call-github-model (Morgan — milestones)
+            ├─► call-copilot-model (Morgan — grooming)
+            ├─► call-copilot-model (Morgan — milestones)
     ├─► Uses latest Product + Project Roadmap to guide priority and assignment
             ├─► Labels applied to issues
             └─► Sprint report posted to Discussion/Issue
@@ -665,25 +698,25 @@ Weekdays 11:00 UTC
 
 Weekdays 13:00 UTC or on push to default branch
     └─► product-owner.yml
-            ├─► call-github-model (Alex — health report)
-            ├─► call-github-model (Alex — feature suggestions)
+            ├─► call-copilot-model (Alex — health report)
+            ├─► call-copilot-model (Alex — feature suggestions)
             ├─► Feature issues opened
             ├─► Playwright tests run (if configured)
             └─► Product health report posted
 
       Weekdays 14:30 UTC and after successful Product Owner runs
         └─► council-discussion.yml
-            ├─► call-github-model (Quinn perspective)
-            ├─► call-github-model (Morgan perspective)
-            ├─► call-github-model (Alex perspective)
-            ├─► call-github-model (Casey synthesis)
+            ├─► call-copilot-model (Quinn perspective)
+            ├─► call-copilot-model (Morgan perspective)
+            ├─► call-copilot-model (Alex perspective)
+            ├─► call-copilot-model (Casey synthesis)
             └─► Council decision posted to Discussion/Issue
 
       Mondays 15:00 UTC
         └─► roadmap-collaboration.yml
-            ├─► call-github-model (Alex product direction)
-            ├─► call-github-model (Morgan delivery plan)
-            ├─► call-github-model (Casey merged roadmap)
+            ├─► call-copilot-model (Alex product direction)
+            ├─► call-copilot-model (Morgan delivery plan)
+            ├─► call-copilot-model (Casey merged roadmap)
             └─► Shared roadmap posted to Discussion/Issue
 
 Weekdays 17:00 UTC
@@ -699,10 +732,10 @@ Weekdays 17:00 UTC
 
 /council sprint-prioritization [goal]
   └─► council-sprint-prioritization.yml
-      ├─► call-github-model (Quinn — risk & complexity assessment)
-      ├─► call-github-model (Morgan — timeline & dependency ranking)
-      ├─► call-github-model (Alex — user value & product strategy)
-      ├─► call-github-model (Casey — ranked sprint backlog synthesis)
+      ├─► call-copilot-model (Quinn — risk & complexity assessment)
+      ├─► call-copilot-model (Morgan — timeline & dependency ranking)
+      ├─► call-copilot-model (Alex — user value & product strategy)
+      ├─► call-copilot-model (Casey — ranked sprint backlog synthesis)
       └─► Sprint backlog posted to Discussion/Issue
 
 Mondays 08:00 UTC

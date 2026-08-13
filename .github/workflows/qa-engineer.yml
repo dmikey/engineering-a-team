@@ -41,13 +41,13 @@ on:
         description: 'Additional context'
         required: false
     secrets:
-      MODELS_TOKEN:
+      COPILOT_GITHUB_TOKEN:
         required: false
 
 permissions:
   contents: read
   issues: write
-  models: read
+  copilot-requests: write
   pull-requests: write
 
 env:
@@ -218,15 +218,15 @@ jobs:
             echo "QA_CTX_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      # ── Call GitHub Model ────────────────────────────────────────────────
+      # ── Call Copilot model ──────────────────────────────────────────────
       - name: Quinn — QA Engineer analysis
         id: qa
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.QA_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           fallback-token: ${{ secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Quinn, a senior QA Engineer with 10+ years of experience in
@@ -319,8 +319,8 @@ jobs:
               model_error = response
               print(
                   f"WARNING: Model call failed — {model_error}\n"
-                  "Check that MODELS_TOKEN is valid, the model identifier is correct,\n"
-                  "and that the GitHub Models API is reachable.\n"
+                  "Check that COPILOT_GITHUB_TOKEN is valid, the model identifier is correct,\n"
+                  "and that Copilot CLI can access the configured model.\n"
                   "Falling back to a manual-review handoff so the workflow can still complete.",
                   file=sys.stderr,
               )
@@ -332,12 +332,12 @@ jobs:
                   **Recommendation**: [🔄 REQUEST CHANGES]
 
                   ### Summary
-                  Automated QA analysis could not be completed because the GitHub Models request failed.
+                  Automated QA analysis could not be completed because the Copilot request failed.
                   Manual follow-up is required before this change is merged.
 
                   ### Issues Found
-                  - **[MEDIUM]** `workflow` — Quinn could not complete the automated review because the GitHub Models request failed.
-                    - 💡 Fix: verify `MODELS_TOKEN` (or fallback `GITHUB_TOKEN`) has `models:read`, confirm the configured model identifier is valid, and rerun the workflow.
+                  - **[MEDIUM]** `workflow` — Quinn could not complete the automated review because the Copilot request failed.
+                    - 💡 Fix: verify `COPILOT_GITHUB_TOKEN` (or fallback `GITHUB_TOKEN`) can make Copilot requests, confirm the configured model identifier is valid, and rerun the workflow.
 
                   ### Security Assessment
                   Automated security analysis was unavailable because the model response failed. Review OWASP Top 10 areas manually before merging.
@@ -378,7 +378,7 @@ jobs:
                   Automated QA could not assess coverage. Confirm the changed behavior has focused tests before merging.
 
                   ### Notes for Author
-                  The GitHub Models API returned an empty response for this request."""
+                  Copilot CLI returned an empty response for this request."""
               )
 
           print("response<<QA_RESP_EOF")

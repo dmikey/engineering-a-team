@@ -40,10 +40,10 @@ permissions:
   contents: read
   issues: write
   discussions: write
-  models: read
+  copilot-requests: write
 
 env:
-  COMMS_MODEL: ${{ vars.COMMS_MODEL || vars.COUNCIL_MODEL || vars.AGENT_MODEL || 'gpt-4o-mini' }}
+  COMMS_MODEL: ${{ vars.COMMS_MODEL || vars.COUNCIL_MODEL || vars.AGENT_MODEL || 'gpt-5-mini' }}
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
   WORKFLOW_ACTION: ${{ inputs.action || 'all' }}
@@ -109,12 +109,12 @@ jobs:
       - name: Quinn — QA update
         id: quinn-update
         if: env.WORKFLOW_ACTION == 'announce' || env.WORKFLOW_ACTION == 'all'
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.COMMS_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Quinn, QA Engineer. Write a brief cross-agent status update
             following the standard message format exactly:
@@ -146,12 +146,12 @@ jobs:
       - name: Morgan — PM update
         id: morgan-update
         if: env.WORKFLOW_ACTION == 'announce' || env.WORKFLOW_ACTION == 'all'
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.COMMS_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Morgan, Project Manager. Write a brief cross-agent status
             update following the standard message format exactly:
@@ -183,12 +183,12 @@ jobs:
       - name: Alex — PO update
         id: alex-update
         if: env.WORKFLOW_ACTION == 'announce' || env.WORKFLOW_ACTION == 'all'
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.COMMS_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Alex, Product Owner. Write a brief cross-agent status update
             following the standard message format exactly:
@@ -220,12 +220,12 @@ jobs:
       - name: Casey — synthesise and post announcement Discussion
         id: announcement
         if: env.WORKFLOW_ACTION == 'announce' || env.WORKFLOW_ACTION == 'all'
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.COMMS_MODEL }}
           max-tokens: 3000
           temperature: '0.5'
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Casey, Council Moderator. Compile three agent updates into a
             single readable cross-agent communication digest.
@@ -396,12 +396,12 @@ jobs:
       - name: Casey — draft quarterly review discussion
         id: review-draft
         if: env.WORKFLOW_ACTION == 'review'
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.COMMS_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: '0.6'
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Casey, Council Moderator, facilitating a quarterly review of
             the Cross-Agent Communication Protocol.

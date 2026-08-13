@@ -11,7 +11,7 @@ repository.
 
 **ID**: `council-moderator`
 **Name**: Casey (Council Moderator)
-**Model**: `gpt-4o` (higher capability required for synthesis)
+**Model**: `gpt-5.4` (higher capability required for synthesis)
 
 ### Persona
 
@@ -83,7 +83,7 @@ Default skill set (customizable via `*_AGENT_SKILLS` repository variables):
 
 **ID**: `project-manager`
 **Name**: Morgan (Project Manager)
-**Model**: `gpt-4o-mini`
+**Model**: `gpt-5-mini`
 
 ### Persona
 
@@ -129,7 +129,7 @@ Default skill set (customizable via `*_AGENT_SKILLS` repository variables):
 
 **ID**: `product-owner`
 **Name**: Alex (Product Owner)
-**Model**: `gpt-4o-mini`
+**Model**: `gpt-5-mini`
 
 ### Persona
 
@@ -176,7 +176,7 @@ Default skill set (customizable via `*_AGENT_SKILLS` repository variables):
 
 **ID**: `self-improvement-loop`
 **Name**: Casey (Self-Improvement Evaluator)
-**Model**: `gpt-4o-mini`
+**Model**: `gpt-5-mini`
 
 ### Persona
 
@@ -213,7 +213,7 @@ can be handed to native GitHub Copilot.
 
 **ID**: `task-assignment`
 **Name**: Task Assignment System
-**Model**: `gpt-4o-mini`
+**Model**: `gpt-5-mini`
 
 ### Persona
 
@@ -296,11 +296,11 @@ To add a new agent:
 2. List the skills your agent needs in [`skills.md`](./skills.md).
 3. Create `.github/workflows/<agent-id>.yml` that:
    - Defines the `on:` triggers from the **Triggers** section
-   - Uses `.github/actions/call-github-model` with the persona from this file
+   - Uses `.github/actions/call-copilot-model` with the persona from this file
    - Implements post-processing (issue creation, PR comments, etc.)
 4. Optionally register the agent's command in
    `.github/workflows/agent-router.yml` (e.g. `/myagent`).
 5. Update `agent-config.yml` with any configuration knobs.
 
-That's it — the shared `call-github-model` action and `agent-config.yml`
+That's it — the shared `call-copilot-model` action and `agent-config.yml`
 handle the rest.

@@ -39,19 +39,19 @@ on:
         description: 'Additional context for roadmap planning'
         required: false
     secrets:
-      MODELS_TOKEN:
+      COPILOT_GITHUB_TOKEN:
         required: false
 
 permissions:
   contents: read
   issues: write
   discussions: write
-  models: read
+  copilot-requests: write
 
 env:
-  PM_MODEL: ${{ vars.PM_MODEL || vars.AGENT_MODEL || 'gpt-4o-mini' }}
-  PO_MODEL: ${{ vars.PO_MODEL || vars.AGENT_MODEL || 'gpt-4o-mini' }}
-  COUNCIL_MODEL: ${{ vars.COUNCIL_MODEL || 'gpt-4o' }}
+  PM_MODEL: ${{ vars.PM_MODEL || vars.AGENT_MODEL || 'gpt-5-mini' }}
+  PO_MODEL: ${{ vars.PO_MODEL || vars.AGENT_MODEL || 'gpt-5-mini' }}
+  COUNCIL_MODEL: ${{ vars.COUNCIL_MODEL || 'gpt-5.4' }}
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
 
@@ -159,12 +159,12 @@ jobs:
 
       - name: Alex — product roadmap direction
         id: po-roadmap
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.PO_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Alex, Product Owner. Define user-centric product direction.
 
@@ -191,12 +191,12 @@ jobs:
 
       - name: Morgan — delivery roadmap plan
         id: pm-roadmap
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.PM_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Morgan, Project Manager. Turn product direction into a
             practical execution roadmap with sequencing, ownership, dependencies,
@@ -227,12 +227,12 @@ jobs:
 
       - name: Casey — merged PM + PO roadmap
         id: merged-roadmap
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.COUNCIL_MODEL }}
           max-tokens: 3000
           temperature: '0.5'
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Casey, moderator. Merge Product Owner and Project Manager
             roadmap drafts into one shared plan.

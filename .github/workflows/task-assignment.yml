@@ -43,7 +43,7 @@ on:
         required: false
         default: ''
     secrets:
-      MODELS_TOKEN:
+      COPILOT_GITHUB_TOKEN:
         required: false
       GH_USER_PAT:
         required: false
@@ -53,10 +53,10 @@ permissions:
   contents: read
   issues: write
   discussions: write
-  models: read
+  copilot-requests: write
 
 env:
-  TA_MODEL: ${{ vars.TA_MODEL || vars.PM_MODEL || 'gpt-4o-mini' }}
+  TA_MODEL: ${{ vars.TA_MODEL || vars.PM_MODEL || 'gpt-5-mini' }}
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
   TA_AUTO_DISPATCH_ENABLED: ${{ vars.TA_AUTO_DISPATCH_ENABLED || 'true' }}
@@ -179,12 +179,12 @@ jobs:
       - name: AI synthesis — assignment analysis
         id: ai-analysis
         if: steps.data.outputs.task == 'assign-tasks'
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.TA_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are the Task Assignment System for an autonomous AI engineering team.
             Your role is to review agent workloads and assignment recommendations,

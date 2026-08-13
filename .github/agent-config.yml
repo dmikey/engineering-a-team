@@ -10,13 +10,14 @@
 # ─── Model Settings ──────────────────────────────────────────────────────────
 
 # Default model used by all agents unless overridden per-agent.
-# Supported: gpt-4o, gpt-4o-mini, Meta-Llama-3.1-70B-Instruct, etc.
+# Supported Copilot models include gpt-5-mini, gpt-5.4, and gpt-5.3-codex.
+# Legacy gpt-4o-mini and gpt-4o values map to gpt-5-mini and gpt-5.4.
 # Repository variable: AGENT_MODEL
-default_model: gpt-4o-mini
+default_model: gpt-5-mini
 
 # Model used by the Council Moderator (higher capability recommended).
 # Repository variable: COUNCIL_MODEL
-council_model: gpt-4o
+council_model: gpt-5.4
 
 # Maximum tokens for each model response.
 # Repository variable: AGENT_MAX_TOKENS
@@ -28,17 +29,15 @@ temperature: "0.7"
 
 # ─── Collaboration Rules ───────────────────────────────────────────────────────
 
-# Shared collaboration rules loaded dynamically into every GitHub Models call.
+# Shared collaboration rules loaded dynamically into every Copilot model call.
 # Edit .github/collaboration-rules.md to customize agent interaction and
 # decision-making behaviour without changing workflow YAML or restarting agents.
 # Changes are logged by the Collaboration Rules Audit workflow.
 
 # ─── Authentication ───────────────────────────────────────────────────────────
 
-# The built-in GITHUB_TOKEN is used by default.
-# To access GitHub Models you may need a PAT with the `models:read` scope.
-# Store it as a repository secret named MODELS_TOKEN.
-# If MODELS_TOKEN is not set, workflows fall back to GITHUB_TOKEN.
+# Workflows use COPILOT_GITHUB_TOKEN when configured and otherwise use the
+# built-in GITHUB_TOKEN with `copilot-requests: write` permission.
 
 # ─── QA Engineer ─────────────────────────────────────────────────────────────
 
@@ -87,7 +86,7 @@ project_manager:
 
   # Model override for Project Manager.
   # Repository variable: PM_MODEL
-  model: gpt-4o-mini
+  model: gpt-5-mini
 
   # Cron schedule for backlog grooming (UTC).
   # Defined in .github/workflows/project-manager.yml.
@@ -118,7 +117,7 @@ product_owner:
 
   # Model override for Product Owner.
   # Repository variable: PO_MODEL
-  model: gpt-4o-mini
+  model: gpt-5-mini
 
   # Cron schedule for product health checks (UTC).
   # Defined in .github/workflows/product-owner.yml.
@@ -146,7 +145,7 @@ self_improvement:
 
   # Model override for the self-improvement evaluator.
   # Repository variable: SELF_IMPROVEMENT_MODEL
-  model: gpt-4o-mini
+  model: gpt-5-mini
 
   # Cron schedule for the evaluation loop (UTC).
   # Defined in .github/workflows/self-improvement-loop.yml.
@@ -175,7 +174,7 @@ task_assignment:
   # Model override for the task assignment system.
   # Inherits PM_MODEL then falls back to default_model when unset.
   # Repository variable: TA_MODEL
-  model: gpt-4o-mini
+  model: gpt-5-mini
 
   # Cron schedule for automatic assignment runs (UTC).
   # Defined in .github/workflows/task-assignment.yml.
@@ -270,7 +269,7 @@ council:
 
   # Model used by the Council Moderator.
   # Repository variable: COUNCIL_MODEL
-  model: gpt-4o
+  model: gpt-5.4
 
   # GitHub Discussion category to post council decisions into.
   # If the category does not exist or Discussions are disabled,
@@ -308,7 +307,7 @@ council_sprint_prioritization:
 
   # Model used by the Council Moderator for sprint synthesis.
   # Repository variable: COUNCIL_MODEL
-  model: gpt-4o
+  model: gpt-5.4
 
   # GitHub Discussion category to post the ranked sprint backlog into.
   # Repository variable: COUNCIL_DISCUSSION_CATEGORY
@@ -394,7 +393,7 @@ cross_agent_communication:
   # Model used to generate agent updates and the merged digest.
   # Falls back to COUNCIL_MODEL then AGENT_MODEL.
   # Repository variable: COMMS_MODEL
-  model: gpt-4o-mini
+  model: gpt-5-mini
 
   # Weekly cadence for the communication digest and advancement check (UTC).
   # Defined in .github/workflows/cross-agent-communication.yml.

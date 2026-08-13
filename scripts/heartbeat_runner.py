@@ -11,15 +11,12 @@ import subprocess
 import sys
 import textwrap
 import time
-import urllib.error
-import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-MODELS_URL = "https://models.github.ai/inference/chat/completions"
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "gpt-5-mini"
 DEFAULT_MODEL_EVERY = 3
 FAILURE_CONCLUSIONS = {
     "action_required",
@@ -45,6 +42,7 @@ ISSUE_PRIORITY_LABELS = [
 WORKFLOW_COOLDOWNS = {
     "qa-engineer.yml": timedelta(hours=6),
     "task-assignment.yml": timedelta(hours=6),
+    "assign-top-priority-agent.lock.yml": timedelta(hours=6),
     "project-manager.yml": timedelta(hours=12),
     "product-owner.yml": timedelta(hours=12),
     "council-discussion.yml": timedelta(hours=24),
@@ -61,6 +59,9 @@ AUTH_FAILURE_COOLDOWN = timedelta(hours=6)
 PLANNER_UNAVAILABLE_COOLDOWN = timedelta(minutes=30)
 PR_READY_COOLDOWN = timedelta(hours=6)
 WORKFLOW_APPROVAL_COOLDOWN = timedelta(hours=1)
+WORKFLOW_RECOVERY_COOLDOWN = timedelta(minutes=30)
+WORKFLOW_RECOVERY_MAX_ATTEMPTS = 3
+RECOVERABLE_RUN_CONCLUSIONS = {"failure", "startup_failure", "timed_out"}
 COPILOT_HANDOFF_COOLDOWN = timedelta(hours=12)
 PR_SYNC_COOLDOWN = timedelta(hours=6)
 STUCK_PR_ISSUE_COOLDOWN = timedelta(hours=3)
@@ -112,6 +113,67 @@ COPILOT_CHAT_ALLOWED_MODELS = {
     "gpt-4.1",
 }
 
+TUI_MUTATING_ACTION_KEYS = {
+    ord("r"): "heartbeat",
+    ord("R"): "heartbeat",
+    ord("c"): "council",
+    ord("C"): "council",
+    ord("m"): "project_manager",
+    ord("M"): "project_manager",
+    ord("a"): "copilot_assignment",
+    ord("A"): "copilot_assignment",
+    ord("d"): "advance_drafts",
+    ord("D"): "advance_drafts",
+}
+
+TUI_ACTION_LABELS = {
+    "heartbeat": "run the displayed policy-gated heartbeat",
+    "enable_automatic": "enable automatic policy-gated heartbeats",
+    "disable_automatic": "disable automatic policy-gated heartbeats",
+    "council": "dispatch a council review",
+    "project_manager": "dispatch a project manager report",
+    "copilot_assignment": "assign the highest-priority eligible issue",
+    "advance_drafts": "advance planner-approved drafts",
+}
+
+
+def tui_action_for_key(key: int) -> str | None:
+    return TUI_MUTATING_ACTION_KEYS.get(key)
+
+
+def resolve_tui_confirmation(pending_action: str | None, key: int) -> tuple[str, str | None]:
+    if pending_action is None:
+        return "idle", None
+    if key in (ord("y"), ord("Y")):
+        return "confirmed", pending_action
+    if key in (ord("n"), ord("N"), 27):
+        return "cancelled", None
+    return "pending", None
+
+
+def tui_confirmation_message(action: str) -> str:
+    return f"Confirm: {TUI_ACTION_LABELS[action]}? y=confirm n=cancel"
+
+
+def tui_automatic_action(automatic_enabled: bool) -> str:
+    return "disable_automatic" if automatic_enabled else "enable_automatic"
+
+
+def tui_automatic_next_run(enabled: bool, now: float, interval: int) -> float:
+    return now if enabled else now + interval
+
+
+def should_run_tui_heartbeat(
+    chat_open: bool,
+    run_requested: bool,
+    automatic_enabled: bool = False,
+    automatic_due: bool = False,
+    confirmation_pending: bool = False,
+) -> bool:
+    if chat_open or confirmation_pending:
+        return False
+    return run_requested or (automatic_enabled and automatic_due)
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -140,6 +202,17 @@ def normalize_copilot_chat_model(raw_model: str | None, fallback: str = "gpt-5-m
     if normalized in COPILOT_CHAT_ALLOWED_MODELS:
         return normalized
     return fallback
+
+
+def copilot_model_timeout() -> int:
+    try:
+        return max(1, int(os.environ.get("HEARTBEAT_MODEL_TIMEOUT", "45")))
+    except ValueError:
+        return 45
+
+
+def copilot_planner_status(model: str, timeout_seconds: int) -> str:
+    return f"consulting Copilot planner ({model}; timeout {timeout_seconds}s)"
 
 
 def run_command(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -223,29 +296,11 @@ def resolve_repo(explicit_repo: str | None) -> dict[str, str]:
     }
 
 
-def resolve_models_token() -> tuple[str | None, str]:
-    # In GitHub Actions, require explicit model token env vars.
-    if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
-        for env_name in ("MODELS_TOKEN", "GH_MODELS_TOKEN", "GH_USER_PAT"):
-            value = os.environ.get(env_name, "").strip()
-            if value:
-                return value, env_name
-        return None, "actions-unconfigured"
-
-    # Local runs prefer the single GH_USER_PAT, then legacy model token env vars.
-    for env_name in ("GH_USER_PAT", "MODELS_TOKEN", "GH_MODELS_TOKEN", "HEARTBEAT_GH_TOKEN"):
-        value = os.environ.get(env_name, "").strip()
-        if value:
-            return value, env_name
-
-    # Local fallback to GitHub CLI auth token.
-    gh_token_result = run_command(["gh", "auth", "token"], check=False)
-    if gh_token_result.returncode == 0:
-        value = gh_token_result.stdout.strip()
-        if value:
-            return value, "gh-auth-token"
-
-    return None, "local-unconfigured"
+def resolve_copilot_auth_source() -> str:
+    for env_name in ("COPILOT_GITHUB_TOKEN", "GH_USER_PAT"):
+        if os.environ.get(env_name, "").strip():
+            return env_name
+    return "gh-auth" if os.environ.get("GITHUB_ACTIONS", "").lower() != "true" else "actions-unconfigured"
 
 
 def _explicit_gh_token_is_unauthorized(env: dict[str, str]) -> bool:
@@ -411,54 +466,7 @@ def read_collaboration_rules(repo_root: Path) -> str:
         return ""
 
 
-def call_github_model(model: str, system_prompt: str, user_prompt: str, token: str) -> tuple[bool, str]:
-    model_name = model if "/" in model else f"openai/{model}"
-    payload = {
-        "model": model_name,
-        "temperature": 0,
-        "max_tokens": 1200,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
-    request = urllib.request.Request(
-        MODELS_URL,
-        method="POST",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-    )
-
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            raw = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        return False, f"HTTP {exc.code}: {body}"
-    except urllib.error.URLError as exc:
-        return False, f"Network error: {exc}"
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        return False, f"Invalid JSON: {exc}"
-
-    choices = data.get("choices") or []
-    if choices:
-        return True, choices[0].get("message", {}).get("content", "")
-
-    error = data.get("error", {})
-    return False, error.get("message", "No model choices returned")
-
-
-def call_copilot_cli_model(system_prompt: str, user_prompt: str) -> tuple[bool, str]:
-    if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
-        return False, "copilot-cli fallback disabled in GitHub Actions"
-
+def call_copilot_cli_model(system_prompt: str, user_prompt: str, model: str = DEFAULT_MODEL) -> tuple[bool, str]:
     prompt = (
         f"{system_prompt}\n\n"
         "Respond using JSON only with this schema:\n"
@@ -469,15 +477,35 @@ def call_copilot_cli_model(system_prompt: str, user_prompt: str) -> tuple[bool, 
     )
 
     env = os.environ.copy()
-    # Ensure Copilot CLI uses the logged-in OAuth session instead of dispatch PAT overrides.
-    env.pop("GH_TOKEN", None)
-    env.pop("GITHUB_TOKEN", None)
+    if not env.get("COPILOT_GITHUB_TOKEN"):
+        # Local planning should use the logged-in Copilot session, not dispatch PAT overrides.
+        env.pop("GH_TOKEN", None)
+        env.pop("GITHUB_TOKEN", None)
 
     # A hung Copilot CLI call must not stall the heartbeat; fall back to heuristics.
-    timeout_s = int(os.environ.get("HEARTBEAT_MODEL_TIMEOUT", "45"))
+    timeout_s = copilot_model_timeout()
     try:
         result = subprocess.run(
-            ["gh", "copilot", "-p", prompt],
+            [
+                "gh",
+                "copilot",
+                "--",
+                "--model",
+                normalize_copilot_chat_model(model),
+                "--no-alt-screen",
+                "--stream",
+                "off",
+                "--output-format",
+                "text",
+                "--silent",
+                "--no-custom-instructions",
+                "--disable-builtin-mcps",
+                "--deny-tool",
+                "*",
+                "--allow-all-tools",
+                "-p",
+                prompt,
+            ],
             capture_output=True,
             text=True,
             env=env,
@@ -582,6 +610,108 @@ def unresolved_failure_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         run for run in latest_by_workflow.values()
         if (run.get("conclusion") or "").lower() in FAILURE_CONCLUSIONS
     ]
+
+
+def workflow_recovery_attempts(state: dict[str, Any]) -> dict[str, int]:
+    attempts = state.setdefault("workflow_recovery_attempts", {})
+    if not isinstance(attempts, dict):
+        attempts = {}
+        state["workflow_recovery_attempts"] = attempts
+    return attempts
+
+
+def reconcile_workflow_recovery_attempts(state: dict[str, Any], runs: list[dict[str, Any]]) -> None:
+    attempts = workflow_recovery_attempts(state)
+    latest_by_workflow: dict[str, dict[str, Any]] = {}
+    for run in sorted(runs, key=lambda item: item.get("createdAt", ""), reverse=True):
+        workflow = str(run.get("workflowName") or "")
+        if workflow and workflow not in latest_by_workflow:
+            latest_by_workflow[workflow] = run
+    for workflow, run in latest_by_workflow.items():
+        if (run.get("conclusion") or "").lower() == "success":
+            attempts.pop(workflow, None)
+            events = state.get("events")
+            if isinstance(events, dict):
+                events.pop(f"rerun:workflow:{workflow}", None)
+
+
+def rerun_workflow_run(repo: str, run_id: int, dry_run: bool) -> str:
+    command = ["gh", "run", "rerun", str(run_id), "--repo", repo, "--failed"]
+    if dry_run:
+        return "DRY RUN: " + " ".join(command)
+    result = run_command(command, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"failed to rerun workflow run {run_id}")
+    return result.stdout.strip() or f"Requested rerun of failed jobs for run {run_id}"
+
+
+def recover_failed_workflow_runs(
+    snapshot: dict[str, Any],
+    state: dict[str, Any],
+    repo: str,
+    dry_run: bool,
+    max_recoveries: int = 1,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    recoveries = 0
+    runs = snapshot.get("runs") or []
+    reconcile_workflow_recovery_attempts(state, runs)
+    attempts_by_workflow = workflow_recovery_attempts(state)
+
+    for run in sorted(unresolved_failure_runs(runs), key=lambda item: item.get("createdAt", ""), reverse=True):
+        if recoveries >= max_recoveries:
+            break
+        conclusion = (run.get("conclusion") or "").lower()
+        if conclusion not in RECOVERABLE_RUN_CONCLUSIONS:
+            continue
+        workflow = str(run.get("workflowName") or "Unknown workflow")
+        run_id = run.get("databaseId")
+        if not run_id:
+            continue
+        attempts = int(attempts_by_workflow.get(workflow, 0))
+        if attempts >= WORKFLOW_RECOVERY_MAX_ATTEMPTS:
+            results.append({
+                "target": f"run:{run_id}",
+                "action": "rerun_failed_workflow",
+                "status": "skipped",
+                "detail": f"Recovery exhausted after {attempts} attempts; operator or council intervention is required.",
+            })
+            continue
+        event_key = f"rerun:workflow:{workflow}"
+        cooldown_left = event_cooldown_remaining(state, event_key, WORKFLOW_RECOVERY_COOLDOWN)
+        if cooldown_left:
+            results.append({
+                "target": f"run:{run_id}",
+                "action": "rerun_failed_workflow",
+                "status": "skipped",
+                "detail": f"Recovery cooldown active for ~{format_remaining(cooldown_left)}.",
+            })
+            continue
+        try:
+            output = rerun_workflow_run(repo, int(run_id), dry_run)
+            next_attempt = attempts + 1
+            if not dry_run:
+                attempts_by_workflow[workflow] = next_attempt
+                record_event(state, event_key, {"run_id": run_id, "attempt": next_attempt})
+            results.append({
+                "target": f"run:{run_id}",
+                "action": "rerun_failed_workflow",
+                "status": "ok",
+                "detail": f"{workflow}: {output} (attempt {next_attempt}/{WORKFLOW_RECOVERY_MAX_ATTEMPTS})",
+            })
+            recoveries += 1
+        except RuntimeError as exc:
+            detail = str(exc).splitlines()[0][:160]
+            if not dry_run:
+                record_event(state, event_key, {"run_id": run_id, "error": detail})
+            results.append({
+                "target": f"run:{run_id}",
+                "action": "rerun_failed_workflow",
+                "status": "error",
+                "detail": f"{workflow}: {detail}",
+            })
+
+    return results
 
 
 def describe_latest_failure(repo: str, runs: list[dict[str, Any]]) -> dict[str, str] | None:
@@ -1316,6 +1446,19 @@ def mergeable_guard(pr: dict[str, Any], runs: list[dict[str, Any]]) -> tuple[boo
     return True, "ready"
 
 
+def ready_guard(pr: dict[str, Any]) -> tuple[bool, str]:
+    checks = checks_summary(pr)
+    if not pr.get("isDraft"):
+        return False, "not a draft"
+    if (pr.get("mergeable") or "") != "MERGEABLE":
+        return False, f"mergeable={pr.get('mergeable', 'UNKNOWN')}"
+    if (pr.get("mergeStateStatus") or "") == "DIRTY":
+        return False, "mergeStateStatus=DIRTY"
+    if checks["failing"] > 0:
+        return False, f"failingChecks={checks['failing']}"
+    return True, "ready"
+
+
 def model_prompt(snapshot: dict[str, Any], heuristic: dict[str, Any], rules: str) -> tuple[str, str]:
     system_prompt = "\n".join(
         part for part in [
@@ -1480,7 +1623,7 @@ def build_plan(
     state: dict[str, Any],
     repo_root: Path,
     model: str,
-    models_token: str | None,
+    _copilot_token: str | None,
     model_every: int,
     progress: Any = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
@@ -1501,9 +1644,6 @@ def build_plan(
 
     report("heuristic baseline ready", heuristic, "heuristic")
 
-    in_actions = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
-    use_github_models = os.environ.get("HEARTBEAT_USE_GITHUB_MODELS", "false").lower() == "true"
-
     cadence = max(1, model_every)
     upcoming_heartbeat = int(state.get("heartbeats", 0)) + 1
     if cadence > 1 and (upcoming_heartbeat % cadence) != 0:
@@ -1515,56 +1655,24 @@ def build_plan(
 
     system_prompt, user_prompt = model_prompt(snapshot, heuristic, read_collaboration_rules(repo_root))
 
-    # Local runs default to Copilot CLI now that GitHub Models endpoint is retired.
-    if not in_actions and not use_github_models:
-        cooldown_left = event_cooldown_remaining(state, "planner-unavailable:copilot-cli", PLANNER_UNAVAILABLE_COOLDOWN)
-        if cooldown_left:
-            meta["models_status"] = f"degraded: copilot-cli unavailable, cooldown ~{format_remaining(cooldown_left)}"
-            report("Copilot planner in failure cooldown; using safe heuristic plan", heuristic, "heuristic fallback")
-            return heuristic, meta
-        report(f"consulting Copilot planner ({model})", heuristic, "heuristic baseline")
-        copilot_ok, copilot_response = call_copilot_cli_model(system_prompt, user_prompt)
-        if copilot_ok:
-            meta["decision_source"] = f"copilot-cli:{model}"
-            meta["models_status"] = "ready via gh copilot"
-            model_plan = sanitize_model_plan(copilot_response, heuristic)
-            report("Copilot plan accepted after safety validation", model_plan, meta["decision_source"])
-            return model_plan, meta
-        record_event(state, "planner-unavailable:copilot-cli", {"reason": copilot_response})
-        meta["models_status"] = f"degraded: copilot-cli unavailable: {copilot_response}"
-        report("Copilot unavailable; using safe heuristic plan", heuristic, "heuristic fallback")
+    cooldown_left = event_cooldown_remaining(state, "planner-unavailable:copilot-cli", PLANNER_UNAVAILABLE_COOLDOWN)
+    if cooldown_left:
+        meta["models_status"] = f"degraded: copilot-cli unavailable, cooldown ~{format_remaining(cooldown_left)}"
+        report("Copilot planner in failure cooldown; using safe heuristic plan", heuristic, "heuristic fallback")
         return heuristic, meta
-
-    if not models_token:
-        meta["models_status"] = "disabled: set GH_USER_PAT (or MODELS_TOKEN) for model inference"
-        report("model token unavailable; using safe heuristic plan", heuristic, "heuristic fallback")
-        return heuristic, meta
-
-    report(f"consulting GitHub Models planner ({model})", heuristic, "heuristic baseline")
-    ok, response = call_github_model(model, system_prompt, user_prompt, models_token)
-    if not ok:
-        use_copilot_fallback = os.environ.get("HEARTBEAT_COPILOT_FALLBACK", "true").lower() != "false"
-        if use_copilot_fallback:
-            copilot_ok, copilot_response = call_copilot_cli_model(system_prompt, user_prompt)
-            if copilot_ok:
-                meta["decision_source"] = f"copilot-cli:{model}"
-                meta["models_status"] = "fallback-ready via gh copilot"
-                model_plan = sanitize_model_plan(copilot_response, heuristic)
-                report("Copilot fallback plan accepted after safety validation", model_plan, meta["decision_source"])
-                return model_plan, meta
-            meta["models_status"] = f"degraded: {response} | copilot-fallback failed: {copilot_response}"
-            report("model calls unavailable; using safe heuristic plan", heuristic, "heuristic fallback")
-            return heuristic, meta
-
-        meta["models_status"] = f"degraded: {response}"
-        report("GitHub Models unavailable; using safe heuristic plan", heuristic, "heuristic fallback")
-        return heuristic, meta
-
-    meta["decision_source"] = f"github-models:{model}"
-    meta["models_status"] = "ready"
-    model_plan = sanitize_model_plan(response, heuristic)
-    report("model plan accepted after safety validation", model_plan, meta["decision_source"])
-    return model_plan, meta
+    effective_model = normalize_copilot_chat_model(model)
+    report(copilot_planner_status(effective_model, copilot_model_timeout()), heuristic, "heuristic baseline")
+    copilot_ok, copilot_response = call_copilot_cli_model(system_prompt, user_prompt, effective_model)
+    if copilot_ok:
+        meta["decision_source"] = f"copilot-cli:{effective_model}"
+        meta["models_status"] = "ready via gh copilot"
+        model_plan = sanitize_model_plan(copilot_response, heuristic)
+        report("Copilot plan accepted after safety validation", model_plan, meta["decision_source"])
+        return model_plan, meta
+    record_event(state, "planner-unavailable:copilot-cli", {"reason": copilot_response})
+    meta["models_status"] = f"degraded: copilot-cli unavailable: {copilot_response}"
+    report("Copilot unavailable; using safe heuristic plan", heuristic, "heuristic fallback")
+    return heuristic, meta
 
 
 def normalize_repo_action_inputs(workflow: str, inputs: dict[str, Any]) -> dict[str, Any]:
@@ -1772,6 +1880,10 @@ def execute_plan(snapshot: dict[str, Any], plan: dict[str, Any], state: dict[str
             continue
 
         if action == "mark_ready":
+            allowed, detail = ready_guard(pr)
+            if not allowed:
+                results.append({"target": f"pr#{pr['number']}", "action": action, "status": "skipped", "detail": f"guard blocked ready: {detail}"})
+                continue
             event_key = f"ready:pr:{pr['number']}"
             if state_event_recent(state, event_key, PR_READY_COOLDOWN):
                 results.append({"target": f"pr#{pr['number']}", "action": action, "status": "skipped", "detail": "Ready conversion is still within cooldown."})
@@ -2014,6 +2126,47 @@ def render_overview(snapshot: dict[str, Any], plan: dict[str, Any], results: lis
     return "\n".join(lines) + "\n"
 
 
+def load_tui_preview(
+    repo_info: dict[str, str],
+    args: argparse.Namespace,
+    state: dict[str, Any],
+    progress: Any = None,
+) -> dict[str, Any]:
+    def report(message: str) -> None:
+        if progress is not None:
+            progress(message)
+
+    report(f"Fetching open PRs (limit {args.pr_limit})")
+    prs = fetch_open_prs(repo_info["nameWithOwner"], args.pr_limit)
+    report(f"Fetching open issues (limit {args.issue_limit})")
+    issues = fetch_open_issues(repo_info["nameWithOwner"], args.issue_limit)
+    report(f"Fetching workflow runs (limit {args.run_limit})")
+    runs = fetch_runs(repo_info["nameWithOwner"], args.run_limit)
+    snapshot = {
+        "repo": repo_info,
+        "prs": prs,
+        "issues": issues,
+        "runs": runs,
+    }
+    plan = {
+        "pull_requests": heuristic_pr_decisions(snapshot, state),
+        "repo_actions": heuristic_repo_actions(snapshot, state),
+    }
+    report("Repository state ready")
+    return {
+        "snapshot": snapshot,
+        "plan": plan,
+        "results": [],
+        "meta": {
+            "decision_source": "heuristic preview",
+            "models_status": "not consulted until execution",
+            "gh_auth_source": GH_AUTH_SOURCE,
+        },
+        "overview": "",
+        "errors": 0,
+    }
+
+
 def run_heartbeat_cycle(
     repo_root: Path,
     repo_info: dict[str, str],
@@ -2079,19 +2232,18 @@ def run_heartbeat_cycle(
     report("approving gated workflow runs", **live_context)
     approval_results = approve_pending_workflow_runs(snapshot, state, repo_info["nameWithOwner"], args.dry_run)
     effective_model_every, cadence_reason = adaptive_model_every(snapshot, args.model_every, args.adaptive_model_cadence)
-    models_token, token_source = resolve_models_token()
+    copilot_auth_source = resolve_copilot_auth_source()
     report("planning decisions (model inference can take a minute or two)", **live_context, model_cadence=effective_model_every)
     plan, meta = build_plan(
         snapshot,
         state,
         repo_root,
         args.model,
-        models_token,
+        None,
         effective_model_every,
         progress=lambda message, details: report(message, **live_context, **details),
     )
-    if meta["models_status"] == "ready":
-        meta["models_status"] = f"ready via {token_source}"
+    meta["copilot_auth_source"] = copilot_auth_source
     if latest_failure:
         meta["latest_failure"] = f"{latest_failure['summary']} (run {latest_failure['run_id']})"
         meta["latest_failure_url"] = latest_failure["url"]
@@ -2111,7 +2263,24 @@ def run_heartbeat_cycle(
         pr_actions=[decision.get("action", "wait") for decision in plan.get("pull_requests") or []],
         repo_actions=[action.get("action", "wait") for action in plan.get("repo_actions") or []],
     )
-    results = approval_results + execute_plan(snapshot, plan, state, repo_info["nameWithOwner"], args.dry_run, args.max_actions)
+    report("evaluating failed workflow recovery", **live_context)
+    recovery_results = recover_failed_workflow_runs(
+        snapshot,
+        state,
+        repo_info["nameWithOwner"],
+        args.dry_run,
+        max_recoveries=1 if args.max_actions > 0 else 0,
+    )
+    recovery_actions = sum(1 for result in recovery_results if result.get("status") == "ok")
+    remaining_actions = max(0, args.max_actions - recovery_actions)
+    results = approval_results + recovery_results + execute_plan(
+        snapshot,
+        plan,
+        state,
+        repo_info["nameWithOwner"],
+        args.dry_run,
+        remaining_actions,
+    )
     report("checking stuck-PR escalations")
     results.extend(run_stuck_pr_escalations(snapshot, state, repo_info["nameWithOwner"], args.dry_run))
     report("saving ledger, state, and overview")
@@ -2262,8 +2431,12 @@ def render_tui_lines(
     """Legacy plain-text render kept for non-interactive fallback."""
     mode = "dry-run" if dry_run else "active"
     header = f"Heartbeat Runner | mode={mode} | interval={max(interval, 5)}s"
-    lines = [header, "Controls: q quit | r run now | p pause/resume | c council | m pm | d draft→ready+merge | a assign | s status"]
-    lines.append("State: PAUSED" if paused else f"Next run in: {max(next_run_in, 0)}s")
+    lines = [
+        header,
+        "Controls: q quit | r gated run | p automatic | c council | m pm | d approved drafts | a assign | y/n confirm",
+        "User acts through the TUI; system enforces the policy gate for execution.",
+    ]
+    lines.append("State: MANUAL (automatic runs disabled)" if paused else f"Automatic run in: {max(next_run_in, 0)}s")
     if status_message:
         lines.append(f"Status: {status_message}")
     if heartbeat_data is None:
@@ -2309,7 +2482,7 @@ def render_tui_lines(
             lines.append(f"{base} | reason={reason}")
         else:
             lines.append(base)
-    lines.extend(["", "Dispatches:"])
+    lines.extend(["", tui_repo_actions_heading(meta, dry_run)])
     for a in (plan.get("repo_actions") or [])[:8]:
         lines.append(f"  {a['action']:30} {a.get('reason','')[:60]}")
     lines.extend(["", "Last actions:"])
@@ -2325,6 +2498,22 @@ def draw_tui(stdscr: Any, lines: list[str]) -> None:
     for idx, line in enumerate(lines[: max(h - 1, 1)]):
         _safe_addstr(stdscr, idx, 0, line[: max(w - 1, 1)])
     stdscr.refresh()
+
+
+def tui_repo_actions_heading(meta: dict[str, str], dry_run: bool = False) -> str:
+    if dry_run:
+        return "Simulated actions (not executed):"
+    if meta.get("decision_source") == "heuristic preview":
+        return "Proposed actions (not executed):"
+    return "Scheduled dispatches:"
+
+
+def tui_header_status(paused: bool, next_run_in: int, live_active: bool, heartbeat_count: int) -> str:
+    if live_active:
+        return f"RUNNING beat #{heartbeat_count + 1}"
+    if paused:
+        return f"MANUAL  beat #{heartbeat_count}"
+    return f"AUTO next in {max(next_run_in, 0)}s  beat #{heartbeat_count}"
 
 
 def _draw_full_tui(
@@ -2363,14 +2552,19 @@ def _draw_full_tui(
     show_live = heartbeat_data is None or bool(live_beat and live_beat.get("active"))
 
     mode = "DRY-RUN" if dry_run else "ACTIVE"
-    state_str = "⏸ PAUSED" if paused else f"next in {max(next_run_in,0)}s"
+    header_status = tui_header_status(
+        paused,
+        next_run_in,
+        bool(live_beat and live_beat.get("active")),
+        heartbeat_count,
+    )
 
     # Header
-    header = f" ◆ Engineering Team Heartbeat  mode={mode}  {state_str}  beat #{heartbeat_count} "
+    header = f" ◆ Engineering Team Operator TUI  policy-gated  mode={mode}  {header_status} "
     _safe_addstr(stdscr, 0, 0, header.ljust(W - 1), curses.color_pair(4) | curses.A_BOLD | curses.A_REVERSE)
 
     # Controls
-    controls = " q=quit  r=run  p=pause  /=chat  c=council  m=pm  d=draft→ready  a=assign  ↑↓=scroll "
+    controls = " q quit  r run  p auto  / chat  c council  m pm  d drafts  a assign  y/n confirm "
     _safe_addstr(stdscr, 1, 0, controls[:W - 1], curses.color_pair(7))
 
     # ── Left panel: PR queue ─────────────────────────────────────────────────
@@ -2560,7 +2754,7 @@ def _draw_full_tui(
             row = _add_wrapped_lines(rp_win, row, 1, f"Run: {compact_url}", 1, curses.color_pair(7))
         _safe_addstr(rp_win, row, 1, "─" * (W - mid - 3), curses.color_pair(7))
         row += 1
-        _safe_addstr(rp_win, row, 1, "Scheduled dispatches:", curses.color_pair(4))
+        _safe_addstr(rp_win, row, 1, tui_repo_actions_heading(meta, dry_run), curses.color_pair(4))
         row += 1
         for ra in (plan.get("repo_actions") or []):
             if row >= body_h - 1:
@@ -2687,15 +2881,22 @@ def run_tui(
 ) -> int:
     interval = max(args.interval, 5)
     heartbeat_data: dict[str, Any] | None = None
-    paused = False
-    next_run_at = time.monotonic()
-    status_message = "Starting up…"
+    automatic_enabled = bool(getattr(args, "tui_auto", False))
+    paused = not automatic_enabled
+    next_run_at = tui_automatic_next_run(automatic_enabled, time.monotonic(), interval)
+    status_message = (
+        "Automatic startup grant accepted - loading repository state"
+        if automatic_enabled
+        else "Operator control ready - press r to request a policy-gated heartbeat"
+    )
     log_scroll = 0
     action_log: list[str] = []
     heartbeat_count = 0
     runtime_log_path = default_runtime_log_path()
     live_beat: dict[str, Any] = {"phase": "initializing", "active": True}
     logged_rationales: set[tuple[str, str, str]] = set()
+    pending_action: str | None = None
+    run_requested = False
 
     def _record_action_log(entry: str) -> None:
         action_log.append(entry)
@@ -2714,20 +2915,47 @@ def run_tui(
             status_sym = "✓" if r["status"] == "ok" else ("✗" if r["status"] == "error" else "–")
             _record_action_log(f"{ts}  {r['target']:25} {r['action']:22} | {r['status']} {status_sym}  {r.get('detail','')[:100]}")
 
+    def _record_confirmed_dispatch(workflow: str, label: str, status: str, detail: str) -> None:
+        snapshot = heartbeat_data["snapshot"] if heartbeat_data else {
+            "repo": repo_info,
+            "prs": [],
+            "issues": [],
+            "runs": [],
+        }
+        plan = {
+            "pull_requests": [],
+            "repo_actions": [{"action": "dispatch_manual", "workflow": workflow, "reason": label}],
+        }
+        result = [{"target": workflow, "action": "dispatch_manual", "status": status, "detail": detail}]
+        meta = heartbeat_data["meta"] if heartbeat_data else {
+            "decision_source": "tui-confirmed",
+            "models_status": "not consulted",
+        }
+        append_decision_ledger(ledger_file, decision_ledger_events(snapshot, plan, result, meta, args.dry_run))
+
     def _trigger_dispatch(workflow: str, inputs: dict[str, str], label: str) -> None:
         nonlocal status_message
+        event_key = f"dispatch:{workflow}"
+        cooldown = WORKFLOW_COOLDOWNS.get(workflow)
+        if cooldown and state_event_recent(state, event_key, cooldown):
+            status_message = f"Policy gate blocked {label}: workflow is still within cooldown"
+            _record_action_log(f"{isoformat()}  {workflow:30} dispatch_manual      | skipped -  policy cooldown")
+            _record_confirmed_dispatch(workflow, label, "skipped", "Policy cooldown is active.")
+            return
         try:
             out = dispatch_workflow(repo_info["nameWithOwner"], workflow, inputs, args.dry_run, ref=repo_info.get("defaultBranch", "main"))
             if not args.dry_run:
-                record_event(state, f"dispatch:{workflow}", {"reason": label})
+                record_event(state, event_key, {"reason": label, "source": "tui-confirmed"})
                 save_state(state_file, state)
             _record_action_log(f"{isoformat()}  {workflow:30} dispatch_manual      | ok ✓  {out[:100]}")
+            _record_confirmed_dispatch(workflow, label, "ok", out)
             status_message = f"Dispatched {label}: {out[:80]}"
         except RuntimeError as exc:
             short = str(exc).split("\n")[0][:80]
             if "403" in short or "Resource not accessible" in short:
                 short = f"Auth error dispatching {label} — export GH_USER_PAT with actions:write"
             _record_action_log(f"{isoformat()}  {workflow:30} dispatch_manual      | error ✗  {short}")
+            _record_confirmed_dispatch(workflow, label, "error", short)
             status_message = f"✗ {short}"
 
     def _trigger_copilot_assignment() -> None:
@@ -2755,35 +2983,43 @@ def run_tui(
             label,
         )
 
-    def _force_draft_ready() -> None:
-        """Mark every open draft PR ready and queue merge."""
+    def _advance_planned_drafts() -> None:
         nonlocal status_message
         if heartbeat_data is None:
-            status_message = "No snapshot yet — run a heartbeat first"
+            status_message = "No plan available - run a heartbeat first"
             return
-        prs = heartbeat_data["snapshot"]["prs"]
-        for pr in prs:
-            if not pr.get("isDraft"):
-                continue
-            try:
-                out = mark_pr_ready(repo_info["nameWithOwner"], pr["number"], args.dry_run)
-                _record_action_log(f"{isoformat()}  pr#{pr['number']:5}                    mark_ready           | ok ✓  {out[:100]}")
-                if not args.dry_run:
-                    # immediate merge attempt after promoting
-                    refreshed = gh_json(
-                        ["pr", "view", str(pr["number"]), "--repo", repo_info["nameWithOwner"],
-                         "--json", "number,title,isDraft,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,headRefName"],
-                        default=pr, check=False,
-                    )
-                    allowed, detail = mergeable_guard(refreshed, heartbeat_data["snapshot"]["runs"])
-                    if allowed:
-                        mout = merge_pr(repo_info["nameWithOwner"], pr["number"], False)
-                        _record_action_log(f"{isoformat()}  pr#{pr['number']:5}                    merge                | ok ✓  {mout[:100]}")
-                    else:
-                        _record_action_log(f"{isoformat()}  pr#{pr['number']:5}                    merge                | skipped –  {detail}")
-            except RuntimeError as exc:
-                _record_action_log(f"{isoformat()}  pr#{pr['number']:5}                    mark_ready           | error ✗  {exc}")
-        status_message = "Draft → ready pass complete"
+        draft_plan = {
+            "pull_requests": [
+                decision for decision in heartbeat_data["plan"].get("pull_requests", [])
+                if decision.get("action") == "mark_ready"
+            ],
+            "repo_actions": [],
+        }
+        if not draft_plan["pull_requests"]:
+            status_message = "Policy gate found no planner-approved drafts to advance"
+            return
+        results = execute_plan(
+            heartbeat_data["snapshot"],
+            draft_plan,
+            state,
+            repo_info["nameWithOwner"],
+            args.dry_run,
+            args.max_actions,
+        )
+        _append_log(results)
+        append_decision_ledger(
+            ledger_file,
+            decision_ledger_events(
+                heartbeat_data["snapshot"],
+                draft_plan,
+                results,
+                heartbeat_data["meta"],
+                args.dry_run,
+            ),
+        )
+        if not args.dry_run:
+            save_state(state_file, state)
+        status_message = f"Planner-approved draft pass complete ({len(results)} decisions)"
 
     def _send_chat(message: str, agent_name: str) -> str:
         """Send a chat message via gh copilot CLI."""
@@ -2822,15 +3058,15 @@ def run_tui(
         env.pop("GH_TOKEN", None)
         env.pop("GITHUB_TOKEN", None)
 
-        # Quinn is configured for maximum capability and internet/tool access by default.
+        # Tool and URL access are opt-in so chat cannot bypass the TUI policy gate.
         # Env overrides:
         # - HEARTBEAT_CHAT_ALLOW_ALL_TOOLS=false
         # - HEARTBEAT_CHAT_ALLOW_ALL_URLS=false
         # - HEARTBEAT_CHAT_MODEL=<model>
         requested_model = os.environ.get("HEARTBEAT_CHAT_MODEL", agent.get("model") or "gpt-5.3-codex")
         model = normalize_copilot_chat_model(requested_model, fallback=normalize_copilot_chat_model(agent.get("model"), "gpt-5-mini"))
-        allow_all_tools = os.environ.get("HEARTBEAT_CHAT_ALLOW_ALL_TOOLS", "true").lower() == "true"
-        allow_all_urls = os.environ.get("HEARTBEAT_CHAT_ALLOW_ALL_URLS", "true").lower() == "true"
+        allow_all_tools = os.environ.get("HEARTBEAT_CHAT_ALLOW_ALL_TOOLS", "false").lower() == "true"
+        allow_all_urls = os.environ.get("HEARTBEAT_CHAT_ALLOW_ALL_URLS", "false").lower() == "true"
 
         command = [
             "gh",
@@ -2884,7 +3120,7 @@ def run_tui(
 
 
     def _main(stdscr: Any) -> int:
-        nonlocal heartbeat_data, paused, next_run_at, status_message
+        nonlocal heartbeat_data, paused, next_run_at, status_message, pending_action, run_requested, automatic_enabled
         nonlocal log_scroll, heartbeat_count, live_beat, logged_rationales
         nonlocal chat_open, chat_agent_idx, chat_input, chat_messages, chat_thinking
         force_plain = args.tui_plain or os.environ.get("HEARTBEAT_TUI_PLAIN", "false").lower() == "true"
@@ -2910,18 +3146,60 @@ def run_tui(
         stdscr.timeout(200)
         last_draw_signature: tuple[Any, ...] | None = None
 
-        # Draw immediately so startup is visible while the first heartbeat cycle gathers data.
-        status_message = "Initializing heartbeat..."
+        # Draw immediately, then populate the dashboard without executing actions.
+        status_message = "Loading repository state..."
         lines = render_tui_lines(None, args.interval, args.dry_run, paused, interval, status_message)
         draw_tui(stdscr, lines)
+
+        def _preview_progress(message: str) -> None:
+            nonlocal status_message, live_beat
+            status_message = message
+            live_beat = {"phase": message, "active": True}
+            if use_full_layout:
+                _draw_full_tui(
+                    stdscr,
+                    heartbeat_data,
+                    args.interval,
+                    args.dry_run,
+                    paused,
+                    interval,
+                    status_message,
+                    log_scroll,
+                    action_log,
+                    heartbeat_count,
+                    live_beat,
+                )
+            else:
+                draw_tui(stdscr, render_tui_lines(heartbeat_data, args.interval, args.dry_run, paused, interval, status_message))
+
+        try:
+            heartbeat_data = load_tui_preview(repo_info, args, state, progress=_preview_progress)
+            live_beat = {"phase": "Repository state ready", "active": False}
+            status_message = (
+                "Repository state loaded - starting first automatic heartbeat"
+                if automatic_enabled
+                else "Repository state loaded - press r to run or p to enable automatic mode"
+            )
+        except RuntimeError as exc:
+            detail = str(exc).splitlines()[0][:160]
+            live_beat = {"phase": "Repository preview failed", "active": False}
+            status_message = f"Repository preview failed: {detail} - press r to retry through a heartbeat"
 
         while True:
             now = time.monotonic()
             agent_name = CHAT_AGENT_NAMES[chat_agent_idx % len(CHAT_AGENT_NAMES)]
 
-            # ── Heartbeat cycle (skipped when chat is blocking) ──────────────
-            if not chat_open and not paused and (heartbeat_data is None or now >= next_run_at):
-                remaining_pre = int(next_run_at - time.monotonic()) if not paused else interval
+            automatic_due = automatic_enabled and now >= next_run_at
+            if should_run_tui_heartbeat(
+                chat_open,
+                run_requested,
+                automatic_enabled,
+                automatic_due,
+                confirmation_pending=pending_action is not None,
+            ):
+                cycle_source = "manual" if run_requested else "automatic"
+                run_requested = False
+                remaining_pre = int(next_run_at - time.monotonic()) if automatic_enabled else interval
                 live_beat = {"phase": "starting", "active": True}
                 logged_rationales = set()
 
@@ -2953,9 +3231,10 @@ def run_tui(
                 _append_log(heartbeat_data["results"])
                 log_scroll = max(0, len(action_log) - 10)
                 status_message = (
-                    f"Beat #{heartbeat_count} complete — {errors} errors" if errors
-                    else f"Beat #{heartbeat_count} complete ✓"
+                    f"{cycle_source.title()} beat #{heartbeat_count} complete — {errors} errors" if errors
+                    else f"{cycle_source.title()} beat #{heartbeat_count} complete ✓"
                 )
+                paused = not automatic_enabled
                 next_run_at = time.monotonic() + interval
                 # Force draw refresh after state mutation.
                 last_draw_signature = None
@@ -2979,6 +3258,8 @@ def run_tui(
                 len(chat_messages),
                 chat_messages[-1]["content"] if chat_messages else "",
                 "".join(chat_input),
+                pending_action,
+                automatic_enabled,
             )
             if render_signature != last_draw_signature:
                 if chat_open:
@@ -3023,36 +3304,44 @@ def run_tui(
                         chat_thinking = False
                         chat_messages.append({"role": "assistant", "content": reply})
                         _record_action_log(f"{isoformat()}  chat:{agent_name[:20]:20}             | ok ✓  {reply[:100]}")
-                        # Relay chat context through the council workflow so
-                        # discussion publishing flows through GitHub Actions.
-                        try:
-                            chat_transcript = "\n\n".join(
-                                f"**{'You' if m['role']=='user' else agent_name}**: {m['content']}"
-                                for m in chat_messages
-                                if m["role"] in ("user", "assistant")
-                            )
-                            if len(chat_transcript) > 6000:
-                                chat_transcript = chat_transcript[-6000:]
-
-                            _trigger_dispatch(
-                                "council-discussion.yml",
-                                {
-                                    "mode": "discussion",
-                                    "topic": f"TUI Chat Relay: {user_text[:80]}",
-                                    "context": (
-                                        "Heartbeat TUI chat relay. Use this transcript as"
-                                        " context and post outcomes to Discussions via the"
-                                        " existing council workflow.\n\n"
-                                        f"{chat_transcript}"
-                                    ),
-                                },
-                                "Council chat relay",
-                            )
-                        except Exception:
-                            pass
                 elif 32 <= key <= 126:                    # printable
                     chat_input.append(chr(key))
             else:
+                confirmation_state, confirmed_action = resolve_tui_confirmation(pending_action, key)
+                if confirmation_state == "confirmed":
+                    pending_action = None
+                    if confirmed_action == "heartbeat":
+                        run_requested = True
+                        status_message = "Confirmed - running policy-gated heartbeat"
+                    elif confirmed_action == "enable_automatic":
+                        automatic_enabled = True
+                        paused = False
+                        next_run_at = tui_automatic_next_run(True, time.monotonic(), interval)
+                        status_message = "Automatic policy-gated heartbeats enabled - starting first run"
+                    elif confirmed_action == "disable_automatic":
+                        automatic_enabled = False
+                        paused = True
+                        status_message = "Automatic heartbeats disabled - operator control restored"
+                    elif confirmed_action == "council":
+                        _trigger_dispatch(
+                            "council-discussion.yml",
+                            {"topic": "Manual agent council: review open PRs, priorities, and team alignment.", "context": "Supervisor TUI confirmed dispatch."},
+                            "Council meeting",
+                        )
+                    elif confirmed_action == "project_manager":
+                        _trigger_dispatch("project-manager.yml", {"task": "full-sprint-report"}, "PM sprint report")
+                    elif confirmed_action == "copilot_assignment":
+                        _trigger_copilot_assignment()
+                    elif confirmed_action == "advance_drafts":
+                        _advance_planned_drafts()
+                    continue
+                if confirmation_state == "cancelled":
+                    pending_action = None
+                    status_message = "Action cancelled - no execution occurred"
+                    continue
+                if confirmation_state == "pending":
+                    continue
+
                 # Normal TUI keys
                 if key in (ord("q"), ord("Q"), 27):
                     return 0
@@ -3060,29 +3349,12 @@ def run_tui(
                     chat_open = True
                     chat_input.clear()
                     status_message = f"Chat open — talking to {agent_name}  (Tab to switch, Esc to close)"
-                elif key in (ord("r"), ord("R")):
-                    next_run_at = time.monotonic()
-                    paused = False
-                    status_message = "Manual run triggered…"
                 elif key in (ord("p"), ord("P")):
-                    paused = not paused
-                    status_message = "Paused" if paused else "Resumed"
-                elif key in (ord("c"), ord("C")):
-                    _trigger_dispatch(
-                        "council-discussion.yml",
-                        {"topic": "Manual agent council: review open PRs, priorities, and team alignment.", "context": "Supervisor TUI manual dispatch."},
-                        "Council meeting",
-                    )
-                elif key in (ord("m"), ord("M")):
-                    _trigger_dispatch(
-                        "project-manager.yml",
-                        {"task": "full-sprint-report"},
-                        "PM sprint report",
-                    )
-                elif key in (ord("a"), ord("A")):
-                    _trigger_copilot_assignment()
-                elif key in (ord("d"), ord("D")):
-                    _force_draft_ready()
+                    pending_action = tui_automatic_action(automatic_enabled)
+                    status_message = tui_confirmation_message(pending_action)
+                elif tui_action_for_key(key):
+                    pending_action = tui_action_for_key(key)
+                    status_message = tui_confirmation_message(pending_action)
                 elif key in (curses.KEY_UP, ord("k")):
                     log_scroll = max(0, log_scroll - 1)
                 elif key in (curses.KEY_DOWN, ord("j")):
@@ -3108,8 +3380,8 @@ def heartbeat(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Long-running GitHub heartbeat runner for PR decisions and workflow dispatch.")
     parser.add_argument("--repo", help="Target repository in owner/repo format. Defaults to the current gh repo.")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"GitHub Models identifier. Default: {DEFAULT_MODEL}")
-    parser.add_argument("--model-every", type=int, default=DEFAULT_MODEL_EVERY, help=f"Use GitHub Models inference every N heartbeats (heuristic otherwise). Default: {DEFAULT_MODEL_EVERY}")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Copilot model identifier. Default: {DEFAULT_MODEL}")
+    parser.add_argument("--model-every", type=int, default=DEFAULT_MODEL_EVERY, help=f"Use Copilot inference every N heartbeats (heuristic otherwise). Default: {DEFAULT_MODEL_EVERY}")
     parser.add_argument("--adaptive-model-cadence", action=argparse.BooleanOptionalAction, default=True, help="Dynamically increase model usage under high queue risk. Default: enabled")
     parser.add_argument("--interval", type=int, default=300, help="Heartbeat interval in seconds. Default: 300")
     parser.add_argument("--pr-limit", type=int, default=30, help="Number of open PRs to inspect per heartbeat. Default: 30")
@@ -3121,6 +3393,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Compute and print the queue without mutating GitHub state.")
     parser.add_argument("--once", action="store_true", help="Run a single heartbeat instead of looping forever.")
     parser.add_argument("--tui", action="store_true", help="Run an interactive terminal UI with live heartbeat status.")
+    parser.add_argument("--tui-auto", action="store_true", help="Start TUI automatic mode immediately under an explicit command-line grant.")
     parser.add_argument("--tui-plain", action="store_true", help="Force plain-text TUI rendering without colors or panel layout.")
     return parser.parse_args()
 

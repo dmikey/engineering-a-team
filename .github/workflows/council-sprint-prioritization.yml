@@ -11,7 +11,7 @@
 #            workflow_dispatch
 #            workflow_call (from agent-router or other workflows)
 #
-# Model:     gpt-4o (overridable via COUNCIL_MODEL variable)
+# Model:     gpt-5.4 (overridable via COUNCIL_MODEL variable)
 # ──────────────────────────────────────────────────────────────────────────────
 name: Council Sprint Prioritization
 
@@ -52,19 +52,19 @@ on:
         description: 'The sprint prioritization plan text'
         value: ${{ jobs.sprint-prioritization.outputs.decision }}
     secrets:
-      MODELS_TOKEN:
+      COPILOT_GITHUB_TOKEN:
         required: false
 
 permissions:
   contents: read
   issues: write
-  models: read
+  copilot-requests: write
   pull-requests: write
   discussions: write
 
 env:
-  COUNCIL_MODEL: ${{ vars.COUNCIL_MODEL || 'gpt-4o' }}
-  AGENT_MODEL: ${{ vars.AGENT_MODEL || 'gpt-4o-mini' }}
+  COUNCIL_MODEL: ${{ vars.COUNCIL_MODEL || 'gpt-5.4' }}
+  AGENT_MODEL: ${{ vars.AGENT_MODEL || 'gpt-5-mini' }}
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
 
@@ -215,12 +215,12 @@ jobs:
 
       - name: Quinn — QA risk and complexity assessment
         id: qa-perspective
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.AGENT_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Quinn, a senior QA Engineer. You are participating in a
             council sprint prioritization meeting. Evaluate the open backlog
@@ -250,12 +250,12 @@ jobs:
 
       - name: Morgan — PM timeline and dependency ranking
         id: pm-perspective
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.AGENT_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Morgan, an experienced Project Manager. You are participating
             in a council sprint prioritization meeting. Evaluate the open backlog
@@ -285,12 +285,12 @@ jobs:
 
       - name: Alex — PO user value and product strategy ranking
         id: po-perspective
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.AGENT_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Alex, a Product Owner. You are participating in a council
             sprint prioritization meeting. Evaluate the open backlog from a
@@ -324,12 +324,12 @@ jobs:
 
       - name: Casey — Council Moderator sprint synthesis
         id: moderator
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.COUNCIL_MODEL }}
           max-tokens: 3500
           temperature: '0.5'
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Casey, the Council Moderator for an autonomous engineering
             team. Your role is to synthesise the QA, PM, and PO perspectives

@@ -9,7 +9,7 @@
 #            workflow_dispatch
 #            workflow_call
 #
-# Model defaults to gpt-4o-mini; override with repository variable
+# Model defaults to gpt-5-mini; override with repository variable
 # SELF_IMPROVEMENT_MODEL.
 # ──────────────────────────────────────────────────────────────────────────────
 name: Self-Improvement Loop
@@ -56,18 +56,18 @@ on:
         description: 'Additional evaluation context'
         required: false
     secrets:
-      MODELS_TOKEN:
+      COPILOT_GITHUB_TOKEN:
         required: false
 
 permissions:
   contents: read
   issues: write
-  models: read
+  copilot-requests: write
   pull-requests: read
   discussions: write
 
 env:
-  SELF_IMPROVEMENT_MODEL: ${{ vars.SELF_IMPROVEMENT_MODEL || vars.AGENT_MODEL || 'gpt-4o-mini' }}
+  SELF_IMPROVEMENT_MODEL: ${{ vars.SELF_IMPROVEMENT_MODEL || vars.AGENT_MODEL || 'gpt-5-mini' }}
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
   DEFAULT_REFERENCE_REPO: ${{ vars.REFERENCE_APP_REPO || github.repository }}
@@ -189,12 +189,12 @@ jobs:
 
       - name: Generate self-improvement recommendations
         id: analysis
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.SELF_IMPROVEMENT_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are Casey operating in self-improvement mode for an autonomous
             engineering workflow system.

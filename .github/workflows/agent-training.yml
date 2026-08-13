@@ -3,7 +3,7 @@
 #
 # Runs structured training sessions for each agent based on the curriculum
 # defined in agent_training_module.py. Each session uses the GitHub Models
-# API (via call-github-model) to generate a scenario, model answer, and
+# API (via call-copilot-model) to generate a scenario, model answer, and
 # improvement tips for the next pending training topic. Completed sessions
 # are recorded as labelled GitHub Issues to track per-agent progress.
 # A full progress report is posted weekly as a Discussion (Issue fallback).
@@ -46,7 +46,7 @@ on:
         required: false
         default: '90'
     secrets:
-      MODELS_TOKEN:
+      COPILOT_GITHUB_TOKEN:
         required: false
 
 permissions:
@@ -54,10 +54,10 @@ permissions:
   contents: read
   issues: write
   discussions: write
-  models: read
+  copilot-requests: write
 
 env:
-  TRAINING_MODEL: ${{ vars.PM_MODEL || 'gpt-4o-mini' }}
+  TRAINING_MODEL: ${{ vars.PM_MODEL || 'gpt-5-mini' }}
   AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
   AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
 
@@ -177,12 +177,12 @@ jobs:
       - name: Train Quinn · ${{ steps.topics.outputs.quinn_topic_name }}
         id: quinn_training
         if: steps.topics.outputs.quinn_has_topic == 'true'
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.TRAINING_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are an expert trainer evaluating the skills of Quinn (QA Engineer),
             a GitHub Actions AI agent whose role is to review pull requests, run
@@ -252,12 +252,12 @@ jobs:
       - name: Train Morgan · ${{ steps.topics.outputs.morgan_topic_name }}
         id: morgan_training
         if: steps.topics.outputs.morgan_has_topic == 'true'
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.TRAINING_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are an expert trainer evaluating the skills of Morgan (Project Manager),
             a GitHub Actions AI agent whose role is to groom the backlog, manage
@@ -327,12 +327,12 @@ jobs:
       - name: Train Alex · ${{ steps.topics.outputs.alex_topic_name }}
         id: alex_training
         if: steps.topics.outputs.alex_has_topic == 'true'
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.TRAINING_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are an expert trainer evaluating the skills of Alex (Product Owner),
             a GitHub Actions AI agent whose role is to suggest features, analyse
@@ -402,12 +402,12 @@ jobs:
       - name: Train Casey · ${{ steps.topics.outputs.casey_topic_name }}
         id: casey_training
         if: steps.topics.outputs.casey_has_topic == 'true'
-        uses: ./.github/actions/call-github-model
+        uses: ./.github/actions/call-copilot-model
         with:
           model: ${{ env.TRAINING_MODEL }}
           max-tokens: ${{ env.AGENT_MAX_TOKENS }}
           temperature: ${{ env.AGENT_TEMPERATURE }}
-          token: ${{ secrets.MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           system-prompt: |
             You are an expert trainer evaluating the skills of Casey (Council Moderator),
             a GitHub Actions AI agent whose role is to facilitate multi-agent

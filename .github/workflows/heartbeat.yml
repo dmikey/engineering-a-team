@@ -30,6 +30,7 @@ permissions:
   pull-requests: write
   discussions: write
   actions: write
+  copilot-requests: write
 
 jobs:
   heartbeat:
@@ -47,12 +48,17 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Ensure GitHub Copilot CLI
+        run: |
+          if ! gh copilot -- --version >/dev/null 2>&1; then
+            npm install --global @github/copilot
+          fi
+          gh copilot -- --version
+
       - name: Run heartbeat
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Set MODELS_TOKEN to enable GitHub Models inference for PR decisions.
-          # Falls back to safe heuristics when unset.
-          MODELS_TOKEN: ${{ secrets.MODELS_TOKEN }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           # Set GH_USER_PAT (actions:write) to allow workflow dispatch from the heartbeat.
           HEARTBEAT_GH_TOKEN: ${{ secrets.GH_USER_PAT }}
         run: |

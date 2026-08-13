@@ -340,40 +340,40 @@ tui_mode() {
   exec python3 "$HEARTBEAT_RUNNER" "${runner_args[@]}"
 }
 
-verify_models_pipeline() {
+verify_copilot_pipeline() {
   local workflow_dir="$ROOT_DIR/.github/workflows"
-  MODELS_PIPELINE_OK=0
-  MODELS_PIPELINE_NOTE="unverified"
+  COPILOT_PIPELINE_OK=0
+  COPILOT_PIPELINE_NOTE="unverified"
 
   if [[ ! -d "$workflow_dir" ]]; then
-    MODELS_PIPELINE_NOTE="workflow-directory-missing"
+    COPILOT_PIPELINE_NOTE="workflow-directory-missing"
     return 0
   fi
 
-  local model_call_count
-  local model_permission_count
+  local copilot_call_count
+  local copilot_permission_count
 
   if command -v rg >/dev/null 2>&1; then
-    model_call_count="$(rg -l "call-github-model" "$workflow_dir" 2>/dev/null | wc -l | tr -d ' ')"
-    model_permission_count="$(rg -l "models:\\s*read" "$workflow_dir" 2>/dev/null | wc -l | tr -d ' ')"
+    copilot_call_count="$(rg -l "call-copilot-model" "$workflow_dir" 2>/dev/null | wc -l | tr -d ' ')"
+    copilot_permission_count="$(rg -l "copilot-requests:\s*write" "$workflow_dir" 2>/dev/null | wc -l | tr -d ' ')"
   else
-    model_call_count="$(grep -RIl "call-github-model" "$workflow_dir" 2>/dev/null | wc -l | tr -d ' ')"
-    model_permission_count="$(grep -RIl "models: read" "$workflow_dir" 2>/dev/null | wc -l | tr -d ' ')"
-    MODELS_PIPELINE_NOTE="call-github-model-scan-with-grep"
+    copilot_call_count="$(grep -RIl "call-copilot-model" "$workflow_dir" 2>/dev/null | wc -l | tr -d ' ')"
+    copilot_permission_count="$(grep -RIl "copilot-requests: write" "$workflow_dir" 2>/dev/null | wc -l | tr -d ' ')"
+    COPILOT_PIPELINE_NOTE="call-copilot-model-scan-with-grep"
   fi
 
-  if [[ "$model_call_count" -gt 0 && "$model_permission_count" -gt 0 ]]; then
-    MODELS_PIPELINE_OK=1
-    MODELS_PIPELINE_NOTE="call-github-model-and-models-read-detected"
+  if [[ "$copilot_call_count" -gt 0 && "$copilot_permission_count" -gt 0 ]]; then
+    COPILOT_PIPELINE_OK=1
+    COPILOT_PIPELINE_NOTE="call-copilot-model-and-copilot-requests-detected"
   else
-    MODELS_PIPELINE_NOTE="models-pipeline-signals-missing"
+    COPILOT_PIPELINE_NOTE="copilot-pipeline-signals-missing"
   fi
 }
 
-detect_models_token_mode() {
-  MODELS_TOKEN_MODE="github-token-fallback"
-  if gh secret list 2>/dev/null | awk '{print $1}' | grep -qx "MODELS_TOKEN"; then
-    MODELS_TOKEN_MODE="models-token-secret"
+detect_copilot_token_mode() {
+  COPILOT_TOKEN_MODE="github-token-fallback"
+  if gh secret list 2>/dev/null | awk '{print $1}' | grep -qx "COPILOT_GITHUB_TOKEN"; then
+    COPILOT_TOKEN_MODE="copilot-token-secret"
   fi
 }
 
@@ -396,8 +396,8 @@ ensure_prereqs() {
     exit 1
   fi
 
-  verify_models_pipeline
-  detect_models_token_mode
+  verify_copilot_pipeline
+  detect_copilot_token_mode
 }
 
 is_running() {
@@ -1130,9 +1130,9 @@ write_heartbeat() {
   "note": "$note",
   "signals": {
     "supervisor_role": "${SUPERVISOR_ROLE}",
-    "models_pipeline_ok": $MODELS_PIPELINE_OK,
-    "models_pipeline_note": "${MODELS_PIPELINE_NOTE}",
-    "models_token_mode": "${MODELS_TOKEN_MODE}",
+    "copilot_pipeline_ok": $COPILOT_PIPELINE_OK,
+    "models_pipeline_note": "${COPILOT_PIPELINE_NOTE}",
+    "copilot_token_mode": "${COPILOT_TOKEN_MODE}",
     "throttle_status": "${THROTTLE_STATUS:-ready}",
     "dispatches_last_hour": ${DISPATCHES_LAST_HOUR:-0},
     "max_dispatches_per_hour": $MAX_DISPATCHES_PER_HOUR,
@@ -1242,7 +1242,7 @@ dispatch_slot() {
   fi
 
   local context
-  context="supervisor_role=$SUPERVISOR_ROLE cycle=$cycle slot=$slot reason=$reason recent_pr_events=$RECENT_PR_EVENT_COUNT recent_pr=$RECENT_PR_NUMBER waiting_runs=$WAITING_RUN_COUNT oldest_waiting_min=$OLDEST_WAITING_MIN stale_prs=$STALE_PR_COUNT stale_discussions=$STALE_DISCUSSION_COUNT stale_issues=$STALE_ISSUE_COUNT failed_actions=$FAILED_ACTION_COUNT pm_runs_24h=$PM_RUNS_LAST_24H models_pipeline_ok=$MODELS_PIPELINE_OK models_token_mode=$MODELS_TOKEN_MODE auto_ready=$AUTO_READY_ACTION host=$(hostname -s 2>/dev/null || echo local)"
+  context="supervisor_role=$SUPERVISOR_ROLE cycle=$cycle slot=$slot reason=$reason recent_pr_events=$RECENT_PR_EVENT_COUNT recent_pr=$RECENT_PR_NUMBER waiting_runs=$WAITING_RUN_COUNT oldest_waiting_min=$OLDEST_WAITING_MIN stale_prs=$STALE_PR_COUNT stale_discussions=$STALE_DISCUSSION_COUNT stale_issues=$STALE_ISSUE_COUNT failed_actions=$FAILED_ACTION_COUNT pm_runs_24h=$PM_RUNS_LAST_24H copilot_pipeline_ok=$COPILOT_PIPELINE_OK copilot_token_mode=$COPILOT_TOKEN_MODE auto_ready=$AUTO_READY_ACTION host=$(hostname -s 2>/dev/null || echo local)"
 
   echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Dispatch cycle=$cycle agent=$agent task=$task reason=$reason ref=$ref" | tee -a "$LOG_FILE"
 

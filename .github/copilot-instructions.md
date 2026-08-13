@@ -9,7 +9,7 @@ following context in mind.
 The system provides three AI agents — **Quinn (QA Engineer)**,
 **Morgan (Project Manager)**, and **Alex (Product Owner)** — plus a
 **Council Moderator (Casey)** that facilitates multi-agent discussions.
-All agents are powered by GitHub Models and live entirely in GitHub Actions.
+All agents are powered by GitHub Copilot models and live entirely in GitHub Actions.
 
 ## Key Files
 
@@ -18,7 +18,7 @@ All agents are powered by GitHub Models and live entirely in GitHub Actions.
 | `.github/agents.md` | Agent personas, responsibilities, triggers — the source of truth for all agent behaviour |
 | `.github/skills.md` | Skills catalog — discrete capabilities agents can use |
 | `.github/agent-config.yml` | Central configuration knobs; runtime values come from GitHub repository variables |
-| `.github/actions/call-github-model/action.yml` | Reusable composite action for all GitHub Models API calls |
+| `.github/actions/call-copilot-model/action.yml` | Reusable composite action for all Copilot CLI model calls |
 | `.github/actions/post-council-results/action.yml` | Composite action for posting council decisions to Discussions or Issues |
 | `.github/workflows/qa-engineer.yml` | QA Engineer agent workflow |
 | `.github/workflows/project-manager.yml` | Project Manager agent workflow |
@@ -30,8 +30,8 @@ All agents are powered by GitHub Models and live entirely in GitHub Actions.
 
 - **System prompts** come from the persona sections in `.github/agents.md`.
   Keep them consistent when modifying agent behaviour.
-- **All GitHub Models API calls** go through
-  `.github/actions/call-github-model`. Do not call the API directly in
+- **All Copilot model calls** go through
+  `.github/actions/call-copilot-model`. Do not invoke model endpoints directly in
   workflow steps.
 - **Configuration** is via repository variables (not hardcoded values).
   See `.github/agent-config.yml` for the full list.
@@ -58,7 +58,6 @@ All agents are powered by GitHub Models and live entirely in GitHub Actions.
 
 ## Model Access
 
-Workflows use `secrets.MODELS_TOKEN` (falling back to
-`secrets.GITHUB_TOKEN`) to authenticate with GitHub Models at
-`https://models.inference.ai.azure.com`. Ensure the token has the
-`models:read` scope.
+Workflows use `secrets.COPILOT_GITHUB_TOKEN` (falling back to
+`secrets.GITHUB_TOKEN`) with `copilot-requests: write`. Model inference runs
+through GitHub Copilot CLI; direct GitHub Models endpoints are not supported.

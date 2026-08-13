@@ -68,12 +68,6 @@ permissions:
   contents: read
   issues: write
   discussions: write
-  models: read
-
-env:
-  SD_MODEL: ${{ vars.PM_MODEL || 'gpt-4o-mini' }}
-  AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '2048' }}
-  AGENT_TEMPERATURE: ${{ vars.AGENT_TEMPERATURE || '0.7' }}
 
 jobs:
   skill-development-tracking:

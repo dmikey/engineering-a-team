@@ -5,7 +5,7 @@ import unittest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 QA_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "qa-engineer.yml"
-MODEL_CALL_ACTION = REPO_ROOT / ".github" / "actions" / "call-github-model" / "action.yml"
+MODEL_CALL_ACTION = REPO_ROOT / ".github" / "actions" / "call-copilot-model" / "action.yml"
 
 
 class QaCrossRepoCollaborationTests(unittest.TestCase):
@@ -78,11 +78,11 @@ class QaRobustnessTests(unittest.TestCase):
 
     def test_validate_step_gives_actionable_error_on_model_failure(self):
         """Validate step must include guidance about token and API issues."""
-        self.assertIn("MODELS_TOKEN", self.workflow_text)
+        self.assertIn("COPILOT_GITHUB_TOKEN", self.workflow_text)
         self.assertIn("Model call failed", self.workflow_text)
 
     def test_model_call_has_github_token_fallback(self):
-        """Model call should retry with GITHUB_TOKEN if a custom MODELS_TOKEN is unauthorized."""
+        """Model call should retry with GITHUB_TOKEN if a custom Copilot token fails."""
         self.assertIn("fallback-token: ${{ secrets.GITHUB_TOKEN }}", self.workflow_text)
 
     def test_model_failures_fall_back_to_manual_review_handoff(self):
@@ -132,10 +132,10 @@ class ModelCallActionRobustnessTests(unittest.TestCase):
 
     def test_supports_fallback_token_input(self):
         self.assertIn("fallback-token:", self.action_text)
-        self.assertIn("FALLBACK_API_TOKEN", self.action_text)
+        self.assertIn("FALLBACK_COPILOT_TOKEN", self.action_text)
 
-    def test_retries_when_primary_token_is_unauthorized(self):
-        self.assertIn("UNAUTHORIZED=", self.action_text)
+    def test_retries_when_primary_copilot_invocation_fails(self):
+        self.assertIn('if [ "$COPILOT_EXIT" -ne 0 ]', self.action_text)
         self.assertIn("retrying with fallback token", self.action_text)
 
 

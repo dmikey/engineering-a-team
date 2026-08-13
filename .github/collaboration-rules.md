@@ -1,7 +1,7 @@
 # Agent Collaboration Rules
 
 These rules are loaded dynamically on every GitHub Models call made through
-`.github/actions/call-github-model`.
+`.github/actions/call-copilot-model`.
 
 ## Interaction Rules
 

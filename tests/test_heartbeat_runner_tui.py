@@ -1,6 +1,8 @@
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -13,6 +15,151 @@ SPEC.loader.exec_module(heartbeat_runner)
 
 
 class HeartbeatRunnerTuiTests(unittest.TestCase):
+    def test_tui_header_reports_active_beat_instead_of_zero_countdown(self):
+        self.assertEqual(
+            heartbeat_runner.tui_header_status(
+                paused=False,
+                next_run_in=0,
+                live_active=True,
+                heartbeat_count=0,
+            ),
+            "RUNNING beat #1",
+        )
+        self.assertEqual(
+            heartbeat_runner.tui_header_status(
+                paused=False,
+                next_run_in=18,
+                live_active=False,
+                heartbeat_count=3,
+            ),
+            "AUTO next in 18s  beat #3",
+        )
+
+    def test_copilot_planner_status_surfaces_timeout(self):
+        self.assertEqual(
+            heartbeat_runner.copilot_planner_status("gpt-4o-mini", 45),
+            "consulting Copilot planner (gpt-4o-mini; timeout 45s)",
+        )
+
+    def test_parse_args_accepts_explicit_tui_auto_startup_grant(self):
+        with patch.object(sys, "argv", ["heartbeat_runner.py", "--tui", "--tui-auto"]):
+            args = heartbeat_runner.parse_args()
+
+        self.assertTrue(args.tui)
+        self.assertTrue(args.tui_auto)
+
+    def test_enabling_automatic_mode_makes_first_run_due_immediately(self):
+        self.assertEqual(heartbeat_runner.tui_automatic_next_run(True, now=120.0, interval=300), 120.0)
+        self.assertEqual(heartbeat_runner.tui_automatic_next_run(False, now=120.0, interval=300), 420.0)
+
+    def test_load_tui_preview_reads_state_without_executing_actions(self):
+        repo_info = {"nameWithOwner": "acme/widgets", "defaultBranch": "main"}
+        args = SimpleNamespace(pr_limit=30, issue_limit=50, run_limit=100)
+        prs = [{"number": 42, "isDraft": False, "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "reviewDecision": "", "statusCheckRollup": []}]
+        issues = [{"number": 9, "assignees": []}]
+        runs = []
+        progress_messages = []
+
+        with patch.object(heartbeat_runner, "fetch_open_prs", return_value=prs), \
+             patch.object(heartbeat_runner, "fetch_open_issues", return_value=issues), \
+             patch.object(heartbeat_runner, "fetch_runs", return_value=runs), \
+             patch.object(heartbeat_runner, "execute_plan") as execute_plan_mock, \
+             patch.object(heartbeat_runner, "approve_pending_workflow_runs") as approve_mock:
+            preview = heartbeat_runner.load_tui_preview(
+                repo_info,
+                args,
+                {},
+                progress=progress_messages.append,
+            )
+
+        self.assertEqual(preview["snapshot"]["prs"], prs)
+        self.assertEqual(preview["snapshot"]["issues"], issues)
+        self.assertEqual(preview["results"], [])
+        self.assertEqual(preview["meta"]["decision_source"], "heuristic preview")
+        self.assertEqual(preview["plan"]["pull_requests"][0]["action"], "merge")
+        self.assertIn("Repository state ready", progress_messages)
+        execute_plan_mock.assert_not_called()
+        approve_mock.assert_not_called()
+
+    def test_tui_mutating_actions_require_explicit_confirmation(self):
+        for key, expected_action in {
+            ord("r"): "heartbeat",
+            ord("c"): "council",
+            ord("m"): "project_manager",
+            ord("a"): "copilot_assignment",
+            ord("d"): "advance_drafts",
+        }.items():
+            action = heartbeat_runner.tui_action_for_key(key)
+            state, confirmed_action = heartbeat_runner.resolve_tui_confirmation(action, ord("y"))
+
+            self.assertEqual(action, expected_action)
+            self.assertEqual(state, "confirmed")
+            self.assertEqual(confirmed_action, expected_action)
+
+    def test_tui_confirmation_can_be_cancelled(self):
+        state, confirmed_action = heartbeat_runner.resolve_tui_confirmation("heartbeat", ord("n"))
+
+        self.assertEqual(state, "cancelled")
+        self.assertIsNone(confirmed_action)
+
+    def test_tui_heartbeat_runs_only_after_confirmation_and_outside_chat(self):
+        self.assertFalse(heartbeat_runner.should_run_tui_heartbeat(False, False))
+        self.assertFalse(heartbeat_runner.should_run_tui_heartbeat(True, True))
+        self.assertTrue(heartbeat_runner.should_run_tui_heartbeat(False, True))
+
+    def test_tui_automatic_path_is_opt_in_and_respects_interaction_gates(self):
+        self.assertEqual(heartbeat_runner.tui_automatic_action(False), "enable_automatic")
+        self.assertEqual(heartbeat_runner.tui_automatic_action(True), "disable_automatic")
+        self.assertFalse(
+            heartbeat_runner.should_run_tui_heartbeat(
+                chat_open=False,
+                run_requested=False,
+                automatic_enabled=False,
+                automatic_due=True,
+            )
+        )
+        self.assertTrue(
+            heartbeat_runner.should_run_tui_heartbeat(
+                chat_open=False,
+                run_requested=False,
+                automatic_enabled=True,
+                automatic_due=True,
+            )
+        )
+        self.assertFalse(
+            heartbeat_runner.should_run_tui_heartbeat(
+                chat_open=False,
+                run_requested=False,
+                automatic_enabled=True,
+                automatic_due=True,
+                confirmation_pending=True,
+            )
+        )
+        self.assertFalse(
+            heartbeat_runner.should_run_tui_heartbeat(
+                chat_open=True,
+                run_requested=False,
+                automatic_enabled=True,
+                automatic_due=True,
+            )
+        )
+
+    def test_ready_guard_only_allows_safe_draft_promotion(self):
+        safe_draft = {
+            "isDraft": True,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "reviewDecision": "",
+            "statusCheckRollup": [],
+        }
+
+        self.assertEqual(heartbeat_runner.ready_guard(safe_draft), (True, "ready"))
+        self.assertEqual(heartbeat_runner.ready_guard({**safe_draft, "isDraft": False}), (False, "not a draft"))
+        self.assertEqual(
+            heartbeat_runner.ready_guard({**safe_draft, "mergeable": "CONFLICTING"}),
+            (False, "mergeable=CONFLICTING"),
+        )
+
     def test_execute_plan_prioritizes_merge_actions_before_repo_dispatches(self):
         snapshot = {
             "repo": {"nameWithOwner": "acme/widgets", "defaultBranch": "main"},
@@ -106,6 +253,47 @@ class HeartbeatRunnerTuiTests(unittest.TestCase):
         rendered = "\n".join(lines)
 
         self.assertIn("The PR still needs review before it can merge.", rendered)
+
+    def test_render_tui_lines_explains_user_actor_policy_gate_model(self):
+        heartbeat_data = {
+            "snapshot": {
+                "repo": {"nameWithOwner": "acme/widgets"},
+                "prs": [],
+                "issues": [],
+                "runs": [],
+            },
+            "plan": {"pull_requests": [], "repo_actions": []},
+            "results": [],
+            "meta": {},
+        }
+
+        lines = heartbeat_runner.render_tui_lines(heartbeat_data, 5, False, False, 60, "Ready")
+        rendered = "\n".join(lines)
+
+        self.assertIn("User acts through the TUI", rendered)
+        self.assertIn("policy gate", rendered.lower())
+
+    def test_render_tui_lines_surfaces_manual_and_automatic_state(self):
+        manual = heartbeat_runner.render_tui_lines(None, 300, False, True, 300, "Ready")
+        automatic = heartbeat_runner.render_tui_lines(None, 300, False, False, 42, "Ready")
+
+        self.assertIn("State: MANUAL (automatic runs disabled)", manual)
+        self.assertIn("Automatic run in: 42s", automatic)
+        self.assertTrue(any("p automatic" in line for line in automatic))
+
+    def test_preview_actions_are_not_labeled_as_scheduled(self):
+        self.assertEqual(
+            heartbeat_runner.tui_repo_actions_heading({"decision_source": "heuristic preview"}),
+            "Proposed actions (not executed):",
+        )
+        self.assertEqual(
+            heartbeat_runner.tui_repo_actions_heading({"decision_source": "copilot-cli:gpt-5-mini"}),
+            "Scheduled dispatches:",
+        )
+        self.assertEqual(
+            heartbeat_runner.tui_repo_actions_heading({"decision_source": "heuristic"}, dry_run=True),
+            "Simulated actions (not executed):",
+        )
 
     def test_heuristic_repo_actions_plan_discussion_participation(self):
         snapshot = {

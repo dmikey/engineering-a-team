@@ -350,6 +350,68 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
         self.assertEqual(unresolved[0]["workflowName"], "Agent Personality Profiles")
         self.assertEqual(unresolved[0]["databaseId"], 31501901732)
 
+    def test_recover_failed_workflow_runs_reruns_latest_failure(self):
+        snapshot = {
+            "repo": {"nameWithOwner": "owner/repo"},
+            "runs": [
+                {
+                    "workflowName": "Self-Improvement Loop",
+                    "conclusion": "failure",
+                    "createdAt": "2026-08-13T12:00:00Z",
+                    "databaseId": 31622285931,
+                }
+            ],
+        }
+        state = {}
+
+        with mock.patch.object(heartbeat_runner, "rerun_workflow_run", return_value="rerun requested") as rerun_mock:
+            results = heartbeat_runner.recover_failed_workflow_runs(snapshot, state, "owner/repo", dry_run=False)
+
+        rerun_mock.assert_called_once_with("owner/repo", 31622285931, False)
+        self.assertEqual(results[0]["status"], "ok")
+        self.assertEqual(results[0]["action"], "rerun_failed_workflow")
+        self.assertEqual(state["workflow_recovery_attempts"]["Self-Improvement Loop"], 1)
+
+    def test_recover_failed_workflow_runs_stops_after_attempt_cap(self):
+        snapshot = {
+            "repo": {"nameWithOwner": "owner/repo"},
+            "runs": [
+                {
+                    "workflowName": "Self-Improvement Loop",
+                    "conclusion": "failure",
+                    "createdAt": "2026-08-13T12:00:00Z",
+                    "databaseId": 31622285931,
+                }
+            ],
+        }
+        state = {"workflow_recovery_attempts": {"Self-Improvement Loop": heartbeat_runner.WORKFLOW_RECOVERY_MAX_ATTEMPTS}}
+
+        with mock.patch.object(heartbeat_runner, "rerun_workflow_run") as rerun_mock:
+            results = heartbeat_runner.recover_failed_workflow_runs(snapshot, state, "owner/repo", dry_run=False)
+
+        rerun_mock.assert_not_called()
+        self.assertEqual(results[0]["status"], "skipped")
+        self.assertIn("exhausted", results[0]["detail"])
+
+    def test_successful_workflow_run_resets_recovery_attempts(self):
+        state = {
+            "workflow_recovery_attempts": {"Self-Improvement Loop": 2},
+            "events": {"rerun:workflow:Self-Improvement Loop": {"at": "2026-08-13T12:00:00+00:00"}},
+        }
+        runs = [
+            {
+                "workflowName": "Self-Improvement Loop",
+                "conclusion": "success",
+                "createdAt": "2026-08-13T12:30:00Z",
+                "databaseId": 31622286000,
+            }
+        ]
+
+        heartbeat_runner.reconcile_workflow_recovery_attempts(state, runs)
+
+        self.assertNotIn("Self-Improvement Loop", state["workflow_recovery_attempts"])
+        self.assertNotIn("rerun:workflow:Self-Improvement Loop", state["events"])
+
 
 if __name__ == "__main__":
     unittest.main()

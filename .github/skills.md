@@ -256,7 +256,7 @@ posted as a Discussion or Issue fallback
 
 **Description**: Run structured training sessions for each agent based on a
 predefined curriculum. For each agent, identifies the next pending topic
-(ordered by difficulty), invokes the GitHub Models API to generate a scenario,
+(ordered by difficulty), invokes a Copilot model to generate a scenario,
 model answer, and improvement tips, then records the completed session as a
 labelled GitHub Issue. Posts a full per-agent progress report weekly as a
 Discussion or Issue. Creates priority-labelled alert issues for agents whose
