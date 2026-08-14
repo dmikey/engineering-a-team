@@ -100,8 +100,13 @@ jobs:
         id: ctx
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TASK_INPUT: ${{ inputs.task || 'product-health-report' }}
+          EXTRA_CONTEXT: ${{ inputs.extra_context }}
+          FEATURE_PROMPT: ${{ inputs.feature_prompt }}
+          DISCUSSION_TITLE: ${{ github.event.discussion.title }}
+          DISCUSSION_BODY: ${{ github.event.discussion.body }}
         run: |
-          TASK="${{ inputs.task || 'product-health-report' }}"
+          TASK="$TASK_INPUT"
           echo "task=$TASK" >> "$GITHUB_OUTPUT"
           CURRENT_DATE=$(date -u +"%Y-%m-%d")
           echo "current_date=$CURRENT_DATE" >> "$GITHUB_OUTPUT"
@@ -151,8 +156,8 @@ jobs:
           # Discussion context if triggered by discussion event
           DISCUSSION_CONTEXT=""
           if [ "${{ github.event_name }}" = "discussion" ]; then
-            DISCUSSION_CONTEXT="New discussion: ${{ github.event.discussion.title }}
-          Body: ${{ github.event.discussion.body }}"
+            DISCUSSION_CONTEXT="New discussion: $DISCUSSION_TITLE
+          Body: $DISCUSSION_BODY"
           fi
 
           {
@@ -197,10 +202,10 @@ jobs:
             echo "${DISCUSSION_CONTEXT:-N/A}"
             echo ""
             echo "## Additional Context"
-            echo "${{ inputs.extra_context }}"
+            echo "$EXTRA_CONTEXT"
             echo ""
             echo "## Feature Suggestion Prompt"
-            echo "${{ inputs.feature_prompt }}"
+            echo "$FEATURE_PROMPT"
             echo "PO_CTX_EOF"
           } >> "$GITHUB_OUTPUT"
 
