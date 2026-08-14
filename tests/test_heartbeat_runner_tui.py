@@ -35,6 +35,22 @@ class HeartbeatRunnerTuiTests(unittest.TestCase):
             "AUTO next in 18s  beat #3",
         )
 
+    def test_plain_tui_reports_manual_mode_when_automatic_execution_is_disabled(self):
+        lines = heartbeat_runner.render_tui_lines(None, 300, False, True, 300, "Loading repository state...")
+
+        self.assertEqual(lines[0], "Heartbeat Runner | mode=manual | interval=300s")
+
+    def test_full_tui_mode_label_reports_manual_waiting_state(self):
+        self.assertEqual(heartbeat_runner.tui_mode_label(False, True, False), "MANUAL")
+        self.assertEqual(heartbeat_runner.tui_mode_label(False, False, False), "AUTOMATIC")
+        self.assertEqual(heartbeat_runner.tui_mode_label(False, True, True), "RUNNING")
+        self.assertEqual(heartbeat_runner.tui_mode_label(True, True, False), "DRY-RUN")
+
+    def test_tui_terminal_available_requires_interactive_streams(self):
+        with patch.object(heartbeat_runner.sys.stdin, "isatty", return_value=False), \
+             patch.object(heartbeat_runner.sys.stdout, "isatty", return_value=True):
+            self.assertFalse(heartbeat_runner.tui_terminal_available())
+
     def test_copilot_planner_status_surfaces_timeout(self):
         self.assertEqual(
             heartbeat_runner.copilot_planner_status("gpt-4o-mini", 45),

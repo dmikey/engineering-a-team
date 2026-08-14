@@ -18,6 +18,7 @@ Required:
   --agent <qa|pm|po|council|council-sprint|roadmap|self-improvement|task-assignment>
 
 Common options:
+  --repo <owner/repo>          Target repository for supervisor TUI
   --task <value>
   --topic <value>
   --extra-context <value>
@@ -55,7 +56,7 @@ Examples:
   scripts/agent-cli.sh run --agent pm --task full-sprint-report
   scripts/agent-cli.sh run --agent po --task run-playwright --base-url https://app.example.com --wait
   scripts/agent-cli.sh run --agent self-improvement --task full-loop --reference-repo acme/get-milk
-  scripts/agent-cli.sh service tui --tail-lines 100 --refresh 2
+  scripts/agent-cli.sh service tui --repo acme/widgets --tail-lines 100 --refresh 2
 EOF
 }
 
@@ -140,28 +141,49 @@ require_gh() {
 }
 
 check_actions_preflight() {
+  local target_repo="${1:-}"
+  local repo_args=()
+  if [[ -n "$target_repo" ]]; then
+    repo_args=(--repo "$target_repo")
+  fi
   local has_discussions="unknown"
 
-  if ! gh workflow view "$WORKFLOW_FILE" >/dev/null 2>&1; then
+  if ! gh workflow view "$WORKFLOW_FILE" "${repo_args[@]}" >/dev/null 2>&1; then
     echo "Error: cannot access workflow '$WORKFLOW_FILE' in this repo." >&2
     echo "Ensure GitHub Actions is enabled and your token has actions:read/write." >&2
     exit 1
   fi
 
-  has_discussions="$(gh repo view --json hasDiscussionsEnabled --jq '.hasDiscussionsEnabled' 2>/dev/null || echo "unknown")"
+  has_discussions="$(gh repo view "${repo_args[@]}" --json hasDiscussionsEnabled --jq '.hasDiscussionsEnabled' 2>/dev/null || echo "unknown")"
   if [[ "$has_discussions" != "true" ]]; then
     echo "Warning: Discussions appear disabled or unavailable; workflows will fall back to issues." >&2
   fi
 }
 
 check_tui_preflight() {
-  check_actions_preflight
+  local target_repo="${1:-}"
+  check_actions_preflight "$target_repo"
 
   if gh copilot --help >/dev/null 2>&1; then
     echo "copilot_cli: available"
   else
     echo "Warning: gh copilot command not available. Install/enable Copilot CLI for best TUI experience." >&2
   fi
+}
+
+service_target_repo() {
+  local option
+  while [[ $# -gt 0 ]]; do
+    option="$1"
+    shift
+    if [[ "$option" == "--repo" ]]; then
+      printf '%s' "${1:-}"
+      return
+    fi
+    if [[ "$option" != "--follow" ]]; then
+      shift || true
+    fi
+  done
 }
 
 add_field() {
@@ -184,7 +206,7 @@ main() {
   if [[ "$command" == "service" ]]; then
     if [[ "${1:-}" == "tui" ]]; then
       require_gh
-      check_tui_preflight
+      check_tui_preflight "$(service_target_repo "${@:2}")"
     fi
     run_service_command "$@"
     exit 0

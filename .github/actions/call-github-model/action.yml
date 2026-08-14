@@ -145,7 +145,6 @@ runs:
           set +e
           COPILOT_GITHUB_TOKEN="$token" gh copilot -- \
             --model "$COPILOT_MODEL" \
-            --no-alt-screen \
             --stream off \
             --output-format text \
             --silent \

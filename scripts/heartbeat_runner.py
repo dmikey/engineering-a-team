@@ -197,6 +197,10 @@ def tui_automatic_next_run(enabled: bool, now: float, interval: int) -> float:
     return now if enabled else now + interval
 
 
+def tui_terminal_available() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 def should_run_tui_heartbeat(
     chat_open: bool,
     run_requested: bool,
@@ -372,21 +376,26 @@ def repo_root() -> Path:
     return script_repo_root()
 
 
-def state_paths() -> tuple[Path, Path]:
+def heartbeat_state_dir(target_repo: str | None = None) -> Path:
     base = repo_root() / ".git" / "heartbeat-runner"
+    if target_repo:
+        base /= target_repo.replace("/", "__")
     base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def state_paths(target_repo: str | None = None) -> tuple[Path, Path]:
+    base = heartbeat_state_dir(target_repo)
     return base / "state.json", base / "overview.md"
 
 
-def default_ledger_path() -> Path:
-    base = repo_root() / ".git" / "heartbeat-runner"
-    base.mkdir(parents=True, exist_ok=True)
+def default_ledger_path(target_repo: str | None = None) -> Path:
+    base = heartbeat_state_dir(target_repo)
     return base / "decision-ledger.jsonl"
 
 
-def default_runtime_log_path() -> Path:
-    base = repo_root() / ".git" / "heartbeat-runner"
-    base.mkdir(parents=True, exist_ok=True)
+def default_runtime_log_path(target_repo: str | None = None) -> Path:
+    base = heartbeat_state_dir(target_repo)
     return base / "runtime.log"
 
 
@@ -526,7 +535,6 @@ def call_copilot_cli_model(system_prompt: str, user_prompt: str, model: str = DE
                 "--",
                 "--model",
                 normalize_copilot_chat_model(model),
-                "--no-alt-screen",
                 "--stream",
                 "off",
                 "--output-format",
@@ -2463,7 +2471,7 @@ def render_tui_lines(
     status_message: str,
 ) -> list[str]:
     """Legacy plain-text render kept for non-interactive fallback."""
-    mode = "dry-run" if dry_run else "active"
+    mode = "dry-run" if dry_run else ("manual" if paused else "automatic")
     header = f"Heartbeat Runner | mode={mode} | interval={max(interval, 5)}s"
     lines = [
         header,
@@ -2550,6 +2558,16 @@ def tui_header_status(paused: bool, next_run_in: int, live_active: bool, heartbe
     return f"AUTO next in {max(next_run_in, 0)}s  beat #{heartbeat_count}"
 
 
+def tui_mode_label(dry_run: bool, paused: bool, live_active: bool) -> str:
+    if dry_run:
+        return "DRY-RUN"
+    if live_active:
+        return "RUNNING"
+    if paused:
+        return "MANUAL"
+    return "AUTOMATIC"
+
+
 def _draw_full_tui(
     stdscr: Any,
     heartbeat_data: dict[str, Any] | None,
@@ -2585,11 +2603,12 @@ def _draw_full_tui(
     mid = W // 2
     show_live = heartbeat_data is None or bool(live_beat and live_beat.get("active"))
 
-    mode = "DRY-RUN" if dry_run else "ACTIVE"
+    live_active = bool(live_beat and live_beat.get("active"))
+    mode = tui_mode_label(dry_run, paused, live_active)
     header_status = tui_header_status(
         paused,
         next_run_in,
-        bool(live_beat and live_beat.get("active")),
+        live_active,
         heartbeat_count,
     )
 
@@ -2913,6 +2932,10 @@ def run_tui(
     overview_file: Path,
     ledger_file: Path,
 ) -> int:
+    if not tui_terminal_available():
+        print("Error: --tui requires an interactive terminal. Run this command in a terminal session, not a redirected or background process.", file=sys.stderr)
+        return 2
+
     interval = max(args.interval, 5)
     heartbeat_data: dict[str, Any] | None = None
     automatic_enabled = bool(getattr(args, "tui_auto", False))
@@ -2926,7 +2949,7 @@ def run_tui(
     log_scroll = 0
     action_log: list[str] = []
     heartbeat_count = 0
-    runtime_log_path = default_runtime_log_path()
+    runtime_log_path = default_runtime_log_path(args.repo)
     live_beat: dict[str, Any] = {"phase": "initializing", "active": True}
     logged_rationales: set[tuple[str, str, str]] = set()
     pending_action: str | None = None
@@ -3107,7 +3130,6 @@ def run_tui(
             "copilot",
             "--model",
             model,
-            "--no-alt-screen",
             "--stream",
             "off",
             "--output-format",
@@ -3212,7 +3234,7 @@ def run_tui(
             status_message = (
                 "Repository state loaded - starting first automatic heartbeat"
                 if automatic_enabled
-                else "Repository state loaded - press r to run or p to enable automatic mode"
+                else "Repository ready - press r then y to run one gated heartbeat, or p then y for automatic mode"
             )
         except RuntimeError as exc:
             detail = str(exc).splitlines()[0][:160]
@@ -3442,8 +3464,8 @@ def main() -> int:
     args = parse_args()
     GH_MAX_RETRIES = max(1, args.max_retries)
     repo_root = Path.cwd()
-    state_file, overview_file = state_paths()
-    ledger_file = Path(args.ledger_file).expanduser() if args.ledger_file else default_ledger_path()
+    state_file, overview_file = state_paths(args.repo)
+    ledger_file = Path(args.ledger_file).expanduser() if args.ledger_file else default_ledger_path(args.repo)
     state = load_state(state_file)
     repo_info = resolve_repo(args.repo)
     GH_COMMAND_ENV, GH_AUTH_SOURCE = resolve_gh_command_env()

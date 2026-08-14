@@ -59,6 +59,80 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
             self.assertIn("--once", logged)
             self.assertIn("--dry-run", logged)
 
+    def test_tui_forwards_explicit_repository_to_heartbeat_runner(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            log_path = tmp_path / "invocations.log"
+
+            (bin_dir / "python3").write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$*\" >> \"$TEST_LOG\"\n",
+                encoding="utf-8",
+            )
+            (bin_dir / "gh").write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ \"$1\" == \"repo\" && \"$2\" == \"view\" ]]; then\n"
+                "  printf 'current/repo\\n'\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            (bin_dir / "python3").chmod(0o755)
+            (bin_dir / "gh").chmod(0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+            env["TEST_LOG"] = str(log_path)
+
+            result = subprocess.run(
+                ["bash", str(SCRIPT), "tui", "--repo", "acme/widgets", "--interval", "30"],
+                cwd=str(REPO_ROOT),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("--tui --interval 30 --repo acme/widgets", log_path.read_text(encoding="utf-8"))
+
+    def test_once_forwards_explicit_repository_to_heartbeat_runner(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            log_path = tmp_path / "invocations.log"
+
+            (bin_dir / "python3").write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$*\" >> \"$TEST_LOG\"\n",
+                encoding="utf-8",
+            )
+            (bin_dir / "gh").write_text(
+                "#!/usr/bin/env bash\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            (bin_dir / "python3").chmod(0o755)
+            (bin_dir / "gh").chmod(0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+            env["TEST_LOG"] = str(log_path)
+
+            result = subprocess.run(
+                ["bash", str(SCRIPT), "once", "--repo", "acme/widgets", "--interval", "30"],
+                cwd=str(REPO_ROOT),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("--interval 30 --once --repo acme/widgets", log_path.read_text(encoding="utf-8"))
+
     def test_state_paths_use_repo_root_when_cwd_is_elsewhere(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             original_cwd = Path.cwd()
@@ -70,6 +144,14 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
 
             self.assertTrue(str(state_file.resolve()).startswith(str(REPO_ROOT.resolve())))
             self.assertTrue(str(overview_file.resolve()).startswith(str(REPO_ROOT.resolve())))
+
+    def test_explicit_repository_uses_isolated_heartbeat_state_paths(self):
+        default_state, _ = heartbeat_runner.state_paths()
+        target_state, target_overview = heartbeat_runner.state_paths("acme/widgets")
+
+        self.assertNotEqual(default_state.parent, target_state.parent)
+        self.assertEqual(target_state.parent.name, "acme__widgets")
+        self.assertEqual(target_overview.parent, target_state.parent)
 
     def test_resolve_gh_command_env_falls_back_when_explicit_token_is_invalid(self):
         invalid = subprocess.CompletedProcess(["gh", "api", "user"], 1, "", "HTTP 401: Bad credentials")

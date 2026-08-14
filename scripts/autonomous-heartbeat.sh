@@ -125,6 +125,7 @@ Usage:
   scripts/autonomous-heartbeat.sh status
 
 Options:
+  --repo <owner/repo>     Target repository (default: current GitHub repository)
   --interval <seconds>   Heartbeat interval (default: 900)
   --ref <branch>         Ref for workflow dispatch (default: main)
   --max-cycles <n>       Run at most n cycles (run/once modes)
@@ -146,6 +147,7 @@ Options:
 
 Examples:
   scripts/autonomous-heartbeat.sh --interval 600
+  scripts/autonomous-heartbeat.sh tui --repo acme/widgets --interval 300
   scripts/autonomous-heartbeat.sh start --interval 600
   scripts/autonomous-heartbeat.sh install-service --interval 600
   scripts/autonomous-heartbeat.sh restart --interval 600
@@ -308,6 +310,7 @@ PYEOF
 tui_mode() {
   local refresh_seconds="$1"
   local tail_lines="$2"
+  local target_repo="$3"
 
   ensure_prereqs
 
@@ -320,8 +323,10 @@ tui_mode() {
     echo "Note: background heartbeat daemon is running; shared cooldown state prevents duplicate actions." >&2
   fi
 
-  local repo_name
-  repo_name="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)"
+  local repo_name="$target_repo"
+  if [[ -z "$repo_name" ]]; then
+    repo_name="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)"
+  fi
 
   # The runner TUI is the live supervisor loop: it readies drafts, syncs
   # conflicting branches, hands stuck PRs to @copilot, dispatches QA/PM/PO/
@@ -1272,6 +1277,7 @@ run_loop() {
   local interval="$1"
   local ref="$2"
   local max_cycles="$3"
+  local target_repo="$4"
 
   echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Heartbeat loop started interval=${interval}s ref=$ref" | tee -a "$LOG_FILE"
 
@@ -1280,8 +1286,10 @@ run_loop() {
     return 1
   fi
 
-  local repo_name
-  repo_name="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)"
+  local repo_name="$target_repo"
+  if [[ -z "$repo_name" ]]; then
+    repo_name="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)"
+  fi
 
   local auto_dry_run="false"
   local dry_run_notice_shown="false"
@@ -1355,27 +1363,33 @@ start_daemon() {
   local auto_ready_draft_prs="${10}"
   local follow_log="${11}"
   local tail_lines="${12}"
+  local target_repo="${13}"
 
   ensure_prereqs
   stop_daemon_internal
 
-  nohup "$SCRIPT_PATH" run \
-    --interval "$interval" \
-    --ref "$ref" \
-    --max-cycles "$max_cycles" \
-    --stale-pr-hours "$stale_pr_hours" \
-    --stale-discussion-hours "$stale_discussion_hours" \
-    --stale-issue-hours "$stale_issue_hours" \
-    --failure-window-hours "$failure_window_hours" \
-    --event-pr-window-min "$event_pr_window_min" \
-    --waiting-run-min "$waiting_run_min" \
-    --auto-ready-draft-prs "$auto_ready_draft_prs" \
-    --auto-merge-prs "$AUTO_MERGE_PRS" \
-    --max-dispatches-per-hour "$MAX_DISPATCHES_PER_HOUR" \
-    --action-cooldown-min "$ACTION_COOLDOWN_MIN" \
-    --continuity-cooldown-min "$CONTINUITY_COOLDOWN_MIN" \
-    --merge-retry-cooldown-min "$MERGE_RETRY_COOLDOWN_MIN" \
-    >> "$LOG_FILE" 2>&1 &
+  local daemon_args=(
+    run
+    --interval "$interval"
+    --ref "$ref"
+    --max-cycles "$max_cycles"
+    --stale-pr-hours "$stale_pr_hours"
+    --stale-discussion-hours "$stale_discussion_hours"
+    --stale-issue-hours "$stale_issue_hours"
+    --failure-window-hours "$failure_window_hours"
+    --event-pr-window-min "$event_pr_window_min"
+    --waiting-run-min "$waiting_run_min"
+    --auto-ready-draft-prs "$auto_ready_draft_prs"
+    --auto-merge-prs "$AUTO_MERGE_PRS"
+    --max-dispatches-per-hour "$MAX_DISPATCHES_PER_HOUR"
+    --action-cooldown-min "$ACTION_COOLDOWN_MIN"
+    --continuity-cooldown-min "$CONTINUITY_COOLDOWN_MIN"
+    --merge-retry-cooldown-min "$MERGE_RETRY_COOLDOWN_MIN"
+  )
+  if [[ -n "$target_repo" ]]; then
+    daemon_args+=(--repo "$target_repo")
+  fi
+  nohup "$SCRIPT_PATH" "${daemon_args[@]}" >> "$LOG_FILE" 2>&1 &
   local pid=$!
   echo "$pid" > "$PID_FILE"
 
@@ -1405,7 +1419,7 @@ run_service() {
   ensure_prereqs
   echo "$$" > "$PID_FILE"
   trap 'if [[ -f "$PID_FILE" ]] && [[ "$(cat "$PID_FILE" 2>/dev/null)" == "$$" ]]; then rm -f "$PID_FILE"; fi' EXIT
-  run_loop "$INTERVAL" "$REF" "0"
+  run_loop "$INTERVAL" "$REF" "0" "$TARGET_REPO"
 }
 
 install_service() {
@@ -1419,6 +1433,7 @@ install_service() {
   SERVICE_LOG="$LOG_FILE" \
   SERVICE_INTERVAL="$INTERVAL" \
   SERVICE_REF="$REF" \
+  SERVICE_REPO="$TARGET_REPO" \
   SERVICE_MAX_DISPATCHES="$MAX_DISPATCHES_PER_HOUR" \
   SERVICE_ACTION_COOLDOWN="$ACTION_COOLDOWN_MIN" \
   SERVICE_CONTINUITY_COOLDOWN="$CONTINUITY_COOLDOWN_MIN" \
@@ -1430,6 +1445,7 @@ import plistlib
 arguments = [
     os.environ["SERVICE_SCRIPT"],
     "service-run",
+    *( ["--repo", os.environ["SERVICE_REPO"]] if os.environ["SERVICE_REPO"] else [] ),
     "--interval", os.environ["SERVICE_INTERVAL"],
     "--ref", os.environ["SERVICE_REF"],
     "--max-dispatches-per-hour", os.environ["SERVICE_MAX_DISPATCHES"],
@@ -1607,6 +1623,7 @@ status_daemon() {
 
 parse_common_flags() {
   INTERVAL="$INTERVAL_SECONDS"
+  TARGET_REPO=""
   REF="$DEFAULT_REF"
   MAX_CYCLES="0"
   STALE_PR_HOURS_ARG="$STALE_PR_HOURS"
@@ -1627,6 +1644,10 @@ parse_common_flags() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --repo)
+        TARGET_REPO="${2:-}"
+        shift 2
+        ;;
       --interval)
         INTERVAL="${2:-}"
         shift 2
@@ -1710,6 +1731,11 @@ parse_common_flags() {
         ;;
     esac
   done
+
+  if [[ -n "$TARGET_REPO" && ! "$TARGET_REPO" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
+    echo "Error: --repo must use owner/repo format." >&2
+    exit 1
+  fi
 
   if [[ ! "$INTERVAL" =~ ^[0-9]+$ ]] || [[ "$INTERVAL" -lt 30 ]]; then
     echo "Error: --interval must be an integer >= 30 seconds." >&2
@@ -1857,21 +1883,22 @@ main() {
         "$WAITING_RUN_MIN" \
         "$AUTO_READY_DRAFT_PRS" \
         "$FOLLOW_LOG" \
-        "$TAIL_LINES"
+        "$TAIL_LINES" \
+        "$TARGET_REPO"
       ;;
     run)
       parse_common_flags "$@"
       ensure_prereqs
-      run_loop "$INTERVAL" "$REF" "$MAX_CYCLES"
+      run_loop "$INTERVAL" "$REF" "$MAX_CYCLES" "$TARGET_REPO"
       ;;
     once)
       parse_common_flags "$@"
       ensure_prereqs
-      run_loop "$INTERVAL" "$REF" "1"
+      run_loop "$INTERVAL" "$REF" "1" "$TARGET_REPO"
       ;;
     tui)
       parse_common_flags "$@"
-      tui_mode "$REFRESH_SECONDS" "$TAIL_LINES"
+      tui_mode "$REFRESH_SECONDS" "$TAIL_LINES" "$TARGET_REPO"
       ;;
     install-service)
       parse_common_flags "$@"

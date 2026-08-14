@@ -142,6 +142,9 @@ scripts/agent-cli.sh run --agent self-improvement --task full-loop --reference-r
 # Open local supervisor TUI (interactive)
 scripts/agent-cli.sh service tui --tail-lines 100 --refresh 2
 
+# Assess a new repository in read-only TUI mode before enabling automation
+python3 ./scripts/heartbeat_runner.py --tui --repo acme/widgets --interval 300
+
 # Inspect local supervisor status and logs
 scripts/agent-cli.sh service status
 scripts/agent-cli.sh service logs --tail-lines 120 --follow
@@ -153,12 +156,19 @@ To see all options:
 scripts/agent-cli.sh --help
 ```
 
-When launching `service tui` or dispatching runs, the CLI now performs a
-preflight check to verify:
+When launching `service tui` or dispatching runs, the CLI performs a preflight
+check to verify:
 
 - Manual Agent Runner workflow is accessible
 - Discussions capability is available (or warns if it will fall back to issues)
 - Copilot CLI command availability for local TUI Copilot integration
+
+For a repository that has not yet adopted this automation, start with the
+direct TUI command shown above. It loads a read-only snapshot and lets the
+operator assess repository state, proposed actions, authentication, and
+workflow pressure before granting execution. The managed `service tui` command
+is available after the target repository contains this project's compatible
+GitHub Actions workflows.
 
 ### 8. Run local autonomous heartbeat process
 
@@ -282,6 +292,9 @@ scripts/autonomous-heartbeat.sh start --interval 600
 
 # Open interactive local TUI dashboard
 scripts/autonomous-heartbeat.sh tui --tail-lines 120 --refresh 2
+
+# Supervise a compatible remote repository through the TUI
+scripts/autonomous-heartbeat.sh tui --repo acme/widgets --interval 300
 
 # Check daemon state and latest heartbeat JSON
 scripts/autonomous-heartbeat.sh status
@@ -478,6 +491,29 @@ Run the full interactive TUI:
 
 ```bash
 python3 ./scripts/heartbeat_runner.py --tui --interval 300
+```
+
+### Onboard A Repository Through The TUI
+
+The TUI is the operator-led entry point for a new repository. Begin with a
+read-only assessment; automatic execution is disabled, so the user can inspect
+the repository and decide whether to adopt the automation before any mutation
+is requested:
+
+```bash
+python3 ./scripts/heartbeat_runner.py --tui --repo acme/widgets --interval 300
+```
+
+The initial preview shows the repository queue, PR decisions, workflow
+pressure, model/auth status, and the proposed action plan. Use it to assess the
+repository, then provision the target with this project's compatible GitHub
+Actions workflows and required configuration before granting execution.
+
+After that setup, use the managed TUI command. It validates workflow access
+before it starts:
+
+```bash
+scripts/agent-cli.sh service tui --repo acme/widgets --interval 300
 ```
 
 To explicitly grant automatic execution at startup and run the first guarded
