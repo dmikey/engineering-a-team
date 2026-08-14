@@ -483,7 +483,7 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
             results = heartbeat_runner.recover_failed_workflow_runs(snapshot, state, "owner/repo", dry_run=False)
 
         rerun_mock.assert_not_called()
-        self.assertEqual(results[0]["status"], "skipped")
+        self.assertEqual(results[0]["status"], "ignored")
         self.assertIn("stale workflow code", results[0]["detail"])
 
     def test_actionable_failure_runs_filters_stale_default_branch_failures(self):

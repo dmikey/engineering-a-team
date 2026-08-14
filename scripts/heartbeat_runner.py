@@ -753,7 +753,7 @@ def recover_failed_workflow_runs(
             results.append({
                 "target": f"run:{run_id}",
                 "action": "rerun_failed_workflow",
-                "status": "skipped",
+                "status": "ignored",
                 "detail": stale_reason,
             })
             continue
@@ -2495,7 +2495,7 @@ def _result_color(status: str) -> int:
         return curses.color_pair(1)
     if status == "error":
         return curses.color_pair(2) | curses.A_BOLD
-    if status == "skipped":
+    if status in ("skipped", "ignored"):
         return curses.color_pair(7)
     return curses.color_pair(6)
 
@@ -2900,7 +2900,7 @@ def _draw_full_tui(
             col = curses.color_pair(1)
         elif "| error" in entry or "✗" in entry:
             col = curses.color_pair(2) | curses.A_BOLD
-        elif "| skipped" in entry or "–" in entry:
+        elif "| skipped" in entry or "| ignored" in entry or "–" in entry:
             col = curses.color_pair(7)
         else:
             col = curses.color_pair(6)
@@ -3016,6 +3016,8 @@ def run_tui(
     def _append_log(results: list[dict[str, Any]]) -> None:
         ts = isoformat()
         for r in results:
+            if r.get("status") == "ignored":
+                continue
             status_sym = "✓" if r["status"] == "ok" else ("✗" if r["status"] == "error" else "–")
             _record_action_log(f"{ts}  {r['target']:25} {r['action']:22} | {r['status']} {status_sym}  {r.get('detail','')[:100]}")
 
