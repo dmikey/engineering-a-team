@@ -677,6 +677,21 @@ def unresolved_failure_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def stale_workflow_run_reason(snapshot: dict[str, Any], run: dict[str, Any]) -> str | None:
+    current_sha = str(snapshot.get("repo", {}).get("defaultBranchOid") or "")
+    run_sha = str(run.get("headSha") or "")
+    if current_sha and run_sha and current_sha != run_sha:
+        return f"Run is pinned to stale workflow code ({run_sha[:7]}); current default branch is {current_sha[:7]}. Dispatch a fresh workflow run instead."
+    return None
+
+
+def actionable_failure_runs(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        run for run in unresolved_failure_runs(snapshot.get("runs") or [])
+        if stale_workflow_run_reason(snapshot, run) is None
+    ]
+
+
 def workflow_recovery_attempts(state: dict[str, Any]) -> dict[str, int]:
     attempts = state.setdefault("workflow_recovery_attempts", {})
     if not isinstance(attempts, dict):
@@ -708,14 +723,6 @@ def rerun_workflow_run(repo: str, run_id: int, dry_run: bool) -> str:
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"failed to rerun workflow run {run_id}")
     return result.stdout.strip() or f"Requested rerun of failed jobs for run {run_id}"
-
-
-def stale_workflow_run_reason(snapshot: dict[str, Any], run: dict[str, Any]) -> str | None:
-    current_sha = str(snapshot.get("repo", {}).get("defaultBranchOid") or "")
-    run_sha = str(run.get("headSha") or "")
-    if current_sha and run_sha and current_sha != run_sha:
-        return f"Run is pinned to stale workflow code ({run_sha[:7]}); current default branch is {current_sha[:7]}. Dispatch a fresh workflow run instead."
-    return None
 
 
 def recover_failed_workflow_runs(
@@ -2133,7 +2140,7 @@ def render_overview(snapshot: dict[str, Any], plan: dict[str, Any], results: lis
     issues = snapshot["issues"]
     runs = snapshot["runs"]
     active_runs = [run for run in runs if (run.get("status") or "").lower() in ACTIVE_RUN_STATUSES]
-    unresolved_failures = unresolved_failure_runs(runs)
+    unresolved_failures = actionable_failure_runs(snapshot)
     non_draft = [pr for pr in prs if not pr.get("isDraft")]
     mergeable = [pr for pr in non_draft if pr.get("mergeable") == "MERGEABLE"]
     conflicting = [pr for pr in non_draft if pr.get("mergeable") == "CONFLICTING" or pr.get("mergeStateStatus") == "DIRTY"]
@@ -2279,7 +2286,7 @@ def run_heartbeat_cycle(
     report(f"fetching workflow runs (limit {args.run_limit})", prs=len(prs), drafts=drafts, conflicting=conflicting, mergeable=mergeable, issues=len(issues), unassigned=unassigned)
     runs = fetch_runs(repo_info["nameWithOwner"], args.run_limit)
     active_runs = sum(1 for run in runs if (run.get("status") or "").lower() in ACTIVE_RUN_STATUSES)
-    failing_runs = len(unresolved_failure_runs(runs))
+    failing_runs = len(actionable_failure_runs({"repo": repo_info, "runs": runs}))
     gated_runs = sum(
         1 for run in runs
         if (run.get("status") or "").lower() == "action_required"
@@ -2297,7 +2304,7 @@ def run_heartbeat_cycle(
         "issues": len(issues), "unassigned": unassigned, "runs": len(runs),
         "active_runs": active_runs, "failing_runs": failing_runs, "gated_runs": gated_runs,
     }
-    latest_failure = describe_latest_failure(repo_info["nameWithOwner"], runs)
+    latest_failure = describe_latest_failure(repo_info["nameWithOwner"], actionable_failure_runs({"repo": repo_info, "runs": runs}))
     latest_failure_code = failure_status_code(latest_failure)
     if latest_failure:
         live_context["latest_failure"] = latest_failure
@@ -2533,7 +2540,7 @@ def render_tui_lines(
     issues = snapshot["issues"]
     runs = snapshot["runs"]
     active_runs = [r for r in runs if (r.get("status") or "").lower() in ACTIVE_RUN_STATUSES]
-    failing_runs = unresolved_failure_runs(runs)
+    failing_runs = actionable_failure_runs(snapshot)
     non_draft = [p for p in prs if not p.get("isDraft")]
     mergeable = [p for p in non_draft if p.get("mergeable") == "MERGEABLE"]
     conflicting = [p for p in non_draft if p.get("mergeable") == "CONFLICTING" or p.get("mergeStateStatus") == "DIRTY"]
@@ -2819,7 +2826,7 @@ def _draw_full_tui(
         issues = snapshot["issues"]
         runs = snapshot["runs"]
         active_runs = [r for r in runs if (r.get("status") or "").lower() in ACTIVE_RUN_STATUSES]
-        failing_runs = unresolved_failure_runs(runs)
+        failing_runs = actionable_failure_runs(snapshot)
         unassigned = [i for i in issues if not i.get("assignees")]
 
         _safe_addstr(rp_win, row, 1, f"Models: {meta.get('models_status','?')[:W-mid-6]}", curses.color_pair(1) if "ready" in meta.get("models_status","") else curses.color_pair(3))

@@ -486,6 +486,22 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
         self.assertEqual(results[0]["status"], "skipped")
         self.assertIn("stale workflow code", results[0]["detail"])
 
+    def test_actionable_failure_runs_filters_stale_default_branch_failures(self):
+        snapshot = {
+            "repo": {"nameWithOwner": "owner/repo", "defaultBranchOid": "new-sha"},
+            "runs": [
+                {
+                    "workflowName": "Self-Improvement Loop",
+                    "conclusion": "failure",
+                    "createdAt": "2026-08-13T12:00:00Z",
+                    "databaseId": 31622285931,
+                    "headSha": "old-sha",
+                }
+            ],
+        }
+
+        self.assertEqual(heartbeat_runner.actionable_failure_runs(snapshot), [])
+
     def test_recover_failed_workflow_runs_stops_after_attempt_cap(self):
         snapshot = {
             "repo": {"nameWithOwner": "owner/repo"},
