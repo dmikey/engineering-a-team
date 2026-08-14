@@ -33,7 +33,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'discussion | role-adjustment'
+        description: 'discussion | discussion-reply | role-adjustment'
         required: false
         default: discussion
       topic:
@@ -55,7 +55,7 @@ on:
     inputs:
       mode:
         type: string
-        description: 'discussion | role-adjustment'
+        description: 'discussion | discussion-reply | role-adjustment'
         required: false
         default: discussion
       topic:
@@ -168,6 +168,8 @@ jobs:
           if [ -z "$MODE" ]; then
             if [ "$EVENT_NAME" = "workflow_run" ] && [ "${{ github.event.workflow_run.name }}" = "Task Assignment" ]; then
              MODE="role-adjustment"
+            elif [ "$EVENT_NAME" = "discussion_comment" ]; then
+             MODE="discussion-reply"
             else
              MODE="discussion"
             fi
@@ -203,6 +205,10 @@ jobs:
             CONTEXT="$PR_BODY"
             REF_NUMBER="$PR_NUMBER"
           elif [ "$EVENT_NAME" = "discussion_comment" ]; then
+            COMMENT_LOWER=$(printf '%s' "$DISCUSSION_COMMENT_BODY" | tr '[:upper:]' '[:lower:]')
+            case "$COMMENT_LOWER" in
+              /decision*|"/council decide"*) MODE="discussion" ;;
+            esac
             TOPIC="Discussion #$DISCUSSION_NUMBER: $DISCUSSION_TITLE"
             CONTEXT=$(printf '%s\n\nDiscussion URL: %s\nComment URL: %s\nComment author: %s\n\nComment body:\n%s\n\nOriginal discussion body:\n%s' \
               "A user requested council input by commenting on a GitHub Discussion." \
@@ -685,6 +691,7 @@ jobs:
 
       - name: Post council decision
         id: post-decision
+        if: steps.resolve.outputs.mode != 'discussion-reply'
         uses: ./.github/actions/post-council-results
         with:
           title: ${{ steps.final-record.outputs.title }}
@@ -736,9 +743,7 @@ jobs:
           fi
 
       - name: Reply to originating discussion comment
-        if: |
-          github.event_name == 'discussion_comment' &&
-          steps.resolve.outputs.discussion_reply_id != ''
+        if: steps.resolve.outputs.discussion_reply_id != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DISCUSSION_ID: ${{ steps.resolve.outputs.discussion_reply_id }}
@@ -749,16 +754,25 @@ jobs:
         run: |
           OUTCOME=$(printf '%s\n' "$MODERATOR_RESPONSE" | sed -nE 's/^\*\*Outcome\*\*:[[:space:]]*//p' | head -1)
           if [ -z "$OUTCOME" ]; then
-            OUTCOME="Council response generated; see the linked decision artifact for the full record."
+            OUTCOME="Council response generated."
           fi
-          BODY=$(printf '%s\n\n%s\n\n**Outcome**: %s\n\n**Full council record**: %s\n**Posted as**: %s\n\n%s\n\n---\n%s' \
-            '## 🏛️ Council Reply' \
-            'Casey convened the council in response to this comment.' \
-            "$OUTCOME" \
-            "$DECISION_URL" \
-            "$DECISION_TYPE" \
-            'The full record includes the QA, PM, PO, and moderator perspectives. Keeping this reply short so the discussion thread stays readable.' \
-            '*🤖 Automated council reply · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*')
+          if [ -n "$DECISION_URL" ]; then
+            BODY=$(printf '%s\n\n%s\n\n**Outcome**: %s\n\n**Full council record**: %s\n**Posted as**: %s\n\n%s\n\n---\n%s' \
+              '## 🏛️ Council Reply' \
+              'Casey convened the council in response to this comment.' \
+              "$OUTCOME" \
+              "$DECISION_URL" \
+              "$DECISION_TYPE" \
+              'The full record includes the QA, PM, PO, and moderator perspectives. Keeping this reply short so the discussion thread stays readable.' \
+              '*🤖 Automated council reply · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*')
+          else
+            BODY=$(printf '%s\n\n%s\n\n**Response**: %s\n\n%s\n\n---\n%s' \
+              '## 🏛️ Council Reply' \
+              'Casey convened the council in response to this comment.' \
+              "$OUTCOME" \
+              'No separate decision artifact was created for this conversational reply. Start a comment with `/decision` or `/council decide` when you want a durable council decision record.' \
+              '*🤖 Automated council reply · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*')
+          fi
 
           if [ -n "$REPLY_TO_ID" ]; then
             gh api graphql \

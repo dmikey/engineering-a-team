@@ -197,6 +197,7 @@ def tui_council_inputs(args: argparse.Namespace) -> dict[str, str]:
         topic = (getattr(args, "discussion_topic", "") or "Discussion comment council reply").strip()
         context = (getattr(args, "discussion_context", "") or "Supervisor TUI confirmed discussion-comment reply.").strip()
         inputs = {
+            "mode": (getattr(args, "discussion_mode", "") or "discussion-reply").strip(),
             "topic": topic,
             "context": context,
             "discussion_id": discussion_id,
@@ -3528,6 +3529,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--discussion-reply-to-id", help="Discussion comment node ID for TUI council replies.")
     parser.add_argument("--discussion-topic", help="Topic for a TUI council discussion reply.")
     parser.add_argument("--discussion-context", help="Context for a TUI council discussion reply.")
+    parser.add_argument("--discussion-mode", choices=("discussion-reply", "discussion"), default="discussion-reply", help="Use discussion-reply for in-thread chat or discussion for a durable council decision record.")
     return parser.parse_args()
 
 

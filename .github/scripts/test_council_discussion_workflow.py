@@ -33,6 +33,12 @@ class CouncilDiscussionWorkflowTests(unittest.TestCase):
         self.assertIn("replyToId:$replyToId", self.workflow_text)
         self.assertIn("steps.resolve.outputs.discussion_reply_id", self.workflow_text)
 
+    def test_discussion_replies_do_not_create_decision_artifacts_by_default(self):
+        self.assertIn("MODE=\"discussion-reply\"", self.workflow_text)
+        self.assertIn("if: steps.resolve.outputs.mode != 'discussion-reply'", self.workflow_text)
+        self.assertIn("No separate decision artifact was created", self.workflow_text)
+        self.assertIn("/council decide", self.workflow_text)
+
     def test_discussion_comment_reply_is_concise_not_raw_moderator_dump(self):
         reply_step = self.workflow_text.split("- name: Reply to originating discussion comment", 1)[1]
 
@@ -46,6 +52,7 @@ class CouncilDiscussionWorkflowTests(unittest.TestCase):
         self.assertIn("discussion_reply_to_id:", self.workflow_text)
         self.assertIn("INPUT_DISCUSSION_ID: ${{ inputs.discussion_id }}", self.workflow_text)
         self.assertIn("DISCUSSION_REPLY_ID=\"$INPUT_DISCUSSION_ID\"", self.workflow_text)
+        self.assertIn("if: steps.resolve.outputs.discussion_reply_id != ''", self.workflow_text)
 
 
 if __name__ == "__main__":

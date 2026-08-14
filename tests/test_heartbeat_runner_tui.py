@@ -131,10 +131,12 @@ class HeartbeatRunnerTuiTests(unittest.TestCase):
             discussion_reply_to_id="DC_kwDOTcEQIM4BEwCC",
             discussion_topic="Discussion #1272: SKILL_REMINDERS_OPT_IN assignment",
             discussion_context="User asked to move forward.",
+            discussion_mode="discussion-reply",
         )
 
         inputs = heartbeat_runner.tui_council_inputs(args)
 
+        self.assertEqual(inputs["mode"], "discussion-reply")
         self.assertEqual(inputs["discussion_id"], "D_kwDOTcEQIM4AogB2")
         self.assertEqual(inputs["discussion_reply_to_id"], "DC_kwDOTcEQIM4BEwCC")
         self.assertEqual(inputs["topic"], "Discussion #1272: SKILL_REMINDERS_OPT_IN assignment")
