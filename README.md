@@ -143,7 +143,7 @@ scripts/agent-cli.sh run --agent self-improvement --task full-loop --reference-r
 scripts/agent-cli.sh service tui --tail-lines 100 --refresh 2
 
 # Assess a new repository in read-only TUI mode before enabling automation
-python3 ./scripts/heartbeat_runner.py --tui --repo acme/widgets --interval 300
+python3 ./scripts/heartbeat_runner.py --tui --repo acme/widgets --interval 300 --dry-run
 
 # Inspect local supervisor status and logs
 scripts/agent-cli.sh service status
@@ -166,9 +166,10 @@ check to verify:
 For a repository that has not yet adopted this automation, start with the
 direct TUI command shown above. It loads a read-only snapshot and lets the
 operator assess repository state, proposed actions, authentication, and
-workflow pressure before granting execution. The managed `service tui` command
-is available after the target repository contains this project's compatible
-GitHub Actions workflows.
+workflow pressure without mutating the target. Driving another repository
+requires write access to that repository, including workflow dispatch
+permission. The managed `service tui` command is available after the target
+repository contains this project's compatible GitHub Actions workflows.
 
 ### 8. Run local autonomous heartbeat process
 
@@ -496,12 +497,12 @@ python3 ./scripts/heartbeat_runner.py --tui --interval 300
 ### Onboard A Repository Through The TUI
 
 The TUI is the operator-led entry point for a new repository. Begin with a
-read-only assessment; automatic execution is disabled, so the user can inspect
-the repository and decide whether to adopt the automation before any mutation
-is requested:
+read-only assessment. `--dry-run` keeps the session observational even if the
+operator later confirms a heartbeat, so the user can inspect the repository and
+decide whether to adopt the automation before any mutation is possible:
 
 ```bash
-python3 ./scripts/heartbeat_runner.py --tui --repo acme/widgets --interval 300
+python3 ./scripts/heartbeat_runner.py --tui --repo acme/widgets --interval 300 --dry-run
 ```
 
 The initial preview shows the repository queue, PR decisions, workflow
@@ -509,8 +510,17 @@ pressure, model/auth status, and the proposed action plan. Use it to assess the
 repository, then provision the target with this project's compatible GitHub
 Actions workflows and required configuration before granting execution.
 
+To drive the target repository instead of only observing it, run from a real
+interactive terminal, remove `--dry-run`, and provide credentials with write
+access to the target repository and `actions:write` capability:
+
+```bash
+export GH_USER_PAT=YOUR_TOKEN_WITH_ACTIONS_WRITE
+python3 ./scripts/heartbeat_runner.py --tui --repo acme/widgets --interval 300
+```
+
 After that setup, use the managed TUI command. It validates workflow access
-before it starts:
+before it starts and can dispatch workflows when the token has permission:
 
 ```bash
 scripts/agent-cli.sh service tui --repo acme/widgets --interval 300
@@ -586,7 +596,8 @@ report plus local dedupe state under `.git/heartbeat-runner/`.
 
 For local runs, Copilot CLI uses your authenticated Copilot session. A
 `GH_USER_PAT` with `actions:write` is only needed when the runner dispatches
-workflows:
+workflows. For third-party repositories where you only have read access, keep
+`--dry-run` enabled and treat the TUI as an observer:
 
 ```bash
 export GH_USER_PAT=YOUR_TOKEN
