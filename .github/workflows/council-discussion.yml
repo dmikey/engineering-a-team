@@ -7,6 +7,7 @@
 # Results are posted to GitHub Discussions (or Issues as fallback).
 #
 # Triggers:  issues or PRs labeled "council-review"
+#            discussion comments
 #            Product Owner workflow completion (success)
 #            schedule (weekday product decision sweep)
 #            workflow_dispatch
@@ -24,6 +25,8 @@ on:
     types: [labeled]
   pull_request:
     types: [labeled]
+  discussion_comment:
+    types: [created]
   workflow_run:
     workflows: ["Product Owner Agent", "Task Assignment"]
     types: [completed]
@@ -105,7 +108,10 @@ jobs:
       (github.event_name == 'issues' &&
        contains(github.event.issue.labels.*.name, 'council-review')) ||
       (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'council-review'))
+        contains(github.event.pull_request.labels.*.name, 'council-review')) ||
+            (github.event_name == 'discussion_comment' &&
+        github.event.action == 'created' &&
+        github.actor != 'github-actions[bot]')
 
     outputs:
       decision_url: ${{ steps.post-decision.outputs.url }}
@@ -120,22 +126,44 @@ jobs:
         id: resolve
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_TOPIC: ${{ inputs.topic }}
+          INPUT_CONTEXT: ${{ inputs.context }}
+          INPUT_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          DISCUSSION_NUMBER: ${{ github.event.discussion.number }}
+          DISCUSSION_TITLE: ${{ github.event.discussion.title }}
+          DISCUSSION_BODY: ${{ github.event.discussion.body }}
+          DISCUSSION_URL: ${{ github.event.discussion.html_url }}
+          DISCUSSION_NODE_ID: ${{ github.event.discussion.node_id }}
+          DISCUSSION_COMMENT_BODY: ${{ github.event.comment.body }}
+          DISCUSSION_COMMENT_URL: ${{ github.event.comment.html_url }}
+          DISCUSSION_COMMENT_NODE_ID: ${{ github.event.comment.node_id }}
+          DISCUSSION_COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
         run: |
           # Determine topic
-          MODE="${{ inputs.mode }}"
+          MODE="$INPUT_MODE"
           if [ -z "$MODE" ]; then
-            if [ "${{ github.event_name }}" = "workflow_run" ] && [ "${{ github.event.workflow_run.name }}" = "Task Assignment" ]; then
+            if [ "$EVENT_NAME" = "workflow_run" ] && [ "${{ github.event.workflow_run.name }}" = "Task Assignment" ]; then
              MODE="role-adjustment"
             else
              MODE="discussion"
             fi
           fi
+          DISCUSSION_REPLY_ID=""
+          DISCUSSION_REPLY_TO_ID=""
 
-          if [ -n "${{ inputs.topic }}" ]; then
-            TOPIC="${{ inputs.topic }}"
-            CONTEXT="${{ inputs.context }}"
-            REF_NUMBER="${{ inputs.issue_number }}"
-          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+          if [ -n "$INPUT_TOPIC" ]; then
+            TOPIC="$INPUT_TOPIC"
+            CONTEXT="$INPUT_CONTEXT"
+            REF_NUMBER="$INPUT_ISSUE_NUMBER"
+          elif [ "$EVENT_NAME" = "workflow_run" ]; then
             if [ "$MODE" = "role-adjustment" ]; then
              TOPIC="Dynamic Agent Role Adjustment — Task Assignment run #${{ github.event.workflow_run.run_number }}"
              CONTEXT="Triggered from Task Assignment workflow completion (${{ github.event.workflow_run.html_url }})"
@@ -144,18 +172,31 @@ jobs:
              CONTEXT="Triggered from Product Owner workflow completion (${{ github.event.workflow_run.html_url }})"
             fi
             REF_NUMBER=""
-          elif [ "${{ github.event_name }}" = "schedule" ]; then
+          elif [ "$EVENT_NAME" = "schedule" ]; then
             TOPIC="Daily Product Decision Review"
             CONTEXT="Scheduled council sweep of recent product-owner decisions and feature proposals."
             REF_NUMBER=""
-          elif [ "${{ github.event_name }}" = "issues" ]; then
-            TOPIC="Issue #${{ github.event.issue.number }}: ${{ github.event.issue.title }}"
-            CONTEXT="${{ github.event.issue.body }}"
-            REF_NUMBER="${{ github.event.issue.number }}"
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            TOPIC="PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
-            CONTEXT="${{ github.event.pull_request.body }}"
-            REF_NUMBER="${{ github.event.pull_request.number }}"
+          elif [ "$EVENT_NAME" = "issues" ]; then
+            TOPIC="Issue #$ISSUE_NUMBER: $ISSUE_TITLE"
+            CONTEXT="$ISSUE_BODY"
+            REF_NUMBER="$ISSUE_NUMBER"
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            TOPIC="PR #$PR_NUMBER: $PR_TITLE"
+            CONTEXT="$PR_BODY"
+            REF_NUMBER="$PR_NUMBER"
+          elif [ "$EVENT_NAME" = "discussion_comment" ]; then
+            TOPIC="Discussion #$DISCUSSION_NUMBER: $DISCUSSION_TITLE"
+            CONTEXT=$(printf '%s\n\nDiscussion URL: %s\nComment URL: %s\nComment author: %s\n\nComment body:\n%s\n\nOriginal discussion body:\n%s' \
+              "A user requested council input by commenting on a GitHub Discussion." \
+              "$DISCUSSION_URL" \
+              "$DISCUSSION_COMMENT_URL" \
+              "$DISCUSSION_COMMENT_AUTHOR" \
+              "$DISCUSSION_COMMENT_BODY" \
+              "$DISCUSSION_BODY"
+            )
+            REF_NUMBER=""
+            DISCUSSION_REPLY_ID="$DISCUSSION_NODE_ID"
+            DISCUSSION_REPLY_TO_ID="$DISCUSSION_COMMENT_NODE_ID"
           else
             TOPIC="Council Review — ${{ github.run_id }}"
             CONTEXT=""
@@ -178,6 +219,8 @@ jobs:
             echo "mode=$MODE"
             echo "topic=$TOPIC"
             echo "ref_number=$REF_NUMBER"
+            echo "discussion_reply_id=$DISCUSSION_REPLY_ID"
+            echo "discussion_reply_to_id=$DISCUSSION_REPLY_TO_ID"
             echo "current_date=$CURRENT_DATE"
             echo "base_context<<COUNCIL_CTX_EOF"
             echo "## Topic"
@@ -672,4 +715,38 @@ jobs:
             gh issue comment "$REF_NUMBER" --body "$COMMENT" 2>/dev/null || true
           elif [ -n "$REF_NUMBER" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
             gh pr comment "$REF_NUMBER" --body "$COMMENT" 2>/dev/null || true
+          fi
+
+      - name: Reply to originating discussion comment
+        if: |
+          github.event_name == 'discussion_comment' &&
+          steps.resolve.outputs.discussion_reply_id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISCUSSION_ID: ${{ steps.resolve.outputs.discussion_reply_id }}
+          REPLY_TO_ID: ${{ steps.resolve.outputs.discussion_reply_to_id }}
+          DECISION_URL: ${{ steps.post-decision.outputs.url }}
+          DECISION_TYPE: ${{ steps.post-decision.outputs.type }}
+          MODERATOR_RESPONSE: ${{ steps.moderator.outputs.response }}
+        run: |
+          SUMMARY=$(printf '%s\n' "$MODERATOR_RESPONSE" | head -40)
+          BODY=$(printf '%s\n\n%s\n\n**Decision artifact**: %s\n**Posted as**: %s\n\n%s\n\n---\n%s' \
+            '## 🏛️ Council Reply' \
+            'Casey convened the council in response to this discussion comment.' \
+            "$DECISION_URL" \
+            "$DECISION_TYPE" \
+            "$SUMMARY" \
+            '*🤖 Automated council reply · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*')
+
+          if [ -n "$REPLY_TO_ID" ]; then
+            gh api graphql \
+              -f query='mutation($discussionId:ID!,$replyToId:ID!,$body:String!){addDiscussionComment(input:{discussionId:$discussionId,replyToId:$replyToId,body:$body}){comment{url}}}' \
+              -f discussionId="$DISCUSSION_ID" \
+              -f replyToId="$REPLY_TO_ID" \
+              -f body="$BODY"
+          else
+            gh api graphql \
+              -f query='mutation($discussionId:ID!,$body:String!){addDiscussionComment(input:{discussionId:$discussionId,body:$body}){comment{url}}}' \
+              -f discussionId="$DISCUSSION_ID" \
+              -f body="$BODY"
           fi
