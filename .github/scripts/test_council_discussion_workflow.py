@@ -33,6 +33,12 @@ class CouncilDiscussionWorkflowTests(unittest.TestCase):
         self.assertIn("replyToId:$replyToId", self.workflow_text)
         self.assertIn("steps.resolve.outputs.discussion_reply_id", self.workflow_text)
 
+    def test_workflow_dispatch_can_backfill_existing_discussion_comment(self):
+        self.assertIn("discussion_id:", self.workflow_text)
+        self.assertIn("discussion_reply_to_id:", self.workflow_text)
+        self.assertIn("INPUT_DISCUSSION_ID: ${{ inputs.discussion_id }}", self.workflow_text)
+        self.assertIn("DISCUSSION_REPLY_ID=\"$INPUT_DISCUSSION_ID\"", self.workflow_text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

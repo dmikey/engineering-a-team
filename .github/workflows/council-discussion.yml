@@ -45,6 +45,12 @@ on:
       issue_number:
         description: 'Related issue or PR number (optional)'
         required: false
+      discussion_id:
+        description: 'Discussion node ID to reply into (optional backfill)'
+        required: false
+      discussion_reply_to_id:
+        description: 'Discussion comment node ID to reply to (optional backfill)'
+        required: false
   workflow_call:
     inputs:
       mode:
@@ -63,6 +69,14 @@ on:
       issue_number:
         type: string
         description: 'Related issue or PR number'
+        required: false
+      discussion_id:
+        type: string
+        description: 'Discussion node ID to reply into'
+        required: false
+      discussion_reply_to_id:
+        type: string
+        description: 'Discussion comment node ID to reply to'
         required: false
     outputs:
       decision_url:
@@ -131,6 +145,8 @@ jobs:
           INPUT_TOPIC: ${{ inputs.topic }}
           INPUT_CONTEXT: ${{ inputs.context }}
           INPUT_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          INPUT_DISCUSSION_ID: ${{ inputs.discussion_id }}
+          INPUT_DISCUSSION_REPLY_TO_ID: ${{ inputs.discussion_reply_to_id }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
@@ -163,6 +179,8 @@ jobs:
             TOPIC="$INPUT_TOPIC"
             CONTEXT="$INPUT_CONTEXT"
             REF_NUMBER="$INPUT_ISSUE_NUMBER"
+            DISCUSSION_REPLY_ID="$INPUT_DISCUSSION_ID"
+            DISCUSSION_REPLY_TO_ID="$INPUT_DISCUSSION_REPLY_TO_ID"
           elif [ "$EVENT_NAME" = "workflow_run" ]; then
             if [ "$MODE" = "role-adjustment" ]; then
              TOPIC="Dynamic Agent Role Adjustment — Task Assignment run #${{ github.event.workflow_run.run_number }}"
