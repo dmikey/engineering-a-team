@@ -125,6 +125,26 @@ class HeartbeatRunnerTuiTests(unittest.TestCase):
         self.assertEqual(state, "cancelled")
         self.assertIsNone(confirmed_action)
 
+    def test_tui_council_inputs_include_discussion_reply_ids_when_supplied(self):
+        args = SimpleNamespace(
+            discussion_id="D_kwDOTcEQIM4AogB2",
+            discussion_reply_to_id="DC_kwDOTcEQIM4BEwCC",
+            discussion_topic="Discussion #1272: SKILL_REMINDERS_OPT_IN assignment",
+            discussion_context="User asked to move forward.",
+        )
+
+        inputs = heartbeat_runner.tui_council_inputs(args)
+
+        self.assertEqual(inputs["discussion_id"], "D_kwDOTcEQIM4AogB2")
+        self.assertEqual(inputs["discussion_reply_to_id"], "DC_kwDOTcEQIM4BEwCC")
+        self.assertEqual(inputs["topic"], "Discussion #1272: SKILL_REMINDERS_OPT_IN assignment")
+
+    def test_tui_council_inputs_default_to_general_council_dispatch(self):
+        inputs = heartbeat_runner.tui_council_inputs(SimpleNamespace())
+
+        self.assertNotIn("discussion_id", inputs)
+        self.assertIn("Manual agent council", inputs["topic"])
+
     def test_tui_heartbeat_runs_only_after_confirmation_and_outside_chat(self):
         self.assertFalse(heartbeat_runner.should_run_tui_heartbeat(False, False))
         self.assertFalse(heartbeat_runner.should_run_tui_heartbeat(True, True))

@@ -190,6 +190,26 @@ def tui_confirmation_message(action: str) -> str:
     return f"Confirm: {TUI_ACTION_LABELS[action]}? y=confirm n=cancel"
 
 
+def tui_council_inputs(args: argparse.Namespace) -> dict[str, str]:
+    discussion_id = (getattr(args, "discussion_id", "") or "").strip()
+    reply_to_id = (getattr(args, "discussion_reply_to_id", "") or "").strip()
+    if discussion_id:
+        topic = (getattr(args, "discussion_topic", "") or "Discussion comment council reply").strip()
+        context = (getattr(args, "discussion_context", "") or "Supervisor TUI confirmed discussion-comment reply.").strip()
+        inputs = {
+            "topic": topic,
+            "context": context,
+            "discussion_id": discussion_id,
+        }
+        if reply_to_id:
+            inputs["discussion_reply_to_id"] = reply_to_id
+        return inputs
+    return {
+        "topic": "Manual agent council: review open PRs, priorities, and team alignment.",
+        "context": "Supervisor TUI confirmed dispatch.",
+    }
+
+
 def tui_automatic_action(automatic_enabled: bool) -> str:
     return "disable_automatic" if automatic_enabled else "enable_automatic"
 
@@ -3434,8 +3454,8 @@ def run_tui(
                     elif confirmed_action == "council":
                         _trigger_dispatch(
                             "council-discussion.yml",
-                            {"topic": "Manual agent council: review open PRs, priorities, and team alignment.", "context": "Supervisor TUI confirmed dispatch."},
-                            "Council meeting",
+                            tui_council_inputs(args),
+                            "Council discussion reply" if getattr(args, "discussion_id", "") else "Council meeting",
                         )
                     elif confirmed_action == "project_manager":
                         _trigger_dispatch("project-manager.yml", {"task": "full-sprint-report"}, "PM sprint report")
@@ -3504,6 +3524,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tui", action="store_true", help="Run an interactive terminal UI with live heartbeat status.")
     parser.add_argument("--tui-auto", action="store_true", help="Start TUI automatic mode immediately under an explicit command-line grant.")
     parser.add_argument("--tui-plain", action="store_true", help="Force plain-text TUI rendering without colors or panel layout.")
+    parser.add_argument("--discussion-id", help="Discussion node ID for TUI council replies.")
+    parser.add_argument("--discussion-reply-to-id", help="Discussion comment node ID for TUI council replies.")
+    parser.add_argument("--discussion-topic", help="Topic for a TUI council discussion reply.")
+    parser.add_argument("--discussion-context", help="Context for a TUI council discussion reply.")
     return parser.parse_args()
 
 

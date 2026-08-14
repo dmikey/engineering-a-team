@@ -545,6 +545,18 @@ TUI controls:
 - `y` / `n`: confirm or cancel the pending execution request
 - `/`: open local agent chat
 
+To have the TUI dispatch a council reply to a specific existing Discussion
+comment, launch it with the Discussion node IDs, press `c`, then confirm with
+`y`:
+
+```bash
+python3 ./scripts/heartbeat_runner.py --tui --repo dmikey/engineering-a-team \
+  --discussion-id D_kwDOTcEQIM4AogB2 \
+  --discussion-reply-to-id DC_kwDOTcEQIM4BEwCC \
+  --discussion-topic "Discussion #1272: SKILL_REMINDERS_OPT_IN assignment" \
+  --discussion-context "User asked: Let's move forward with assigning this SKILL_REMINDERS_OPT_IN"
+```
+
 TUI mode starts under operator control with automatic execution disabled.
 On startup it loads a read-only repository preview so the queue, workflow
 pressure, and heuristic decisions are visible before the operator grants any
