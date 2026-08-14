@@ -747,13 +747,17 @@ jobs:
           DECISION_TYPE: ${{ steps.post-decision.outputs.type }}
           MODERATOR_RESPONSE: ${{ steps.moderator.outputs.response }}
         run: |
-          SUMMARY=$(printf '%s\n' "$MODERATOR_RESPONSE" | head -40)
-          BODY=$(printf '%s\n\n%s\n\n**Decision artifact**: %s\n**Posted as**: %s\n\n%s\n\n---\n%s' \
+          OUTCOME=$(printf '%s\n' "$MODERATOR_RESPONSE" | sed -nE 's/^\*\*Outcome\*\*:[[:space:]]*//p' | head -1)
+          if [ -z "$OUTCOME" ]; then
+            OUTCOME="Council response generated; see the linked decision artifact for the full record."
+          fi
+          BODY=$(printf '%s\n\n%s\n\n**Outcome**: %s\n\n**Full council record**: %s\n**Posted as**: %s\n\n%s\n\n---\n%s' \
             '## 🏛️ Council Reply' \
-            'Casey convened the council in response to this discussion comment.' \
+            'Casey convened the council in response to this comment.' \
+            "$OUTCOME" \
             "$DECISION_URL" \
             "$DECISION_TYPE" \
-            "$SUMMARY" \
+            'The full record includes the QA, PM, PO, and moderator perspectives. Keeping this reply short so the discussion thread stays readable.' \
             '*🤖 Automated council reply · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*')
 
           if [ -n "$REPLY_TO_ID" ]; then

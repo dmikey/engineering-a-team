@@ -33,6 +33,14 @@ class CouncilDiscussionWorkflowTests(unittest.TestCase):
         self.assertIn("replyToId:$replyToId", self.workflow_text)
         self.assertIn("steps.resolve.outputs.discussion_reply_id", self.workflow_text)
 
+    def test_discussion_comment_reply_is_concise_not_raw_moderator_dump(self):
+        reply_step = self.workflow_text.split("- name: Reply to originating discussion comment", 1)[1]
+
+        self.assertIn("OUTCOME=$(printf", reply_step)
+        self.assertIn("Full council record", reply_step)
+        self.assertIn("Keeping this reply short", reply_step)
+        self.assertNotIn("head -40", reply_step)
+
     def test_workflow_dispatch_can_backfill_existing_discussion_comment(self):
         self.assertIn("discussion_id:", self.workflow_text)
         self.assertIn("discussion_reply_to_id:", self.workflow_text)
