@@ -186,6 +186,15 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
         self.assertNotIn("GITHUB_TOKEN", env)
         self.assertEqual(source, "gh-auth")
 
+    def test_default_branch_oid_reads_branch_commit_sha(self):
+        branch_response = {"commit": {"sha": "abc123"}}
+
+        with mock.patch.object(heartbeat_runner, "gh_json", return_value=branch_response) as gh_json_mock:
+            oid = heartbeat_runner.default_branch_oid("owner/repo", "feature/main")
+
+        self.assertEqual(oid, "abc123")
+        self.assertIn("feature%2Fmain", gh_json_mock.call_args.args[0][1])
+
     def test_auth_block_cooldown_remaining_bypasses_legacy_event_on_gh_auth(self):
         state = {
             "events": {
@@ -434,13 +443,14 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
 
     def test_recover_failed_workflow_runs_reruns_latest_failure(self):
         snapshot = {
-            "repo": {"nameWithOwner": "owner/repo"},
+            "repo": {"nameWithOwner": "owner/repo", "defaultBranchOid": "abc123"},
             "runs": [
                 {
                     "workflowName": "Self-Improvement Loop",
                     "conclusion": "failure",
                     "createdAt": "2026-08-13T12:00:00Z",
                     "databaseId": 31622285931,
+                    "headSha": "abc123",
                 }
             ],
         }
@@ -453,6 +463,28 @@ class AutonomousHeartbeatCliTests(unittest.TestCase):
         self.assertEqual(results[0]["status"], "ok")
         self.assertEqual(results[0]["action"], "rerun_failed_workflow")
         self.assertEqual(state["workflow_recovery_attempts"]["Self-Improvement Loop"], 1)
+
+    def test_recover_failed_workflow_runs_skips_stale_run_sha(self):
+        snapshot = {
+            "repo": {"nameWithOwner": "owner/repo", "defaultBranchOid": "new-sha"},
+            "runs": [
+                {
+                    "workflowName": "Self-Improvement Loop",
+                    "conclusion": "failure",
+                    "createdAt": "2026-08-13T12:00:00Z",
+                    "databaseId": 31622285931,
+                    "headSha": "old-sha",
+                }
+            ],
+        }
+        state = {}
+
+        with mock.patch.object(heartbeat_runner, "rerun_workflow_run") as rerun_mock:
+            results = heartbeat_runner.recover_failed_workflow_runs(snapshot, state, "owner/repo", dry_run=False)
+
+        rerun_mock.assert_not_called()
+        self.assertEqual(results[0]["status"], "skipped")
+        self.assertIn("stale workflow code", results[0]["detail"])
 
     def test_recover_failed_workflow_runs_stops_after_attempt_cap(self):
         snapshot = {

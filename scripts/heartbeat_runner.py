@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 DEFAULT_MODEL = "gpt-5-mini"
 DEFAULT_MODEL_EVERY = 3
@@ -315,22 +316,44 @@ def git_dir() -> Path:
     return (repo_root / ".git").resolve()
 
 
+def default_branch_oid(repo: str, branch: str) -> str:
+    if not repo or not branch:
+        return ""
+    branch_info = gh_json(
+        ["api", f"repos/{repo}/branches/{quote(branch, safe='')}"],
+        default={},
+        check=False,
+    )
+    return str(((branch_info or {}).get("commit") or {}).get("sha") or "")
+
+
 def resolve_repo(explicit_repo: str | None) -> dict[str, str]:
     if explicit_repo:
         owner, name = explicit_repo.split("/", 1)
-        default_branch = gh_json(
-            ["repo", "view", explicit_repo, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"],
-            default="main",
+        info = gh_json(
+            ["repo", "view", explicit_repo, "--json", "defaultBranchRef"],
+            default={},
             check=False,
         )
-        return {"nameWithOwner": explicit_repo, "owner": owner, "name": name, "defaultBranch": default_branch or "main"}
+        default_branch_ref = (info or {}).get("defaultBranchRef") or {}
+        default_branch = default_branch_ref.get("name") or "main"
+        return {
+            "nameWithOwner": explicit_repo,
+            "owner": owner,
+            "name": name,
+            "defaultBranch": default_branch,
+            "defaultBranchOid": default_branch_ref.get("target", {}).get("oid") or default_branch_oid(explicit_repo, default_branch),
+        }
 
     info = gh_json(["repo", "view", "--json", "nameWithOwner,owner,name,defaultBranchRef"])
+    repo = info["nameWithOwner"]
+    default_branch = info["defaultBranchRef"]["name"]
     return {
-        "nameWithOwner": info["nameWithOwner"],
+        "nameWithOwner": repo,
         "owner": info["owner"]["login"],
         "name": info["name"],
-        "defaultBranch": info["defaultBranchRef"]["name"],
+        "defaultBranch": default_branch,
+        "defaultBranchOid": info["defaultBranchRef"].get("target", {}).get("oid") or default_branch_oid(repo, default_branch),
     }
 
 
@@ -634,7 +657,7 @@ def fetch_runs(repo: str, limit: int) -> list[dict[str, Any]]:
             "--limit",
             str(limit),
             "--json",
-            "databaseId,workflowName,status,conclusion,event,displayTitle,createdAt,headBranch,url",
+            "databaseId,workflowName,status,conclusion,event,displayTitle,createdAt,headBranch,headSha,url",
         ],
         default=[],
         check=False,
@@ -687,6 +710,14 @@ def rerun_workflow_run(repo: str, run_id: int, dry_run: bool) -> str:
     return result.stdout.strip() or f"Requested rerun of failed jobs for run {run_id}"
 
 
+def stale_workflow_run_reason(snapshot: dict[str, Any], run: dict[str, Any]) -> str | None:
+    current_sha = str(snapshot.get("repo", {}).get("defaultBranchOid") or "")
+    run_sha = str(run.get("headSha") or "")
+    if current_sha and run_sha and current_sha != run_sha:
+        return f"Run is pinned to stale workflow code ({run_sha[:7]}); current default branch is {current_sha[:7]}. Dispatch a fresh workflow run instead."
+    return None
+
+
 def recover_failed_workflow_runs(
     snapshot: dict[str, Any],
     state: dict[str, Any],
@@ -709,6 +740,15 @@ def recover_failed_workflow_runs(
         workflow = str(run.get("workflowName") or "Unknown workflow")
         run_id = run.get("databaseId")
         if not run_id:
+            continue
+        stale_reason = stale_workflow_run_reason(snapshot, run)
+        if stale_reason:
+            results.append({
+                "target": f"run:{run_id}",
+                "action": "rerun_failed_workflow",
+                "status": "skipped",
+                "detail": stale_reason,
+            })
             continue
         attempts = int(attempts_by_workflow.get(workflow, 0))
         if attempts >= WORKFLOW_RECOVERY_MAX_ATTEMPTS:
